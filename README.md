@@ -46,6 +46,8 @@ cargo test -p proxy-core --test server_mock -- streaming_stress_250_agents --ign
 
 Launching the macOS app installs a temporary managed `claude` command shim. New `claude` sessions route through the proxy only while the app is running and the proxy health check passes. If the app quits cleanly, the original `claude` command is restored. If the app crashes, the shim falls back to the original Claude command without proxy environment variables.
 
+The proxy will not start while existing Claude Code sessions are running. Close active Claude Code sessions first, then start the proxy so new sessions consistently inherit the proxy environment.
+
 The permanent `~/.claude/settings.json` workflow remains available as an advanced option in the app, or through the development CLI after authenticating:
 
 ```sh

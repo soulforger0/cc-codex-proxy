@@ -107,6 +107,12 @@ pub struct ClaudeShimRestoreSkip {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveClaudeSession {
+    pub pid: u32,
+    pub command: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeSettingsPreview {
@@ -188,6 +194,39 @@ pub fn restore_latest_backup(path: &Path) -> Result<Option<PathBuf>> {
     };
     fs::copy(&latest, path)?;
     Ok(Some(latest))
+}
+
+pub fn live_claude_sessions() -> Result<Vec<LiveClaudeSession>> {
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "pid=,args="])
+        .output()?;
+    if !output.status.success() {
+        return Err(ProxyError::Config(
+            "failed to inspect running processes for Claude Code sessions".into(),
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_live_claude_sessions(&stdout, std::process::id()))
+}
+
+pub fn live_claude_sessions_message(sessions: &[LiveClaudeSession]) -> String {
+    let mut message = String::from(
+        "Claude Code is already running. Close all Claude Code sessions before starting the proxy.",
+    );
+    if !sessions.is_empty() {
+        message.push_str("\n\nRunning Claude Code processes:");
+        for session in sessions.iter().take(8) {
+            message.push_str(&format!(
+                "\n- pid {}: {}",
+                session.pid,
+                truncate_command(&session.command)
+            ));
+        }
+        if sessions.len() > 8 {
+            message.push_str(&format!("\n- and {} more", sessions.len() - 8));
+        }
+    }
+    message
 }
 
 pub fn install_shim(
@@ -492,6 +531,55 @@ fn dedupe_paths(paths: &mut Vec<PathBuf>) {
         }
     }
     *paths = deduped;
+}
+
+fn parse_live_claude_sessions(ps_output: &str, current_pid: u32) -> Vec<LiveClaudeSession> {
+    ps_output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let (pid, command) = trimmed.split_once(char::is_whitespace)?;
+            let pid = pid.parse::<u32>().ok()?;
+            if pid == current_pid {
+                return None;
+            }
+            let command = command.trim();
+            if is_claude_code_command(command) {
+                Some(LiveClaudeSession {
+                    pid,
+                    command: command.to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn is_claude_code_command(command: &str) -> bool {
+    let Some(program) = command.split_whitespace().next() else {
+        return false;
+    };
+    let Some(file_name) = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    matches!(
+        file_name.to_ascii_lowercase().as_str(),
+        "claude" | "claude.exe"
+    )
+}
+
+fn truncate_command(command: &str) -> String {
+    const MAX_LEN: usize = 140;
+    if command.chars().count() <= MAX_LEN {
+        return command.to_string();
+    }
+    let mut truncated = command.chars().take(MAX_LEN - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 fn capture_original_claude(path: &Path) -> Result<CapturedOriginal> {
@@ -832,6 +920,38 @@ mod tests {
         assert_eq!(values["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "272000");
         assert_eq!(values["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
         assert_eq!(values["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"], "1");
+    }
+
+    #[test]
+    fn live_session_parser_matches_real_claude_processes_only() {
+        let output = r#"
+          10 /Users/me/.nvm/versions/node/v22/bin/claude
+          11 /Users/me/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --continue
+          12 /Users/me/app/cc-codex-proxy claude launch --real-claude /Users/me/.local/bin/claude
+          13 /bin/zsh -lc echo claude
+          14 /Applications/CCCodexProxy.app/Contents/MacOS/CCCodexProxy
+        "#;
+
+        let sessions = parse_live_claude_sessions(output, 99);
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].pid, 10);
+        assert_eq!(sessions[1].pid, 11);
+    }
+
+    #[test]
+    fn live_session_parser_excludes_current_pid() {
+        let output = "42 /Users/me/.local/bin/claude\n43 /Users/me/.local/bin/claude";
+
+        let sessions = parse_live_claude_sessions(output, 42);
+
+        assert_eq!(
+            sessions,
+            vec![LiveClaudeSession {
+                pid: 43,
+                command: "/Users/me/.local/bin/claude".into(),
+            }]
+        );
     }
 
     #[cfg(unix)]

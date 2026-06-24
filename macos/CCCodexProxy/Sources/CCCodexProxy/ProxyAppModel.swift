@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import SwiftUI
 
 @MainActor
@@ -67,6 +68,15 @@ final class ProxyAppModel: ObservableObject {
 
     func startProxy() async {
         guard proxyProcess == nil else { return }
+        do {
+            _ = try await runCLI(["claude", "check-live-sessions"])
+        } catch {
+            let detail = error.localizedDescription
+            lastMessage = "Proxy not started because Claude Code is running."
+            showLiveClaudeSessionAlert(detail: detail)
+            return
+        }
+
         let process = Process()
         process.arguments = ["serve", "--port", "\(port)"]
         do {
@@ -196,6 +206,17 @@ final class ProxyAppModel: ObservableObject {
 
     func openProjectPage() {
         NSWorkspace.shared.open(URL(string: "https://github.com/soulforger0/cc-codex-proxy")!)
+    }
+
+    private func showLiveClaudeSessionAlert(detail: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Close Claude Code before starting the proxy"
+        alert.informativeText = detail.isEmpty
+            ? "A Claude Code session is already running. Close all Claude Code sessions, then start the proxy again."
+            : detail
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func runCLI(_ arguments: [String], allowFailure: Bool = false) async throws -> String {

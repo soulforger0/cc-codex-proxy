@@ -3,9 +3,9 @@ use clap::{Args, Parser, Subcommand};
 use proxy_core::{
     auth::{browser_login, default_oauth_options, AuthManager, FileTokenStore, OAuthRefreshClient},
     claude::{
-        default_settings_path, install_settings, install_shim, managed_env_strings,
-        preview_settings, restore_latest_backup, restore_shim, ClaudeSettingsOptions,
-        ClaudeShimInstallOptions, MANAGED_ENV_KEYS,
+        default_settings_path, install_settings, install_shim, live_claude_sessions,
+        live_claude_sessions_message, managed_env_strings, preview_settings, restore_latest_backup,
+        restore_shim, ClaudeSettingsOptions, ClaudeShimInstallOptions, MANAGED_ENV_KEYS,
     },
     config::{AppConfig, DEFAULT_PORT},
     logging,
@@ -67,6 +67,7 @@ enum ClaudeSubcommand {
     RestoreSettings,
     InstallShim(InstallShimArgs),
     RestoreShim,
+    CheckLiveSessions,
     Launch(LaunchArgs),
 }
 
@@ -146,6 +147,7 @@ async fn main() -> Result<()> {
 }
 
 async fn cmd_serve(args: ServeArgs) -> Result<()> {
+    exit_if_live_claude_sessions()?;
     let (mut config, paths) = AppConfig::load_default()?;
     if let Some(port) = args.port {
         config.port = port;
@@ -297,6 +299,15 @@ async fn cmd_claude(args: ClaudeCommand) -> Result<()> {
                 }
             }
         }
+        ClaudeSubcommand::CheckLiveSessions => {
+            let sessions = live_claude_sessions()?;
+            if sessions.is_empty() {
+                println!("No live Claude Code sessions found.");
+            } else {
+                eprintln!("{}", live_claude_sessions_message(&sessions));
+                std::process::exit(2);
+            }
+        }
         ClaudeSubcommand::Launch(args) => {
             launch_claude(args).await?;
         }
@@ -311,6 +322,15 @@ fn claude_settings_options(args: InstallSettingsArgs) -> ClaudeSettingsOptions {
         small_fast_model: args.small_model,
         auto_compact_window: args.auto_compact_window,
     }
+}
+
+fn exit_if_live_claude_sessions() -> Result<()> {
+    let sessions = live_claude_sessions()?;
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    eprintln!("{}", live_claude_sessions_message(&sessions));
+    std::process::exit(2);
 }
 
 async fn launch_claude(args: LaunchArgs) -> Result<()> {
