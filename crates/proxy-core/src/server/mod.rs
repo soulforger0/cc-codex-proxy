@@ -11,6 +11,7 @@ use crate::{
     error::{ProxyError, Result},
     model::ModelRegistry,
 };
+use async_stream::try_stream;
 use axum::{
     body::Body,
     extract::{Json, State},
@@ -19,12 +20,17 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use serde_json::{json, Value};
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const SSE_HEARTBEAT_COMMENT: &[u8] = b": heartbeat\n\n";
 
 #[derive(Clone)]
 struct AppState {
@@ -181,7 +187,7 @@ async fn messages(
             tool_catalog,
             Some(request_id),
         );
-        let body = Body::from_stream(stream);
+        let body = Body::from_stream(with_sse_heartbeats(stream, SSE_HEARTBEAT_INTERVAL));
         Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
@@ -204,6 +210,30 @@ async fn messages(
             .body(Body::from(response_json(response).to_string()))
             .map_err(|err| ProxyError::Transport(format!("failed to build response: {err}")))
     }
+}
+
+fn with_sse_heartbeats(
+    stream: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
+    interval: Duration,
+) -> Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> {
+    Box::pin(try_stream! {
+        futures_util::pin_mut!(stream);
+        loop {
+            let sleep = tokio::time::sleep(interval);
+            tokio::pin!(sleep);
+            tokio::select! {
+                item = stream.next() => {
+                    match item {
+                        Some(item) => yield item?,
+                        None => break,
+                    }
+                }
+                _ = &mut sleep => {
+                    yield Bytes::from_static(SSE_HEARTBEAT_COMMENT);
+                }
+            }
+        }
+    })
 }
 
 fn summarize_anthropic_tool_names(tools: Option<&[AnthropicTool]>) -> String {
@@ -297,5 +327,126 @@ fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<()> {
         Err(ProxyError::InvalidRequest(
             "missing or invalid admin token".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{stream, StreamExt};
+
+    fn boxed<S>(stream: S) -> Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>
+    where
+        S: Stream<Item = Result<Bytes>> + Send + 'static,
+    {
+        Box::pin(stream)
+    }
+
+    #[tokio::test]
+    async fn heartbeat_is_not_sent_immediately() {
+        let mut stream = with_sse_heartbeats(boxed(stream::pending()), Duration::from_millis(50));
+
+        let result = tokio::time::timeout(Duration::from_millis(10), stream.next()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_is_sent_after_idle_interval() {
+        let mut stream = with_sse_heartbeats(boxed(stream::pending()), Duration::from_millis(10));
+
+        let chunk = tokio::time::timeout(Duration::from_millis(50), stream.next())
+            .await
+            .expect("heartbeat should be emitted")
+            .expect("stream should stay open")
+            .expect("heartbeat should be ok");
+        assert_eq!(chunk, Bytes::from_static(SSE_HEARTBEAT_COMMENT));
+    }
+
+    #[tokio::test]
+    async fn heartbeats_repeat_during_long_idle_periods() {
+        let mut stream = with_sse_heartbeats(boxed(stream::pending()), Duration::from_millis(10));
+
+        for _ in 0..2 {
+            let chunk = tokio::time::timeout(Duration::from_millis(50), stream.next())
+                .await
+                .expect("heartbeat should be emitted")
+                .expect("stream should stay open")
+                .expect("heartbeat should be ok");
+            assert_eq!(chunk, Bytes::from_static(SSE_HEARTBEAT_COMMENT));
+        }
+    }
+
+    #[tokio::test]
+    async fn forwarded_chunks_reset_heartbeat_timer() {
+        let event = Bytes::from_static(b"event: message_start\ndata: {}\n\n");
+        let expected = event.clone();
+        let source = stream::once(async move { Ok(event) }).chain(stream::pending());
+        let mut stream = with_sse_heartbeats(boxed(source), Duration::from_millis(30));
+
+        let first = stream
+            .next()
+            .await
+            .expect("event should be forwarded")
+            .expect("event should be ok");
+        assert_eq!(first, expected);
+
+        let early = tokio::time::timeout(Duration::from_millis(10), stream.next()).await;
+        assert!(
+            early.is_err(),
+            "heartbeat should wait for a fresh idle interval"
+        );
+
+        let heartbeat = tokio::time::timeout(Duration::from_millis(50), stream.next())
+            .await
+            .expect("heartbeat should be emitted after reset interval")
+            .expect("stream should stay open")
+            .expect("heartbeat should be ok");
+        assert_eq!(heartbeat, Bytes::from_static(SSE_HEARTBEAT_COMMENT));
+    }
+
+    #[tokio::test]
+    async fn completed_stream_does_not_emit_trailing_heartbeat() {
+        let mut stream = with_sse_heartbeats(boxed(stream::empty()), Duration::from_millis(10));
+
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_errors_are_forwarded() {
+        let mut stream = with_sse_heartbeats(
+            boxed(stream::iter(vec![Err(ProxyError::Transport(
+                "boom".into(),
+            ))])),
+            Duration::from_millis(10),
+        );
+
+        let err = stream
+            .next()
+            .await
+            .expect("error should be forwarded")
+            .expect_err("item should be an error");
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_comment_is_inserted_between_complete_sse_frames() {
+        let first =
+            Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n");
+        let second =
+            Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        let source = stream::once(async move { Ok(first) }).chain(stream::once(async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(second)
+        }));
+        let mut stream = with_sse_heartbeats(boxed(source), Duration::from_millis(10));
+
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            body.extend_from_slice(&chunk.expect("chunk should be ok"));
+        }
+        let body = String::from_utf8(body).expect("SSE body should be UTF-8");
+
+        assert!(body.contains("event: message_start\ndata: {\"type\":\"message_start\"}\n\n: heartbeat\n\nevent: message_stop"));
+        assert!(body.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
     }
 }

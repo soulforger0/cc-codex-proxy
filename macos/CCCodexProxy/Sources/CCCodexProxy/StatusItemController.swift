@@ -48,11 +48,12 @@ final class StatusItemController: NSObject {
 
     private func configurePopover() {
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 420, height: 640)
+        popover.animates = true
+        popover.contentSize = NSSize(width: 440, height: 660)
         popover.contentViewController = NSHostingController(
             rootView: ContentView()
                 .environmentObject(model)
-                .frame(width: 420, height: 640)
+                .frame(width: 440, height: 660)
         )
     }
 
