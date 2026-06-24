@@ -2,18 +2,22 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: ProxyAppModel
+    @State private var settingsPreviewTab = ClaudeSettingsPreviewTab.changes
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header
-            Divider()
-            controls
-            Divider()
-            settings
-            Divider()
-            footer
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                header
+                Divider()
+                controls
+                Divider()
+                settings
+                Divider()
+                footer
+            }
+            .padding(16)
         }
-        .padding(16)
+        .frame(maxHeight: 720)
     }
 
     private var header: some View {
@@ -76,6 +80,13 @@ struct ContentView: View {
                     .frame(width: 160)
             }
             HStack {
+                Text("Small Model")
+                Spacer()
+                TextField("Small Model", text: $model.smallModel)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 160)
+            }
+            HStack {
                 Text("Port")
                 Spacer()
                 TextField("Port", value: $model.port, formatter: NumberFormatter())
@@ -83,6 +94,7 @@ struct ContentView: View {
                     .frame(width: 90)
             }
             authStatus
+            claudeSettingsStatus
             HStack {
                 Button {
                     Task { await model.login() }
@@ -90,11 +102,6 @@ struct ContentView: View {
                     Label(model.isAuthenticated ? "Reconnect" : "Login", systemImage: "person.crop.circle.badge.checkmark")
                 }
                 .disabled(model.isLoggingIn)
-                Button {
-                    Task { await model.installClaudeSettings() }
-                } label: {
-                    Label("Install Claude Settings", systemImage: "terminal")
-                }
             }
             .buttonStyle(.bordered)
         }
@@ -150,6 +157,195 @@ struct ContentView: View {
         model.isAuthenticated ? .green : .secondary
     }
 
+    private var claudeSettingsStatus: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label("Claude settings", systemImage: "slider.horizontal.3")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                if model.isRefreshingClaudeSettings {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Refreshing Claude settings preview")
+                }
+                Button {
+                    Task { await model.refreshClaudeSettingsPreview() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Refresh Claude settings preview")
+            }
+
+            if let preview = model.claudeSettingsPreview {
+                settingsSummary(preview)
+
+                Picker("Settings preview", selection: $settingsPreviewTab) {
+                    ForEach(ClaudeSettingsPreviewTab.allCases) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                settingsPreviewContent(preview)
+
+                HStack {
+                    Button {
+                        Task { await model.installClaudeSettings() }
+                    } label: {
+                        Label("Install Settings", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(model.isInstallingClaudeSettings)
+
+                    Button {
+                        Task { await model.restoreClaudeSettings() }
+                    } label: {
+                        Label("Restore", systemImage: "arrow.uturn.backward")
+                    }
+                    .disabled(!preview.canRestore || model.isRestoringClaudeSettings)
+                }
+                .buttonStyle(.bordered)
+            } else if let error = model.claudeSettingsPreviewError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            } else {
+                Label("Loading settings preview", systemImage: "hourglass")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.secondary.opacity(0.20))
+        )
+    }
+
+    private func settingsSummary(_ preview: ClaudeSettingsPreview) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            settingsSummaryRow(
+                title: "Current",
+                value: preview.settingsExists ? "Existing settings.json" : "New settings.json",
+                systemImage: "doc.text"
+            )
+            settingsSummaryRow(
+                title: "Will apply",
+                value: preview.changeSummary,
+                systemImage: "plus.forwardslash.minus"
+            )
+            settingsSummaryRow(
+                title: "Preserve",
+                value: "Unmanaged settings",
+                systemImage: "lock"
+            )
+            settingsSummaryRow(
+                title: "Restore",
+                value: preview.restoreSummary,
+                systemImage: "arrow.uturn.backward"
+            )
+        }
+        .font(.caption)
+    }
+
+    private func settingsSummaryRow(title: String, value: String, systemImage: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .frame(width: 14)
+                .accessibilityHidden(true)
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    @ViewBuilder
+    private func settingsPreviewContent(_ preview: ClaudeSettingsPreview) -> some View {
+        switch settingsPreviewTab {
+        case .changes:
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(preview.managedChanges) { change in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: settingsActionIcon(change.action))
+                            .foregroundStyle(settingsActionColor(change.action))
+                            .frame(width: 14)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(change.actionText) \(change.key)")
+                                .font(.caption.monospaced().weight(.semibold))
+                            Text(change.detailText)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+        case .current:
+            codePreview(preview.currentSettings)
+        case .proposed:
+            codePreview(preview.proposedSettings)
+        case .restore:
+            if let restoreSettings = preview.restoreSettings {
+                codePreview(restoreSettings)
+            } else {
+                Label("No backup is available to restore.", systemImage: "tray")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func codePreview(_ text: String) -> some View {
+        ScrollView([.vertical, .horizontal]) {
+            Text(text)
+                .font(.caption2.monospaced())
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+                .padding(8)
+        }
+        .frame(maxHeight: 180)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.18))
+        )
+    }
+
+    private func settingsActionIcon(_ action: ClaudeEnvAction) -> String {
+        switch action {
+        case .add:
+            return "plus.circle.fill"
+        case .change:
+            return "pencil.circle.fill"
+        case .keep:
+            return "checkmark.circle.fill"
+        }
+    }
+
+    private func settingsActionColor(_ action: ClaudeEnvAction) -> Color {
+        switch action {
+        case .add:
+            return .green
+        case .change:
+            return .orange
+        case .keep:
+            return .secondary
+        }
+    }
+
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(model.lastMessage)
@@ -170,4 +366,13 @@ struct ContentView: View {
             .buttonStyle(.borderless)
         }
     }
+}
+
+private enum ClaudeSettingsPreviewTab: String, CaseIterable, Identifiable {
+    case changes = "Diff"
+    case current = "Current"
+    case proposed = "Apply"
+    case restore = "Restore"
+
+    var id: Self { self }
 }

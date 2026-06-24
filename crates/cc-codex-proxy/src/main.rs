@@ -5,7 +5,8 @@ use proxy_core::{
         browser_login, default_oauth_options, AuthManager, KeychainTokenStore, OAuthRefreshClient,
     },
     claude::{
-        default_settings_path, install_settings, restore_latest_backup, ClaudeSettingsOptions,
+        default_settings_path, install_settings, preview_settings, restore_latest_backup,
+        ClaudeSettingsOptions,
     },
     config::{AppConfig, DEFAULT_PORT},
     logging,
@@ -60,6 +61,7 @@ struct AuthCommand {
 #[derive(Debug, Subcommand)]
 enum ClaudeSubcommand {
     InstallSettings(InstallSettingsArgs),
+    PreviewSettings(InstallSettingsArgs),
     RestoreSettings,
 }
 
@@ -204,19 +206,15 @@ async fn cmd_claude(args: ClaudeCommand) -> Result<()> {
     let settings = default_settings_path()?;
     match args.command {
         ClaudeSubcommand::InstallSettings(args) => {
-            let result = install_settings(
-                &settings,
-                &ClaudeSettingsOptions {
-                    port: args.port,
-                    model: args.model,
-                    small_fast_model: args.small_model,
-                    auto_compact_window: args.auto_compact_window,
-                },
-            )?;
+            let result = install_settings(&settings, &claude_settings_options(args))?;
             println!("Updated {}", result.settings_path.display());
             if let Some(backup) = result.backup_path {
                 println!("Backup: {}", backup.display());
             }
+        }
+        ClaudeSubcommand::PreviewSettings(args) => {
+            let preview = preview_settings(&settings, &claude_settings_options(args))?;
+            println!("{}", serde_json::to_string_pretty(&preview)?);
         }
         ClaudeSubcommand::RestoreSettings => match restore_latest_backup(&settings)? {
             Some(backup) => {
@@ -229,6 +227,15 @@ async fn cmd_claude(args: ClaudeCommand) -> Result<()> {
         },
     }
     Ok(())
+}
+
+fn claude_settings_options(args: InstallSettingsArgs) -> ClaudeSettingsOptions {
+    ClaudeSettingsOptions {
+        port: args.port,
+        model: args.model,
+        small_fast_model: args.small_model,
+        auto_compact_window: args.auto_compact_window,
+    }
 }
 
 async fn cmd_admin(args: AdminCommand) -> Result<()> {

@@ -6,18 +6,26 @@ final class ProxyAppModel: ObservableObject {
     @Published var isRunning = false
     @Published var isAuthenticated = false
     @Published var isLoggingIn = false
+    @Published var isRefreshingClaudeSettings = false
+    @Published var isInstallingClaudeSettings = false
+    @Published var isRestoringClaudeSettings = false
     @Published var statusText = "Not checked"
     @Published var authStatusText = "Checking authentication"
     @Published var authDetailText = "OAuth status has not been checked yet."
+    @Published var claudeSettingsPreview: ClaudeSettingsPreview?
+    @Published var claudeSettingsPreviewError: String?
     @Published var lastMessage = ""
     @Published var model = "gpt-5.4[1m]"
+    @Published var smallModel = "gpt-5.4-mini[1m]"
     @Published var port = 18765
+    @Published var autoCompactWindow = 272_000
 
     private var proxyProcess: Process?
 
     func refresh() async {
         await refreshProxyStatus(updateLastMessage: true)
         await refreshAuthStatus()
+        await refreshClaudeSettingsPreview()
     }
 
     private func refreshProxyStatus(updateLastMessage: Bool) async {
@@ -94,19 +102,49 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func installClaudeSettings() async {
+        isInstallingClaudeSettings = true
+        defer { isInstallingClaudeSettings = false }
+
         do {
             lastMessage = try await runCLI([
                 "claude",
-                "install-settings",
-                "--model",
-                model,
-                "--small-model",
-                "gpt-5.4-mini[1m]",
-                "--port",
-                "\(port)"
-            ])
+                "install-settings"
+            ] + claudeSettingsArguments)
+            await refreshClaudeSettingsPreview()
         } catch {
             lastMessage = "Settings install failed: \(error.localizedDescription)"
+            await refreshClaudeSettingsPreview()
+        }
+    }
+
+    func restoreClaudeSettings() async {
+        isRestoringClaudeSettings = true
+        defer { isRestoringClaudeSettings = false }
+
+        do {
+            lastMessage = try await runCLI(["claude", "restore-settings"])
+            await refreshClaudeSettingsPreview()
+        } catch {
+            lastMessage = "Settings restore failed: \(error.localizedDescription)"
+            await refreshClaudeSettingsPreview()
+        }
+    }
+
+    func refreshClaudeSettingsPreview() async {
+        isRefreshingClaudeSettings = true
+        defer { isRefreshingClaudeSettings = false }
+
+        do {
+            let output = try await runCLI([
+                "claude",
+                "preview-settings"
+            ] + claudeSettingsArguments)
+            let data = Data(output.utf8)
+            claudeSettingsPreview = try JSONDecoder().decode(ClaudeSettingsPreview.self, from: data)
+            claudeSettingsPreviewError = nil
+        } catch {
+            claudeSettingsPreview = nil
+            claudeSettingsPreviewError = error.localizedDescription
         }
     }
 
@@ -137,6 +175,19 @@ final class ProxyAppModel: ObservableObject {
             }
             return output
         }.value
+    }
+
+    private var claudeSettingsArguments: [String] {
+        [
+            "--model",
+            model,
+            "--small-model",
+            smallModel,
+            "--port",
+            "\(port)",
+            "--auto-compact-window",
+            "\(autoCompactWindow)"
+        ]
     }
 
     private func applyAuthStatus(from output: String, authenticated: Bool) {
@@ -176,6 +227,72 @@ final class ProxyAppModel: ObservableObject {
             }
             .first
     }
+}
+
+struct ClaudeSettingsPreview: Decodable {
+    let settingsPath: String
+    let settingsExists: Bool
+    let currentSettings: String
+    let proposedSettings: String
+    let latestBackupPath: String?
+    let restoreSettings: String?
+    let managedChanges: [ClaudeEnvChange]
+
+    var changedCount: Int {
+        managedChanges.filter { $0.action != .keep }.count
+    }
+
+    var changeSummary: String {
+        changedCount == 0 ? "No changes" : "\(changedCount) managed changes"
+    }
+
+    var restoreSummary: String {
+        guard let latestBackupPath else {
+            return "No backup"
+        }
+        return URL(fileURLWithPath: latestBackupPath).lastPathComponent
+    }
+
+    var canRestore: Bool {
+        restoreSettings != nil
+    }
+}
+
+struct ClaudeEnvChange: Decodable, Identifiable {
+    let key: String
+    let action: ClaudeEnvAction
+    let current: String?
+    let proposed: String
+
+    var id: String { key }
+
+    var actionText: String {
+        switch action {
+        case .add:
+            return "Add"
+        case .change:
+            return "Change"
+        case .keep:
+            return "Keep"
+        }
+    }
+
+    var detailText: String {
+        switch action {
+        case .add:
+            return "Set to \(proposed)"
+        case .change:
+            return "\(current ?? "Not set") -> \(proposed)"
+        case .keep:
+            return "Already \(proposed)"
+        }
+    }
+}
+
+enum ClaudeEnvAction: String, Decodable {
+    case add
+    case change
+    case keep
 }
 
 private func helperURL() throws -> URL {

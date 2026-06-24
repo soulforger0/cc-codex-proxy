@@ -3,6 +3,7 @@ use crate::{
     error::{ProxyError, Result},
 };
 use chrono::Utc;
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::{
     fs,
@@ -45,6 +46,35 @@ pub struct InstallResult {
     pub backup_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeSettingsPreview {
+    pub settings_path: String,
+    pub settings_exists: bool,
+    pub current_settings: String,
+    pub proposed_settings: String,
+    pub latest_backup_path: Option<String>,
+    pub restore_settings: Option<String>,
+    pub managed_changes: Vec<ClaudeEnvChange>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeEnvChange {
+    pub key: String,
+    pub action: ClaudeEnvChangeAction,
+    pub current: Option<String>,
+    pub proposed: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaudeEnvChangeAction {
+    Add,
+    Change,
+    Keep,
+}
+
 pub fn default_settings_path() -> Result<PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| ProxyError::Config("cannot locate home directory".into()))?;
@@ -65,10 +95,47 @@ pub fn install_settings(path: &Path, options: &ClaudeSettingsOptions) -> Result<
     })
 }
 
+pub fn preview_settings(
+    path: &Path,
+    options: &ClaudeSettingsOptions,
+) -> Result<ClaudeSettingsPreview> {
+    let current = read_settings(path)?;
+    let managed = managed_env(options);
+    let managed_changes = managed_changes(&current, &managed);
+    let mut proposed = current.clone();
+    merge_env(&mut proposed, managed);
+    let latest_backup_path = latest_backup_path(path)?;
+    let restore_settings = latest_backup_path
+        .as_deref()
+        .map(read_existing_pretty_or_raw)
+        .transpose()?;
+
+    Ok(ClaudeSettingsPreview {
+        settings_path: path.display().to_string(),
+        settings_exists: path.exists(),
+        current_settings: pretty_json(&current)?,
+        proposed_settings: pretty_json(&proposed)?,
+        latest_backup_path: latest_backup_path.map(|path| path.display().to_string()),
+        restore_settings,
+        managed_changes,
+    })
+}
+
 pub fn restore_latest_backup(path: &Path) -> Result<Option<PathBuf>> {
+    let Some(latest) = latest_backup_path(path)? else {
+        return Ok(None);
+    };
+    fs::copy(&latest, path)?;
+    Ok(Some(latest))
+}
+
+fn latest_backup_path(path: &Path) -> Result<Option<PathBuf>> {
     let Some(parent) = path.parent() else {
         return Ok(None);
     };
+    if !parent.exists() {
+        return Ok(None);
+    }
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -88,7 +155,6 @@ pub fn restore_latest_backup(path: &Path) -> Result<Option<PathBuf>> {
     let Some(latest) = backups.pop() else {
         return Ok(None);
     };
-    fs::copy(&latest, path)?;
     Ok(Some(latest))
 }
 
@@ -125,6 +191,30 @@ pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
     env
 }
 
+fn managed_changes(current: &Value, managed: &Map<String, Value>) -> Vec<ClaudeEnvChange> {
+    let current_env = current.get("env").and_then(Value::as_object);
+
+    MANAGED_ENV_KEYS
+        .iter()
+        .filter_map(|key| {
+            let proposed = managed.get(*key)?;
+            let current = current_env.and_then(|env| env.get(*key));
+            let action = match current {
+                None => ClaudeEnvChangeAction::Add,
+                Some(value) if value == proposed => ClaudeEnvChangeAction::Keep,
+                Some(_) => ClaudeEnvChangeAction::Change,
+            };
+
+            Some(ClaudeEnvChange {
+                key: (*key).to_string(),
+                action,
+                current: current.map(display_value),
+                proposed: display_value(proposed),
+            })
+        })
+        .collect()
+}
+
 fn backup_existing(path: &Path) -> Result<Option<PathBuf>> {
     if !path.exists() {
         return Ok(None);
@@ -147,6 +237,28 @@ fn read_settings(path: &Path) -> Result<Value> {
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(json!({})),
         Err(err) => Err(err.into()),
     }
+}
+
+fn read_existing_pretty_or_raw(path: &Path) -> Result<String> {
+    let raw = fs::read_to_string(path)?;
+    if raw.trim().is_empty() {
+        return Ok("{}\n".into());
+    }
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(value) => pretty_json(&value),
+        Err(_) => Ok(raw),
+    }
+}
+
+fn pretty_json(value: &Value) -> Result<String> {
+    Ok(format!("{}\n", serde_json::to_string_pretty(value)?))
+}
+
+fn display_value(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string())
 }
 
 fn merge_env(settings: &mut Value, managed: Map<String, Value>) {
@@ -200,5 +312,56 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         assert!(restore_latest_backup(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn restore_latest_backup_returns_none_without_settings_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude/settings.json");
+        assert!(restore_latest_backup(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn preview_settings_shows_current_proposed_changes_and_restore_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"env":{"KEEP":"yes","ANTHROPIC_MODEL":"old","ANTHROPIC_AUTH_TOKEN":"unused"},"theme":"dark"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("settings.json.backup-20260101T000000Z"),
+            r#"{"env":{"ANTHROPIC_MODEL":"backup"}}"#,
+        )
+        .unwrap();
+
+        let preview = preview_settings(&path, &ClaudeSettingsOptions::default()).unwrap();
+
+        assert!(preview.settings_exists);
+        assert!(preview.current_settings.contains(r#""theme": "dark""#));
+        assert!(preview.proposed_settings.contains(r#""KEEP": "yes""#));
+        assert!(preview
+            .proposed_settings
+            .contains(r#""ANTHROPIC_MODEL": "gpt-5.4[1m]""#));
+        assert!(preview
+            .restore_settings
+            .as_deref()
+            .unwrap()
+            .contains(r#""ANTHROPIC_MODEL": "backup""#));
+
+        let model_change = preview
+            .managed_changes
+            .iter()
+            .find(|change| change.key == "ANTHROPIC_MODEL")
+            .unwrap();
+        assert_eq!(model_change.action, ClaudeEnvChangeAction::Change);
+
+        let token_change = preview
+            .managed_changes
+            .iter()
+            .find(|change| change.key == "ANTHROPIC_AUTH_TOKEN")
+            .unwrap();
+        assert_eq!(token_change.action, ClaudeEnvChangeAction::Keep);
     }
 }
