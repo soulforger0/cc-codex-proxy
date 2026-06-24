@@ -25,6 +25,12 @@ swift build --package-path macos/CCCodexProxy
 
 Rust is required to build the proxy/CLI. Swift is required to build the menu bar app.
 
+Run the explicit 250-agent mock streaming stress test with:
+
+```sh
+cargo test -p proxy-core --test server_mock -- streaming_stress_250_agents --ignored --nocapture
+```
+
 ## Claude Code Configuration
 
 Install managed Claude Code settings after authenticating:
@@ -51,4 +57,3 @@ cc-codex-proxy claude restore-settings
 ## Warning
 
 The ChatGPT subscription Codex backend is not a public OpenAI API contract. `doctor` verifies the current local auth and model/backend reachability, but backend behavior can change.
-

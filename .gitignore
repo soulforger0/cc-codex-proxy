@@ -1,5 +1,5 @@
+.DS_Store
 /target/
-/.DS_Store
 /.swiftpm/
 /macos/CCCodexProxy/.build/
 /dist/
@@ -7,4 +7,3 @@
 *.xccheckout
 *.moved-aside
 DerivedData/
-
