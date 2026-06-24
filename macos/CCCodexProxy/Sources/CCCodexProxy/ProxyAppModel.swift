@@ -25,6 +25,7 @@ final class ProxyAppModel: ObservableObject {
 
     func refresh() async {
         await refreshProxyStatus(updateLastMessage: true)
+        await checkAuthStatus()
         await refreshClaudeSettingsPreview()
     }
 
@@ -208,7 +209,7 @@ final class ProxyAppModel: ObservableObject {
         } else if let storage = value(for: "Storage", in: output), !storage.isEmpty {
             authDetailText = "Stored in \(storage)."
         } else {
-            authDetailText = "OAuth tokens are stored for this Mac."
+            authDetailText = "OAuth tokens are stored in the local auth file."
         }
     }
 

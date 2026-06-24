@@ -72,45 +72,8 @@ struct ContentView: View {
 
     private var settings: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Model")
-                Spacer()
-                TextField("Model", text: $model.model)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 160)
-            }
-            HStack {
-                Text("Small Model")
-                Spacer()
-                TextField("Small Model", text: $model.smallModel)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 160)
-            }
-            HStack {
-                Text("Port")
-                Spacer()
-                TextField("Port", value: $model.port, formatter: NumberFormatter())
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 90)
-            }
             authStatus
             claudeSettingsStatus
-            HStack {
-                Button {
-                    Task { await model.login() }
-                } label: {
-                    Label(model.isAuthenticated ? "Reconnect" : "Login", systemImage: "person.crop.circle.badge.checkmark")
-                }
-                .disabled(model.isLoggingIn || model.isCheckingAuthStatus)
-
-                Button {
-                    Task { await model.checkAuthStatus() }
-                } label: {
-                    Label("Check OAuth", systemImage: "key")
-                }
-                .disabled(model.isLoggingIn || model.isCheckingAuthStatus)
-            }
-            .buttonStyle(.bordered)
         }
     }
 
@@ -136,6 +99,14 @@ struct ContentView: View {
                 ProgressView()
                     .controlSize(.small)
                     .accessibilityLabel(model.isLoggingIn ? "OAuth login in progress" : "Checking OAuth status")
+            } else if !model.isAuthenticated {
+                Button {
+                    Task { await model.login() }
+                } label: {
+                    Label("Login", systemImage: "person.crop.circle.badge.checkmark")
+                }
+                .buttonStyle(.bordered)
+                .accessibilityHint("Start ChatGPT OAuth login")
             } else {
                 Text(model.isAuthenticated ? "OAuth OK" : "OAuth needed")
                     .font(.caption.weight(.semibold))
@@ -156,12 +127,12 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(authStatusColor.opacity(model.isAuthenticated ? 0.45 : 0.22))
         )
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(model.isAuthenticated ? "OAuth signed in" : "OAuth not signed in")
     }
 
     private var authStatusColor: Color {
-        model.isAuthenticated ? .green : .secondary
+        model.isAuthenticated ? .green : .orange
     }
 
     private var authStatusTitle: String {
@@ -187,7 +158,7 @@ struct ContentView: View {
     private var claudeSettingsStatus: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Label("Claude settings", systemImage: "slider.horizontal.3")
+                Label("Claude Code settings", systemImage: "slider.horizontal.3")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 if model.isRefreshingClaudeSettings {
@@ -201,8 +172,13 @@ struct ContentView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
-                .accessibilityLabel("Refresh Claude settings preview")
+                .disabled(model.isRefreshingClaudeSettings)
+                .frame(width: 28, height: 28)
+                .help("Refresh Claude Code settings preview")
+                .accessibilityLabel("Refresh Claude Code settings preview")
             }
+
+            claudeSettingsInputs
 
             if let preview = model.claudeSettingsPreview {
                 settingsSummary(preview)
@@ -254,6 +230,48 @@ struct ContentView: View {
         )
     }
 
+    private var claudeSettingsInputs: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            settingsInputRow(title: "Model") {
+                TextField("Model", text: $model.model)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
+                    .onSubmit {
+                        Task { await model.refreshClaudeSettingsPreview() }
+                    }
+            }
+            settingsInputRow(title: "Small Model") {
+                TextField("Small Model", text: $model.smallModel)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
+                    .onSubmit {
+                        Task { await model.refreshClaudeSettingsPreview() }
+                    }
+            }
+            settingsInputRow(title: "Port") {
+                TextField("Port", value: $model.port, formatter: NumberFormatter())
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 90)
+                    .onSubmit {
+                        Task { await model.refreshClaudeSettingsPreview() }
+                    }
+            }
+        }
+    }
+
+    private func settingsInputRow<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            content()
+        }
+    }
+
     private func settingsSummary(_ preview: ClaudeSettingsPreview) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             settingsSummaryRow(
@@ -262,7 +280,7 @@ struct ContentView: View {
                 systemImage: "doc.text"
             )
             settingsSummaryRow(
-                title: "Will apply",
+                title: "After",
                 value: preview.changeSummary,
                 systemImage: "plus.forwardslash.minus"
             )
@@ -386,8 +404,10 @@ struct ContentView: View {
                     Label("Project", systemImage: "folder")
                 }
                 Spacer()
-                Button("Quit") {
+                Button {
                     NSApplication.shared.terminate(nil)
+                } label: {
+                    Label("Quit", systemImage: "power")
                 }
             }
             .buttonStyle(.borderless)
@@ -398,7 +418,7 @@ struct ContentView: View {
 private enum ClaudeSettingsPreviewTab: String, CaseIterable, Identifiable {
     case changes = "Diff"
     case current = "Current"
-    case proposed = "Apply"
+    case proposed = "After"
     case restore = "Restore"
 
     var id: Self { self }
