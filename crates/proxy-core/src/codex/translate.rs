@@ -22,7 +22,7 @@ pub struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u32>,
+    pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,7 +76,7 @@ pub fn translate_request(
         tool_choice,
         reasoning,
         text,
-        max_output_tokens: request.max_tokens,
+        max_tokens: request.max_tokens,
         temperature: request.temperature,
         top_p: request.top_p,
         metadata: request.metadata.clone(),
@@ -422,6 +422,35 @@ mod tests {
         let serialized = serde_json::to_value(translated).unwrap();
 
         assert_eq!(serialized["store"], false);
+    }
+
+    #[test]
+    fn serializes_codex_max_tokens_field() {
+        let req = AnthropicRequest {
+            model: "gpt-5.4".into(),
+            max_tokens: Some(123),
+            temperature: None,
+            top_p: None,
+            stream: Some(true),
+            system: None,
+            messages: vec![crate::anthropic::schema::AnthropicMessage {
+                role: "user".into(),
+                content: json!("hi"),
+                extra: Default::default(),
+            }],
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            output_config: None,
+            thinking: None,
+            extra: Default::default(),
+        };
+
+        let translated = translate_request(&req, &resolved(), None).unwrap();
+        let serialized = serde_json::to_value(translated).unwrap();
+
+        assert_eq!(serialized["max_tokens"], 123);
+        assert!(serialized.get("max_output_tokens").is_none());
     }
 
     #[test]

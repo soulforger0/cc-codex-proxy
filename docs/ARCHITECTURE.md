@@ -70,7 +70,7 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | `tools[]` | `tools[]` with `type: "function"` | Anthropic `input_schema` becomes Responses `parameters`; `strict` is disabled for Claude Code compatibility. |
 | `type: web_search_*`, `name: web_search` | `web_search` | Hosted web-search bridge. `allowed_domains`/`blocked_domains` map to `filters`; `user_location` is forwarded. Anthropic `max_uses` and `response_inclusion` have no direct Responses equivalent and are not forwarded. |
 | `tool_choice` | `tool_choice` | `auto`, `none`, `any`, forced function tools, and forced `web_search` map to Responses equivalents. |
-| `max_tokens` | `max_output_tokens` | Output limit only. |
+| `max_tokens` | `max_tokens` | Output limit only. |
 | `temperature`, `top_p` | same names | Forwarded when Claude Code sends them. |
 | `metadata` | `metadata` | Forwarded unchanged. |
 | `output_config.effort` | `reasoning.effort` | `auto` omits the field; `max`/`ultracode` map to `xhigh`; `none`, `minimal`, `low`, `medium`, `high`, and `xhigh` are forwarded. Unknown values are omitted. |
