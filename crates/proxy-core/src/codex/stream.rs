@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     pin::Pin,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 pub fn translate_stream(
@@ -28,19 +28,35 @@ pub fn translate_stream(
         let mut reducer = CodexReducer::new(message_id.clone(), model.clone(), tool_catalog, request_id.clone());
         yield response::message_start(&message_id, &model);
         let mut parser = SseParser::default();
+        let mut event_index = 0_u64;
         futures_util::pin_mut!(upstream);
         while let Some(chunk) = upstream.next().await {
             for event in parser.push(&chunk?, request_id.as_deref()) {
-                for bytes in reducer.process_event(&event) {
+                event_index += 1;
+                let produced = reducer.process_event(&event);
+                log_codex_event(&event, event_index, produced.len(), request_id.as_deref());
+                for bytes in produced {
                     yield bytes;
                 }
             }
         }
         for event in parser.finish(request_id.as_deref()) {
-            for bytes in reducer.process_event(&event) {
+            event_index += 1;
+            let produced = reducer.process_event(&event);
+            log_codex_event(&event, event_index, produced.len(), request_id.as_deref());
+            for bytes in produced {
                 yield bytes;
             }
         }
+        info!(
+            request_id = request_id.as_deref().unwrap_or("untracked"),
+            event_count = event_index,
+            text_chars = reducer.text.chars().count(),
+            tool_count = reducer.tool_blocks.len(),
+            stopped = reducer.stopped,
+            stop_reason = reducer.stop_reason.as_deref().unwrap_or("none"),
+            "finished reducing Codex stream"
+        );
         for bytes in reducer.finish_events() {
             yield bytes;
         }
@@ -206,6 +222,85 @@ fn parse_sse_event(raw: &str, request_id: Option<&str>) -> Option<Value> {
             None
         }
     }
+}
+
+fn log_codex_event(
+    event: &Value,
+    event_index: u64,
+    produced_chunk_count: usize,
+    request_id: Option<&str>,
+) {
+    let typ = event_type(event);
+    let should_log_info = event_index <= 8 || is_completion_event(event);
+    if should_log_info {
+        info!(
+            request_id = request_id.unwrap_or("untracked"),
+            event_index,
+            event_type = typ,
+            produced_chunk_count,
+            text_delta_chars = text_delta_len(event),
+            function_call_count = function_call_count(event),
+            completion = is_completion_event(event),
+            response_status = response_status(event).unwrap_or("none"),
+            "processed Codex stream event"
+        );
+    } else {
+        debug!(
+            request_id = request_id.unwrap_or("untracked"),
+            event_index,
+            event_type = typ,
+            produced_chunk_count,
+            text_delta_chars = text_delta_len(event),
+            function_call_count = function_call_count(event),
+            completion = is_completion_event(event),
+            response_status = response_status(event).unwrap_or("none"),
+            "processed Codex stream event"
+        );
+    }
+}
+
+fn event_type(event: &Value) -> &str {
+    event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("missing")
+}
+
+fn text_delta_len(event: &Value) -> usize {
+    event
+        .get("delta")
+        .or_else(|| event.get("text"))
+        .and_then(Value::as_str)
+        .map(str::chars)
+        .map(Iterator::count)
+        .unwrap_or_default()
+}
+
+fn function_call_count(event: &Value) -> usize {
+    let direct = event
+        .get("item")
+        .or_else(|| event.get("output_item"))
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|typ| typ == "function_call") as usize;
+    let snapshot = event
+        .pointer("/response/output")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+                .count()
+        })
+        .unwrap_or_default();
+    direct + snapshot
+}
+
+fn response_status(event: &Value) -> Option<&str> {
+    event
+        .pointer("/response/status")
+        .or_else(|| event.get("status"))
+        .and_then(Value::as_str)
 }
 
 #[derive(Debug)]

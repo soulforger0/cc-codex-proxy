@@ -30,6 +30,7 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WEBSOCKET_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 const WEBSOCKET_FAILURE_COOLDOWN: Duration = Duration::from_secs(120);
+const WEBSOCKET_READ_IDLE_WARN_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodexTransportMethod {
@@ -241,18 +242,36 @@ impl CodexClient {
             if let Some(bytes) = websocket_message_to_bytes(first) {
                 yield bytes;
             }
-            while let Some(message) = socket.next().await {
-                match message {
-                    Ok(message) => {
-                        frame_index += 1;
-                        log_websocket_frame(&message, frame_index, session_id_for_log.as_deref());
-                        if let Some(bytes) = websocket_message_to_bytes(message) {
-                            yield bytes;
-                        }
+            let mut frame_count = 1_u64;
+            loop {
+                match tokio::time::timeout(WEBSOCKET_READ_IDLE_WARN_INTERVAL, socket.next()).await {
+                    Ok(Some(Ok(message))) => {
+                            frame_index += 1;
+                            frame_count += 1;
+                            log_websocket_frame(&message, frame_index, session_id_for_log.as_deref());
+                            if let Some(bytes) = websocket_message_to_bytes(message) {
+                                yield bytes;
+                            }
                     }
-                    Err(err) => Err(ProxyError::Transport(format!(
-                        "Codex websocket read failed: {err}"
-                    )))?,
+                    Ok(Some(Err(err))) => Err(ProxyError::Transport(format!(
+                            "Codex websocket read failed: {err}"
+                        )))?,
+                    Ok(None) => {
+                        info!(
+                            session_id = session_id_for_log.as_deref().unwrap_or("none"),
+                            frame_count,
+                            "Codex websocket stream ended"
+                        );
+                        break;
+                    }
+                    Err(_) => {
+                        warn!(
+                            session_id = session_id_for_log.as_deref().unwrap_or("none"),
+                            idle_ms = WEBSOCKET_READ_IDLE_WARN_INTERVAL.as_millis(),
+                            frame_count,
+                            "Codex websocket stream idle while waiting for next frame"
+                        );
+                    }
                 }
             }
         };
@@ -479,33 +498,58 @@ fn websocket_message_to_bytes(message: Message) -> Option<Bytes> {
 }
 
 fn log_websocket_frame(message: &Message, frame_index: u64, session_id: Option<&str>) {
+    let level_is_info = frame_index == 0 || matches!(message, Message::Close(_));
     match message {
         Message::Text(text) => {
             let text = text.as_str();
             let newline_count = text.matches('\n').count();
-            debug!(
-                session_id = session_id.unwrap_or("none"),
-                frame_index,
-                frame_kind = "text",
-                byte_len = text.len(),
-                newline_count,
-                line_count = sse_line_count(text),
-                preview = %truncate_for_log_escaped(text, 240),
-                "received Codex websocket frame"
-            );
+            if level_is_info {
+                info!(
+                    session_id = session_id.unwrap_or("none"),
+                    frame_index,
+                    frame_kind = "text",
+                    byte_len = text.len(),
+                    newline_count,
+                    line_count = sse_line_count(text),
+                    preview = %truncate_for_log_escaped(text, 240),
+                    "received Codex websocket frame"
+                );
+            } else {
+                debug!(
+                    session_id = session_id.unwrap_or("none"),
+                    frame_index,
+                    frame_kind = "text",
+                    byte_len = text.len(),
+                    newline_count,
+                    line_count = sse_line_count(text),
+                    preview = %truncate_for_log_escaped(text, 240),
+                    "received Codex websocket frame"
+                );
+            }
         }
         Message::Binary(bytes) => {
-            debug!(
-                session_id = session_id.unwrap_or("none"),
-                frame_index,
-                frame_kind = "binary",
-                byte_len = bytes.len(),
-                utf8 = std::str::from_utf8(bytes).is_ok(),
-                "received Codex websocket frame"
-            );
+            if level_is_info {
+                info!(
+                    session_id = session_id.unwrap_or("none"),
+                    frame_index,
+                    frame_kind = "binary",
+                    byte_len = bytes.len(),
+                    utf8 = std::str::from_utf8(bytes).is_ok(),
+                    "received Codex websocket frame"
+                );
+            } else {
+                debug!(
+                    session_id = session_id.unwrap_or("none"),
+                    frame_index,
+                    frame_kind = "binary",
+                    byte_len = bytes.len(),
+                    utf8 = std::str::from_utf8(bytes).is_ok(),
+                    "received Codex websocket frame"
+                );
+            }
         }
         Message::Close(frame) => {
-            debug!(
+            info!(
                 session_id = session_id.unwrap_or("none"),
                 frame_index,
                 frame_kind = "close",
