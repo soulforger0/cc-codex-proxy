@@ -3,11 +3,11 @@ use crate::{
     anthropic::{response::response_json, schema::AnthropicRequest, tokens::estimate_input_tokens},
     auth::AuthManager,
     codex::{
-        client::CodexClient,
+        client::{CodexClient, CodexTransportMethod},
         stream::{accumulate_response, translate_stream, ToolCatalog},
         translate::{translate_request, ResponsesRequest},
     },
-    config::{AppConfig, AppPaths},
+    config::{AppConfig, AppPaths, CodexTransport},
     error::{ProxyError, Result},
     model::ModelRegistry,
 };
@@ -105,11 +105,17 @@ async fn admin_status(
 ) -> Result<Json<serde_json::Value>> {
     require_admin(&state, &headers)?;
     let auth = state.auth.status().await?;
+    let transport = state.codex.transport_status();
     Ok(Json(json!({
         "ok": true,
         "port": state.config.port,
         "configDir": state.paths.config_dir,
         "logsDir": state.paths.logs_dir,
+        "transport": {
+            "configured": configured_transport_name(&state.config.codex.transport),
+            "currentMethod": transport.current_method.map(transport_method_name),
+            "websocketCooldownMs": transport.websocket_cooldown_remaining.map(duration_millis_u64),
+        },
         "models": state.registry.supported_models(),
         "auth": auth.map(|auth| json!({
             "accountId": auth.account_id,
@@ -315,6 +321,25 @@ fn codex_request_keys(request: &ResponsesRequest) -> String {
             })
         })
         .unwrap_or_else(|| "unavailable".into())
+}
+
+fn configured_transport_name(transport: &CodexTransport) -> &'static str {
+    match transport {
+        CodexTransport::Auto => "auto",
+        CodexTransport::Http => "http-sse",
+        CodexTransport::WebSocket => "websocket",
+    }
+}
+
+fn transport_method_name(method: CodexTransportMethod) -> &'static str {
+    match method {
+        CodexTransportMethod::HttpSse => "http-sse",
+        CodexTransportMethod::WebSocket => "websocket",
+    }
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
 }
 
 fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<()> {

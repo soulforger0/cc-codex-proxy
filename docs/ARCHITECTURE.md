@@ -26,8 +26,8 @@ The Codex upstream side supports three modes through `codex.transport` or `CCP_C
 
 | Mode | Behavior | When to use |
 | --- | --- | --- |
-| `http` / `sse` | Use upstream HTTP SSE only. | Default and most conservative mode for app users, CI, debugging, restricted corporate networks, or any environment where WebSocket behavior is unreliable. |
-| `auto` | Try Codex WebSocket first. If WebSocket setup fails or no first event arrives promptly, fall back to HTTP SSE and suppress more WebSocket attempts for 120 seconds. | Optional diagnostics when giving WebSocket a chance is acceptable. |
+| `auto` | Try Codex WebSocket first. If WebSocket setup fails or no first event arrives promptly, fall back to HTTP SSE and suppress more WebSocket attempts for 120 seconds. | Default mode for app users. |
+| `http` / `sse` | Use upstream HTTP SSE only. | Conservative mode for CI, debugging, restricted corporate networks, or any environment where WebSocket behavior is unreliable. |
 | `websocket` / `ws` | Use upstream WebSocket only. | Diagnostics or explicit performance experiments where hard failure is preferred over fallback. |
 
 Both upstream modes are reduced into the same internal byte stream and then translated into Anthropic-compatible events. The proxy only falls back before an upstream response stream is committed. Once streaming has started, it surfaces stream errors instead of replaying the request, because replaying a partially served agent turn can duplicate tool calls or chargeable work.

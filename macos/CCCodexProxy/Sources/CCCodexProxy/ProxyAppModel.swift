@@ -13,6 +13,10 @@ final class ProxyAppModel: ObservableObject {
     @Published var isRestoringClaudeSettings = false
     @Published var isInstallingClaudeShim = false
     @Published var statusText = "Not checked"
+    @Published var transportDetailText = "Start the proxy to see the active upstream method."
+    @Published var transportBadgeText = "Waiting"
+    @Published var transportConfiguredMode = ""
+    @Published var transportCurrentMethod: String?
     @Published var authStatusText = "OAuth not checked"
     @Published var authDetailText = "Login when you are ready to store or verify OAuth tokens."
     @Published var claudeShimStatusText = "Claude command shim not checked"
@@ -32,6 +36,10 @@ final class ProxyAppModel: ObservableObject {
         await refreshClaudeSettingsPreview()
     }
 
+    func refreshRuntimeStatus() async {
+        await refreshProxyStatus(updateLastMessage: false)
+    }
+
     private func refreshProxyStatus(updateLastMessage: Bool) async {
         let healthURL = URL(string: "http://127.0.0.1:\(port)/healthz")!
 
@@ -40,12 +48,18 @@ final class ProxyAppModel: ObservableObject {
             let isHealthy = (response as? HTTPURLResponse)?.statusCode == 200
             isRunning = isHealthy
             statusText = isHealthy ? "Running on 127.0.0.1:\(port)" : "Stopped"
+            if isHealthy {
+                await refreshTransportStatus()
+            } else {
+                applyStoppedTransportStatus()
+            }
             if updateLastMessage {
                 lastMessage = isHealthy ? "Proxy is running." : "Proxy is stopped."
             }
         } catch {
             isRunning = false
             statusText = "Stopped"
+            applyStoppedTransportStatus()
             if updateLastMessage {
                 lastMessage = "Proxy is stopped."
             }
@@ -85,8 +99,13 @@ final class ProxyAppModel: ObservableObject {
             proxyProcess = process
             isRunning = true
             statusText = "Running on 127.0.0.1:\(port)"
+            transportDetailText = "Waiting for the first Codex request."
+            transportBadgeText = "Waiting"
+            transportCurrentMethod = nil
             lastMessage = "Proxy started."
             await installClaudeShim(updateLastMessage: false)
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            await refreshProxyStatus(updateLastMessage: false)
         } catch {
             lastMessage = "Failed to start proxy: \(error.localizedDescription)"
         }
@@ -97,6 +116,7 @@ final class ProxyAppModel: ObservableObject {
         proxyProcess = nil
         isRunning = false
         statusText = "Stopped"
+        applyStoppedTransportStatus()
         lastMessage = "Proxy stopped. New claude launches will show an error while this app remains open."
     }
 
@@ -275,6 +295,79 @@ final class ProxyAppModel: ObservableObject {
         }
     }
 
+    private func refreshTransportStatus() async {
+        do {
+            let output = try await runCLI(["admin", "status", "--port", "\(port)"])
+            let data = Data(output.utf8)
+            let status = try JSONDecoder().decode(ProxyAdminStatus.self, from: data)
+            applyTransportStatus(status.transport)
+        } catch {
+            transportDetailText = error.localizedDescription
+            transportBadgeText = "Unknown"
+            transportConfiguredMode = ""
+            transportCurrentMethod = nil
+        }
+    }
+
+    private func applyTransportStatus(_ status: ProxyTransportStatus?) {
+        guard let status else {
+            transportDetailText = "Transport status is not available from the proxy."
+            transportBadgeText = "Unknown"
+            transportConfiguredMode = ""
+            transportCurrentMethod = nil
+            return
+        }
+
+        transportConfiguredMode = status.configured
+        transportCurrentMethod = status.currentMethod
+
+        let configured = displayName(forTransport: status.configured)
+        guard let currentMethod = status.currentMethod else {
+            transportBadgeText = "Waiting"
+            transportDetailText = "Mode \(configured). Waiting for the first Codex request."
+            return
+        }
+
+        let current = displayName(forTransport: currentMethod)
+        transportBadgeText = current
+        if currentMethod == "http-sse", status.configured == "auto" {
+            if let cooldown = status.websocketCooldownMs {
+                transportDetailText = "Mode \(configured). Using HTTP SSE fallback; retry WebSocket in \(formatMilliseconds(cooldown))."
+            } else {
+                transportDetailText = "Mode \(configured). Using HTTP SSE fallback."
+            }
+        } else {
+            transportDetailText = "Mode \(configured). Current method: \(current)."
+        }
+    }
+
+    private func applyStoppedTransportStatus() {
+        transportDetailText = "Start the proxy to see the active upstream method."
+        transportBadgeText = "Idle"
+        transportConfiguredMode = ""
+        transportCurrentMethod = nil
+    }
+
+    private func displayName(forTransport value: String) -> String {
+        switch value {
+        case "auto":
+            return "Auto"
+        case "http-sse":
+            return "HTTP SSE"
+        case "websocket":
+            return "WebSocket"
+        default:
+            return value.isEmpty ? "Unknown" : value
+        }
+    }
+
+    private func formatMilliseconds(_ value: UInt64) -> String {
+        if value >= 1_000 {
+            return "\(max(1, value / 1_000))s"
+        }
+        return "\(value)ms"
+    }
+
     private func successMessage(from output: String) -> String {
         if let storage = value(for: "Storage", in: output), !storage.isEmpty {
             return "OAuth login complete. Tokens saved in \(storage)."
@@ -299,6 +392,16 @@ final class ProxyAppModel: ObservableObject {
             }
             .first
     }
+}
+
+struct ProxyAdminStatus: Decodable {
+    let transport: ProxyTransportStatus?
+}
+
+struct ProxyTransportStatus: Decodable {
+    let configured: String
+    let currentMethod: String?
+    let websocketCooldownMs: UInt64?
 }
 
 struct ClaudeSettingsPreview: Decodable {

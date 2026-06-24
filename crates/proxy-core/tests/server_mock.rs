@@ -140,6 +140,10 @@ async fn auto_transport_falls_back_to_http_and_cools_down_websocket() {
 
     assert!(state.websocket_attempts.load(Ordering::SeqCst) <= 1);
     assert_eq!(state.http_posts.load(Ordering::SeqCst), 2);
+    let status = admin_status(server.addr).await;
+    assert_eq!(status["transport"]["configured"], "auto");
+    assert_eq!(status["transport"]["currentMethod"], "http-sse");
+    assert!(status["transport"]["websocketCooldownMs"].as_u64().unwrap() > 0);
     server.stop().await;
 }
 
@@ -480,6 +484,18 @@ async fn start_mock_upstream(app: Router) -> std::net::SocketAddr {
         axum::serve(listener, app).await.unwrap();
     });
     addr
+}
+
+async fn admin_status(addr: std::net::SocketAddr) -> serde_json::Value {
+    reqwest::Client::new()
+        .get(format!("http://{addr}/admin/status"))
+        .header("x-cc-codex-admin-token", "test-admin-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
 }
 
 async fn test_config(upstream: std::net::SocketAddr, path: &str) -> (AppConfig, AppPaths) {

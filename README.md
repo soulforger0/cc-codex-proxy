@@ -67,12 +67,12 @@ The managed settings point Claude Code at the local Anthropic-compatible proxy, 
 
 Claude Code always talks to the local proxy over HTTP. Streaming responses are returned as Anthropic-compatible SSE.
 
-The proxy's upstream Codex transport defaults to HTTP SSE, which is the most reliable path for Claude Code. Override when needed:
+The proxy's upstream Codex transport defaults to `auto`: it tries WebSocket first, then falls back to HTTP SSE if WebSocket setup fails. Override when needed:
 
 ```sh
-export CCP_CODEX_TRANSPORT=http       # default, most conservative
+export CCP_CODEX_TRANSPORT=auto       # default, try WebSocket first, then HTTP SSE
 export CCP_CODEX_TRANSPORT=websocket  # fail hard if WebSocket is unavailable
-export CCP_CODEX_TRANSPORT=auto       # try WebSocket first, then fall back to HTTP SSE
+export CCP_CODEX_TRANSPORT=http       # always use HTTP SSE
 ```
 
 ## Runtime Files

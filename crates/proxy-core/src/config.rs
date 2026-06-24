@@ -67,7 +67,7 @@ pub enum CodexTransport {
 
 impl Default for CodexTransport {
     fn default() -> Self {
-        Self::Http
+        Self::Auto
     }
 }
 
@@ -230,10 +230,10 @@ mod tests {
     }
 
     #[test]
-    fn default_transport_is_http() {
+    fn default_transport_is_auto() {
         assert!(matches!(
             CodexConfig::default().transport,
-            CodexTransport::Http
+            CodexTransport::Auto
         ));
     }
 }

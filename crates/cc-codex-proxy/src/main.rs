@@ -113,7 +113,13 @@ struct LaunchArgs {
 
 #[derive(Debug, Subcommand)]
 enum AdminSubcommand {
-    Status,
+    Status(AdminStatusArgs),
+}
+
+#[derive(Debug, Args)]
+struct AdminStatusArgs {
+    #[arg(long, env = "PORT")]
+    port: Option<u16>,
 }
 
 #[derive(Debug, Args)]
@@ -426,10 +432,11 @@ fn exec_command(mut command: StdCommand) -> Result<()> {
 async fn cmd_admin(args: AdminCommand) -> Result<()> {
     let (config, _) = AppConfig::load_default()?;
     match args.command {
-        AdminSubcommand::Status => {
+        AdminSubcommand::Status(args) => {
+            let port = args.port.unwrap_or(config.port);
             let client = reqwest::Client::new();
             let resp = client
-                .get(format!("http://127.0.0.1:{}/admin/status", config.port))
+                .get(format!("http://127.0.0.1:{port}/admin/status"))
                 .header("x-cc-codex-admin-token", config.admin_token)
                 .send()
                 .await

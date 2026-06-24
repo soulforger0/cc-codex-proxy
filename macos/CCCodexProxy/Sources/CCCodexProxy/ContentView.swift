@@ -46,19 +46,24 @@ struct ContentView: View {
             .frame(width: 44, height: 44)
 
             VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
                     Text("CC Codex Proxy")
                         .font(.headline.weight(.semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
                     statusPill
                 }
-                Text(model.statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                HStack(alignment: .center, spacing: 8) {
+                    Text(model.statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    transportPill
+                }
             }
-
-            Spacer(minLength: 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(14)
         .background(
@@ -93,6 +98,24 @@ struct ContentView: View {
             Capsule().stroke(statusColor.opacity(model.isRunning ? 0.28 : 0.16), lineWidth: 1)
         )
         .foregroundStyle(statusColor)
+    }
+
+    @ViewBuilder
+    private var transportPill: some View {
+        if model.isRunning, model.transportCurrentMethod != nil {
+            Text(model.transportBadgeText)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(AppTheme.subtleFill))
+                .overlay(
+                    Capsule().stroke(transportStatusColor.opacity(0.24), lineWidth: 1)
+                )
+                .foregroundStyle(transportStatusColor)
+                .help(model.transportDetailText)
+                .accessibilityLabel("Transport \(model.transportBadgeText)")
+        }
     }
 
     private var controls: some View {
@@ -243,6 +266,20 @@ struct ContentView: View {
             return "Reading the local auth file."
         }
         return model.authDetailText
+    }
+
+    private var transportStatusColor: Color {
+        guard model.isRunning else {
+            return AppTheme.muted
+        }
+        switch model.transportCurrentMethod {
+        case "websocket":
+            return AppTheme.success
+        case "http-sse":
+            return model.transportConfiguredMode == "auto" ? AppTheme.warning : AppTheme.accent
+        default:
+            return AppTheme.muted
+        }
     }
 
     private var claudeShimStatus: some View {

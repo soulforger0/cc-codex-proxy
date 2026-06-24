@@ -31,6 +31,18 @@ const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WEBSOCKET_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 const WEBSOCKET_FAILURE_COOLDOWN: Duration = Duration::from_secs(120);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodexTransportMethod {
+    HttpSse,
+    WebSocket,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CodexTransportStatus {
+    pub current_method: Option<CodexTransportMethod>,
+    pub websocket_cooldown_remaining: Option<Duration>,
+}
+
 pub struct CodexResponse {
     pub body: ByteStream,
     pub status: StatusCode,
@@ -56,6 +68,13 @@ impl CodexClient {
             auth,
             transport_state: Arc::new(TransportState::default()),
         })
+    }
+
+    pub fn transport_status(&self) -> CodexTransportStatus {
+        CodexTransportStatus {
+            current_method: self.transport_state.current_method(),
+            websocket_cooldown_remaining: self.transport_state.websocket_cooldown_remaining(),
+        }
     }
 
     pub async fn post(
@@ -177,6 +196,8 @@ impl CodexClient {
                 retry_after,
             });
         }
+        self.transport_state
+            .record_method(CodexTransportMethod::HttpSse);
         let stream = response
             .bytes_stream()
             .map(|item| item.map_err(ProxyError::from));
@@ -211,6 +232,8 @@ impl CodexClient {
             .map_err(|err| ProxyError::Transport(format!("Codex websocket send failed: {err}")))?;
 
         let first = read_first_websocket_event(&mut socket).await?;
+        self.transport_state
+            .record_method(CodexTransportMethod::WebSocket);
         let stream = try_stream! {
             if let Some(bytes) = websocket_message_to_bytes(first) {
                 yield bytes;
@@ -286,6 +309,7 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 #[derive(Debug, Default)]
 struct TransportState {
     websocket_disabled_until: Mutex<Option<Instant>>,
+    current_method: Mutex<Option<CodexTransportMethod>>,
 }
 
 impl TransportState {
@@ -318,6 +342,21 @@ impl TransportState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *disabled_until = None;
+    }
+
+    fn current_method(&self) -> Option<CodexTransportMethod> {
+        *self
+            .current_method
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn record_method(&self, method: CodexTransportMethod) {
+        let mut current_method = self
+            .current_method
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current_method = Some(method);
     }
 }
 
@@ -433,6 +472,21 @@ mod tests {
 
         state.record_websocket_success();
         assert!(state.websocket_cooldown_remaining().is_none());
+    }
+
+    #[test]
+    fn transport_state_tracks_current_method() {
+        let state = TransportState::default();
+        assert_eq!(state.current_method(), None);
+
+        state.record_method(CodexTransportMethod::HttpSse);
+        assert_eq!(state.current_method(), Some(CodexTransportMethod::HttpSse));
+
+        state.record_method(CodexTransportMethod::WebSocket);
+        assert_eq!(
+            state.current_method(),
+            Some(CodexTransportMethod::WebSocket)
+        );
     }
 
     #[test]

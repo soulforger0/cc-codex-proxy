@@ -71,6 +71,14 @@ final class StatusItemController: NSObject {
                 self?.updateStatusTooltip()
             }
             .store(in: &cancellables)
+
+        Timer.publish(every: 5, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self, self.model.isRunning else { return }
+                Task { await self.model.refreshRuntimeStatus() }
+            }
+            .store(in: &cancellables)
     }
 
     private func updateStatusIcon() {
