@@ -67,7 +67,7 @@ pub enum CodexTransport {
 
 impl Default for CodexTransport {
     fn default() -> Self {
-        Self::Auto
+        Self::Http
     }
 }
 
@@ -92,7 +92,7 @@ impl Default for CodexConfig {
             oauth_client_id: DEFAULT_CODEX_CLIENT_ID.to_string(),
             originator: DEFAULT_ORIGINATOR.to_string(),
             user_agent: format!("{DEFAULT_ORIGINATOR}/{}", env!("CARGO_PKG_VERSION")),
-            transport: CodexTransport::Auto,
+            transport: CodexTransport::default(),
             previous_response_id: false,
             header_timeout_ms: 60_000,
         }
@@ -227,5 +227,13 @@ mod tests {
         let second = ensure_admin_token(&path).unwrap();
         assert_eq!(first, second);
         assert!(first.len() >= 48);
+    }
+
+    #[test]
+    fn default_transport_is_http() {
+        assert!(matches!(
+            CodexConfig::default().transport,
+            CodexTransport::Http
+        ));
     }
 }

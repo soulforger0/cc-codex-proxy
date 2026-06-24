@@ -4,6 +4,7 @@ use crate::{
     config::{CodexConfig, CodexTransport},
     error::{ProxyError, Result},
 };
+use async_stream::try_stream;
 use bytes::Bytes;
 use futures_util::{SinkExt, Stream, StreamExt};
 use http::StatusCode;
@@ -13,18 +14,21 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
         client::IntoClientRequest, handshake::client::Request as WebSocketRequest,
         ClientRequestBuilder, Message,
     },
+    WebSocketStream,
 };
 use tracing::{debug, warn};
 
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 
 const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const WEBSOCKET_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 const WEBSOCKET_FAILURE_COOLDOWN: Duration = Duration::from_secs(120);
 
 pub struct CodexResponse {
@@ -192,17 +196,25 @@ impl CodexClient {
             .send(Message::Text(payload.into()))
             .await
             .map_err(|err| ProxyError::Transport(format!("Codex websocket send failed: {err}")))?;
-        let stream = socket.filter_map(|message| async move {
-            match message {
-                Ok(Message::Text(text)) => Some(Ok(Bytes::from(format!("data: {text}\n\n")))),
-                Ok(Message::Binary(bytes)) => Some(Ok(Bytes::copy_from_slice(bytes.as_ref()))),
-                Ok(Message::Close(_)) => None,
-                Ok(_) => None,
-                Err(err) => Some(Err(ProxyError::Transport(format!(
-                    "Codex websocket read failed: {err}"
-                )))),
+
+        let first = read_first_websocket_event(&mut socket).await?;
+        let stream = try_stream! {
+            if let Some(bytes) = websocket_message_to_bytes(first) {
+                yield bytes;
             }
-        });
+            while let Some(message) = socket.next().await {
+                match message {
+                    Ok(message) => {
+                        if let Some(bytes) = websocket_message_to_bytes(message) {
+                            yield bytes;
+                        }
+                    }
+                    Err(err) => Err(ProxyError::Transport(format!(
+                        "Codex websocket read failed: {err}"
+                    )))?,
+                }
+            }
+        };
         Ok(CodexResponse {
             body: Box::pin(stream),
             status: StatusCode::OK,
@@ -338,6 +350,52 @@ fn build_websocket_request(
     request
         .into_client_request()
         .map_err(|err| ProxyError::Transport(format!("bad websocket request: {err}")))
+}
+
+async fn read_first_websocket_event<S>(socket: &mut WebSocketStream<S>) -> Result<Message>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    tokio::time::timeout(WEBSOCKET_FIRST_EVENT_TIMEOUT, async {
+        loop {
+            match socket.next().await {
+                Some(Ok(message @ Message::Text(_))) | Some(Ok(message @ Message::Binary(_))) => {
+                    return Ok(message);
+                }
+                Some(Ok(Message::Close(frame))) => {
+                    let detail = frame
+                        .map(|frame| format!(": {} {}", frame.code, frame.reason))
+                        .unwrap_or_default();
+                    return Err(ProxyError::Transport(format!(
+                        "Codex websocket closed before first event{detail}"
+                    )));
+                }
+                Some(Ok(_)) => {}
+                Some(Err(err)) => {
+                    return Err(ProxyError::Transport(format!(
+                        "Codex websocket read failed before first event: {err}"
+                    )));
+                }
+                None => {
+                    return Err(ProxyError::Transport(
+                        "Codex websocket ended before first event".into(),
+                    ));
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        ProxyError::Transport("timed out waiting for first Codex websocket event".into())
+    })?
+}
+
+fn websocket_message_to_bytes(message: Message) -> Option<Bytes> {
+    match message {
+        Message::Text(text) => Some(Bytes::from(format!("data: {text}\n\n"))),
+        Message::Binary(bytes) => Some(Bytes::copy_from_slice(bytes.as_ref())),
+        Message::Close(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => None,
+    }
 }
 
 #[cfg(test)]
