@@ -11,26 +11,28 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use serde_json::{json, Value};
 use std::pin::Pin;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 pub fn translate_stream(
     upstream: ByteStream,
     model: String,
+    request_id: Option<String>,
 ) -> Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> {
     Box::pin(try_stream! {
         let message_id = format!("msg_{}", Uuid::new_v4().simple());
-        let mut reducer = CodexReducer::new(message_id.clone(), model.clone());
+        let mut reducer = CodexReducer::new(message_id.clone(), model.clone(), request_id.clone());
         yield response::message_start(&message_id, &model);
         let mut parser = SseParser::default();
         futures_util::pin_mut!(upstream);
         while let Some(chunk) = upstream.next().await {
-            for event in parser.push(&chunk?) {
+            for event in parser.push(&chunk?, request_id.as_deref()) {
                 for bytes in reducer.process_event(&event) {
                     yield bytes;
                 }
             }
         }
-        for event in parser.finish() {
+        for event in parser.finish(request_id.as_deref()) {
             for bytes in reducer.process_event(&event) {
                 yield bytes;
             }
@@ -41,17 +43,21 @@ pub fn translate_stream(
     })
 }
 
-pub async fn accumulate_response(upstream: ByteStream, model: String) -> Result<AnthropicResponse> {
+pub async fn accumulate_response(
+    upstream: ByteStream,
+    model: String,
+    request_id: Option<String>,
+) -> Result<AnthropicResponse> {
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
-    let mut reducer = CodexReducer::new(message_id.clone(), model.clone());
+    let mut reducer = CodexReducer::new(message_id.clone(), model.clone(), request_id.clone());
     let mut parser = SseParser::default();
     futures_util::pin_mut!(upstream);
     while let Some(chunk) = upstream.next().await {
-        for event in parser.push(&chunk?) {
+        for event in parser.push(&chunk?, request_id.as_deref()) {
             let _ = reducer.process_event(&event);
         }
     }
-    for event in parser.finish() {
+    for event in parser.finish(request_id.as_deref()) {
         let _ = reducer.process_event(&event);
     }
     Ok(reducer.finish_response())
@@ -63,29 +69,29 @@ struct SseParser {
 }
 
 impl SseParser {
-    fn push(&mut self, chunk: &[u8]) -> Vec<Value> {
+    fn push(&mut self, chunk: &[u8], request_id: Option<&str>) -> Vec<Value> {
         self.buffer.push_str(&String::from_utf8_lossy(chunk));
         let mut events = Vec::new();
         while let Some(idx) = self.buffer.find("\n\n") {
             let raw = self.buffer[..idx].to_string();
             self.buffer.drain(..idx + 2);
-            if let Some(value) = parse_sse_event(&raw) {
+            if let Some(value) = parse_sse_event(&raw, request_id) {
                 events.push(value);
             }
         }
         events
     }
 
-    fn finish(&mut self) -> Vec<Value> {
+    fn finish(&mut self, request_id: Option<&str>) -> Vec<Value> {
         if self.buffer.trim().is_empty() {
             return Vec::new();
         }
         let raw = std::mem::take(&mut self.buffer);
-        parse_sse_event(&raw).into_iter().collect()
+        parse_sse_event(&raw, request_id).into_iter().collect()
     }
 }
 
-fn parse_sse_event(raw: &str) -> Option<Value> {
+fn parse_sse_event(raw: &str, request_id: Option<&str>) -> Option<Value> {
     let data = raw
         .lines()
         .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
@@ -94,13 +100,25 @@ fn parse_sse_event(raw: &str) -> Option<Value> {
     if data.is_empty() || data == "[DONE]" {
         return None;
     }
-    serde_json::from_str(&data).ok()
+    match serde_json::from_str(&data) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            warn!(
+                request_id = request_id.unwrap_or("untracked"),
+                error = %err,
+                event_preview = %truncate_for_log(&data, 1_000),
+                "failed to parse upstream SSE JSON event"
+            );
+            None
+        }
+    }
 }
 
 #[derive(Debug)]
 struct CodexReducer {
     message_id: String,
     model: String,
+    request_id: Option<String>,
     text_open: bool,
     text_index: usize,
     next_index: usize,
@@ -112,10 +130,11 @@ struct CodexReducer {
 }
 
 impl CodexReducer {
-    fn new(message_id: String, model: String) -> Self {
+    fn new(message_id: String, model: String, request_id: Option<String>) -> Self {
         Self {
             message_id,
             model,
+            request_id,
             text_open: false,
             text_index: 0,
             next_index: 0,
@@ -150,7 +169,7 @@ impl CodexReducer {
                 json!({ "type": "text_delta", "text": delta }),
             ));
         }
-        for tool in extract_function_calls(event) {
+        for tool in extract_function_calls(event, self.request_id.as_deref()) {
             if self
                 .tool_blocks
                 .iter()
@@ -164,6 +183,14 @@ impl CodexReducer {
                 out.push(response::content_block_stop(self.text_index));
                 self.text_open = false;
             }
+            info!(
+                request_id = self.request_id.as_deref().unwrap_or("untracked"),
+                call_id = %tool.call_id,
+                tool_name = %tool.name,
+                input_kind = value_kind(&tool.arguments),
+                input_keys = %object_keys(&tool.arguments),
+                "emitting Claude tool_use"
+            );
             let block = AnthropicContentBlock {
                 kind: "tool_use".into(),
                 text: None,
@@ -307,7 +334,7 @@ fn response_snapshot_text(event: &Value) -> Option<String> {
     }
 }
 
-fn extract_function_calls(event: &Value) -> Vec<ToolCall> {
+fn extract_function_calls(event: &Value, request_id: Option<&str>) -> Vec<ToolCall> {
     let typ = event
         .get("type")
         .and_then(Value::as_str)
@@ -318,13 +345,13 @@ fn extract_function_calls(event: &Value) -> Vec<ToolCall> {
 
     let mut out = Vec::new();
     if let Some(item) = event.get("item").or_else(|| event.get("output_item")) {
-        if let Some(tool) = tool_call_from_item(item) {
+        if let Some(tool) = tool_call_from_item(item, request_id) {
             out.push(tool);
         }
     }
     if let Some(output) = event.pointer("/response/output").and_then(Value::as_array) {
         for item in output {
-            if let Some(tool) = tool_call_from_item(item) {
+            if let Some(tool) = tool_call_from_item(item, request_id) {
                 out.push(tool);
             }
         }
@@ -332,7 +359,7 @@ fn extract_function_calls(event: &Value) -> Vec<ToolCall> {
     out
 }
 
-fn tool_call_from_item(item: &Value) -> Option<ToolCall> {
+fn tool_call_from_item(item: &Value, request_id: Option<&str>) -> Option<ToolCall> {
     let item_type = item.get("type").and_then(Value::as_str)?;
     if item_type != "function_call" {
         return None;
@@ -359,17 +386,91 @@ fn tool_call_from_item(item: &Value) -> Option<ToolCall> {
         .and_then(Value::as_str)
         .unwrap_or("tool")
         .to_string();
-    let arguments = item
-        .get("arguments")
-        .and_then(Value::as_str)
-        .and_then(|raw| serde_json::from_str(raw).ok())
-        .or_else(|| item.get("arguments").cloned())
-        .unwrap_or_else(|| json!({}));
+    let arguments = parse_tool_arguments(item.get("arguments"), &call_id, &name, request_id);
     Some(ToolCall {
         call_id,
         name,
         arguments,
     })
+}
+
+fn parse_tool_arguments(
+    arguments: Option<&Value>,
+    call_id: &str,
+    name: &str,
+    request_id: Option<&str>,
+) -> Value {
+    let Some(arguments) = arguments else {
+        return json!({});
+    };
+    if let Some(raw) = arguments.as_str() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return json!({});
+        }
+        match serde_json::from_str::<Value>(trimmed) {
+            Ok(value) if value.is_object() => value,
+            Ok(value) => {
+                warn!(
+                    request_id = request_id.unwrap_or("untracked"),
+                    call_id = %call_id,
+                    tool_name = %name,
+                    argument_kind = value_kind(&value),
+                    raw_arguments = %truncate_for_log(trimmed, 1_000),
+                    "upstream function_call arguments parsed to a non-object; replacing with empty object"
+                );
+                json!({})
+            }
+            Err(err) => {
+                warn!(
+                    request_id = request_id.unwrap_or("untracked"),
+                    call_id = %call_id,
+                    tool_name = %name,
+                    error = %err,
+                    raw_arguments = %truncate_for_log(trimmed, 1_000),
+                    "upstream function_call arguments are invalid JSON; replacing with empty object"
+                );
+                json!({})
+            }
+        }
+    } else if arguments.is_object() {
+        arguments.clone()
+    } else {
+        warn!(
+            request_id = request_id.unwrap_or("untracked"),
+            call_id = %call_id,
+            tool_name = %name,
+            argument_kind = value_kind(arguments),
+            raw_arguments = %truncate_for_log(&arguments.to_string(), 1_000),
+            "upstream function_call arguments are not an object; replacing with empty object"
+        );
+        json!({})
+    }
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn object_keys(value: &Value) -> String {
+    value
+        .as_object()
+        .map(|object| {
+            object
+                .keys()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("|")
+        })
+        .unwrap_or_default()
 }
 
 fn extract_usage(event: &Value) -> Option<AnthropicUsage> {
@@ -427,6 +528,14 @@ fn extract_stop_reason(event: &Value) -> Option<String> {
     )
 }
 
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push_str("...[truncated]");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,7 +547,7 @@ mod tests {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n\
              data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into())
+        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
             .await
             .unwrap();
         assert_eq!(response.content[0].text.as_deref(), Some("hi"));
@@ -451,7 +560,7 @@ mod tests {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n\
              data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into())
+        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
             .await
             .unwrap();
         assert_eq!(response.content[0].text.as_deref(), Some("hi"));
@@ -462,7 +571,7 @@ mod tests {
         let chunks = vec![Ok(Bytes::from(
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"snapshot\"}]}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into())
+        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
             .await
             .unwrap();
         assert_eq!(response.content[0].text.as_deref(), Some("snapshot"));
@@ -473,7 +582,7 @@ mod tests {
         let chunks = vec![Ok(Bytes::from(
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into())
+        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
             .await
             .unwrap();
         assert_eq!(response.content[0].kind, "tool_use");
@@ -487,11 +596,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_function_call_arguments_are_replaced_with_empty_object() {
+        let chunks = vec![Ok(Bytes::from(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"not json\"}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+        ))];
+        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(response.content[0].kind, "tool_use");
+        assert_eq!(response.content[0].name.as_deref(), Some("Read"));
+        assert_eq!(response.content[0].input.as_ref().unwrap(), &json!({}));
+    }
+
+    #[tokio::test]
     async fn cached_input_tokens_are_exposed_as_cache_reads() {
         let chunks = vec![Ok(Bytes::from(
             "data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":25}}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into())
+        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
             .await
             .unwrap();
         assert_eq!(response.usage.input_tokens, 75);

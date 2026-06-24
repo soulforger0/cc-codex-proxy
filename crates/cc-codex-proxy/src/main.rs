@@ -153,6 +153,14 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         config.port = port;
     }
     let _guards = logging::init(&paths, config.log.stderr, config.log.verbose)?;
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        port = config.port,
+        transport = ?config.codex.transport,
+        base_url = %config.codex.base_url,
+        log_path = %paths.logs_dir.join("proxy.log").display(),
+        "starting cc-codex-proxy server"
+    );
     let auth = auth_manager(&config, &paths);
     let handle = serve(config.clone(), paths.clone(), auth).await?;
     println!("Proxy listening on http://{}", handle.addr);

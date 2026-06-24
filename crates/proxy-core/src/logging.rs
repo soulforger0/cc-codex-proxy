@@ -1,9 +1,11 @@
 use crate::{config::AppPaths, error::Result};
+use std::fs;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 pub fn init(paths: &AppPaths, stderr: bool, verbose: bool) -> Result<Vec<WorkerGuard>> {
     paths.ensure()?;
+    fs::write(paths.logs_dir.join("proxy.log"), b"")?;
     let filter = if verbose {
         EnvFilter::new("cc_codex_proxy=debug,proxy_core=debug,tower_http=info")
     } else {

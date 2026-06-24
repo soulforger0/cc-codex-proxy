@@ -148,7 +148,7 @@ fn push_assistant_input_items(out: &mut Vec<Value>, content: &Value) {
                     "type": "function_call",
                     "call_id": block.get("id").and_then(Value::as_str).unwrap_or("tool_call"),
                     "name": block.get("name").and_then(Value::as_str).unwrap_or("tool"),
-                    "arguments": block.get("input").cloned().unwrap_or(Value::Null).to_string(),
+                    "arguments": assistant_tool_arguments(&block),
                 }));
             }
             _ => parts.push(json!({ "type": "output_text", "text": block.to_string() })),
@@ -180,6 +180,15 @@ fn normalized_blocks(content: &Value) -> Vec<Value> {
         Value::Array(items) => items.clone(),
         other => vec![json!({ "type": "text", "text": other.to_string() })],
     }
+}
+
+fn assistant_tool_arguments(block: &Value) -> String {
+    block
+        .get("input")
+        .filter(|input| input.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+        .to_string()
 }
 
 fn flush_message(out: &mut Vec<Value>, role: &str, parts: &mut Vec<Value>) {
@@ -564,6 +573,51 @@ mod tests {
         assert_eq!(translated.input[0]["call_id"], "toolu_1");
         let output = translated.input[0]["output"].as_str().unwrap();
         assert!(output.contains("image omitted"));
+    }
+
+    #[test]
+    fn assistant_tool_use_history_uses_object_arguments() {
+        let req = AnthropicRequest {
+            model: "gpt-5.4".into(),
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: Some(true),
+            system: None,
+            messages: vec![crate::anthropic::schema::AnthropicMessage {
+                role: "assistant".into(),
+                content: json!([
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "Read",
+                        "input": {"path": "Cargo.toml"}
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_2",
+                        "name": "NoArgs",
+                        "input": null
+                    }
+                ]),
+                extra: Default::default(),
+            }],
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            output_config: None,
+            thinking: None,
+            extra: Default::default(),
+        };
+        let translated = translate_request(&req, &resolved(), Some("s")).unwrap();
+
+        assert_eq!(translated.input[0]["type"], "function_call");
+        assert_eq!(
+            translated.input[0]["arguments"],
+            json!("{\"path\":\"Cargo.toml\"}")
+        );
+        assert_eq!(translated.input[1]["type"], "function_call");
+        assert_eq!(translated.input[1]["arguments"], json!("{}"));
     }
 
     #[test]

@@ -23,7 +23,7 @@ use tokio_tungstenite::{
     },
     WebSocketStream,
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 
@@ -136,7 +136,12 @@ impl CodexClient {
         access_token: &str,
         account_id: Option<&str>,
     ) -> Result<CodexResponse> {
-        debug!(model = %body.model, input_items = body.input.len(), "posting codex HTTP request");
+        info!(
+            model = %body.model,
+            input_items = body.input.len(),
+            tool_count = body.tools.as_ref().map_or(0, Vec::len),
+            "posting Codex HTTP request"
+        );
         let request = self
             .http
             .post(&self.config.base_url)
@@ -152,6 +157,7 @@ impl CodexClient {
         })??;
         let status =
             StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        info!(%status, "received Codex HTTP response headers");
         if !status.is_success() {
             let retry_after = response
                 .headers()
@@ -159,6 +165,12 @@ impl CodexClient {
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned);
             let body = response.text().await.unwrap_or_default();
+            warn!(
+                %status,
+                retry_after = ?retry_after,
+                upstream_body = %truncate_for_log(&body, 4_000),
+                "Codex HTTP request failed"
+            );
             return Err(ProxyError::Upstream {
                 status,
                 body,
@@ -191,6 +203,7 @@ impl CodexClient {
                 .map_err(|err| {
                     ProxyError::Transport(format!("Codex websocket setup failed: {err}"))
                 })?;
+        info!(model = %body.model, input_items = body.input.len(), "Codex websocket connected");
         let payload = json!({ "type": "responses.create", "request": body }).to_string();
         socket
             .send(Message::Text(payload.into()))
@@ -260,6 +273,14 @@ impl CodexClient {
         }
         Ok(headers)
     }
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push_str("...[truncated]");
+    }
+    out
 }
 
 #[derive(Debug, Default)]

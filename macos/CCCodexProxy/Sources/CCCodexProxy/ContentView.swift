@@ -10,6 +10,8 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                 header
                 Divider()
+                modelSelection
+                Divider()
                 controls
                 Divider()
                 settings
@@ -69,6 +71,47 @@ struct ContentView: View {
             }
         }
         .buttonStyle(.bordered)
+    }
+
+    private var modelSelection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Claude models", systemImage: "cpu")
+                .font(.subheadline.weight(.semibold))
+
+            VStack(alignment: .leading, spacing: 6) {
+                settingsInputRow(title: "Model") {
+                    TextField("Model", text: $model.model)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                        .onSubmit {
+                            Task {
+                                await model.refreshClaudeSettingsPreview()
+                                await model.installClaudeShim()
+                            }
+                        }
+                }
+                settingsInputRow(title: "Small Model") {
+                    TextField("Small Model", text: $model.smallModel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                        .onSubmit {
+                            Task {
+                                await model.refreshClaudeSettingsPreview()
+                                await model.installClaudeShim()
+                            }
+                        }
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.secondary.opacity(0.20))
+        )
     }
 
     private var settings: some View {
@@ -228,7 +271,7 @@ struct ContentView: View {
                 .accessibilityLabel("Refresh Claude Code settings preview")
             }
 
-            claudeSettingsInputs
+            advancedSettingsInputs
 
             if let preview = model.claudeSettingsPreview {
                 settingsSummary(preview)
@@ -280,30 +323,8 @@ struct ContentView: View {
         )
     }
 
-    private var claudeSettingsInputs: some View {
+    private var advancedSettingsInputs: some View {
         VStack(alignment: .leading, spacing: 6) {
-            settingsInputRow(title: "Model") {
-                TextField("Model", text: $model.model)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 180)
-                    .onSubmit {
-                        Task {
-                            await model.refreshClaudeSettingsPreview()
-                            await model.installClaudeShim()
-                        }
-                    }
-            }
-            settingsInputRow(title: "Small Model") {
-                TextField("Small Model", text: $model.smallModel)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 180)
-                    .onSubmit {
-                        Task {
-                            await model.refreshClaudeSettingsPreview()
-                            await model.installClaudeShim()
-                        }
-                    }
-            }
             settingsInputRow(title: "Port") {
                 TextField("Port", value: $model.port, formatter: NumberFormatter())
                     .textFieldStyle(.roundedBorder)
