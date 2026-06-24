@@ -4,7 +4,7 @@ use crate::{
     auth::AuthManager,
     codex::{
         client::CodexClient,
-        stream::{accumulate_response, translate_stream},
+        stream::{accumulate_response, translate_stream, ToolCatalog},
         translate::{translate_request, ResponsesRequest},
     },
     config::{AppConfig, AppPaths},
@@ -140,6 +140,7 @@ async fn messages(
         message_count = request.messages.len(),
         tool_count = request.tools.as_ref().map_or(0, Vec::len),
         session_present = session_id.is_some(),
+        tool_names = %summarize_anthropic_tool_names(request.tools.as_deref()),
         tools = %summarize_anthropic_tools(request.tools.as_deref()),
         "received Anthropic messages request"
     );
@@ -150,6 +151,7 @@ async fn messages(
             return Err(err);
         }
     };
+    let tool_catalog = ToolCatalog::from_anthropic_tools(request.tools.as_deref());
     let translated = translate_request(&request, &resolved, session_id.as_deref())?;
     info!(
         %request_id,
@@ -173,7 +175,12 @@ async fn messages(
     );
 
     if request.wants_stream() {
-        let stream = translate_stream(upstream.body, request.model.clone(), Some(request_id));
+        let stream = translate_stream(
+            upstream.body,
+            request.model.clone(),
+            tool_catalog,
+            Some(request_id),
+        );
         let body = Body::from_stream(stream);
         Response::builder()
             .status(StatusCode::OK)
@@ -184,14 +191,34 @@ async fn messages(
                 ProxyError::Transport(format!("failed to build streaming response: {err}"))
             })
     } else {
-        let response =
-            accumulate_response(upstream.body, request.model.clone(), Some(request_id)).await?;
+        let response = accumulate_response(
+            upstream.body,
+            request.model.clone(),
+            tool_catalog,
+            Some(request_id),
+        )
+        .await?;
         Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(response_json(response).to_string()))
             .map_err(|err| ProxyError::Transport(format!("failed to build response: {err}")))
     }
+}
+
+fn summarize_anthropic_tool_names(tools: Option<&[AnthropicTool]>) -> String {
+    let Some(tools) = tools else {
+        return "none".into();
+    };
+    if tools.is_empty() {
+        return "none".into();
+    }
+    tools
+        .iter()
+        .take(128)
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn summarize_anthropic_tools(tools: Option<&[AnthropicTool]>) -> String {

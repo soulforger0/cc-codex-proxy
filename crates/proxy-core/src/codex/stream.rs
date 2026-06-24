@@ -1,7 +1,7 @@
 use crate::{
     anthropic::{
         response,
-        schema::{AnthropicContentBlock, AnthropicResponse, AnthropicUsage},
+        schema::{AnthropicContentBlock, AnthropicResponse, AnthropicTool, AnthropicUsage},
     },
     codex::client::ByteStream,
     error::Result,
@@ -10,18 +10,22 @@ use async_stream::try_stream;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use serde_json::{json, Value};
-use std::pin::Pin;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    pin::Pin,
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 pub fn translate_stream(
     upstream: ByteStream,
     model: String,
+    tool_catalog: ToolCatalog,
     request_id: Option<String>,
 ) -> Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> {
     Box::pin(try_stream! {
         let message_id = format!("msg_{}", Uuid::new_v4().simple());
-        let mut reducer = CodexReducer::new(message_id.clone(), model.clone(), request_id.clone());
+        let mut reducer = CodexReducer::new(message_id.clone(), model.clone(), tool_catalog, request_id.clone());
         yield response::message_start(&message_id, &model);
         let mut parser = SseParser::default();
         futures_util::pin_mut!(upstream);
@@ -46,10 +50,16 @@ pub fn translate_stream(
 pub async fn accumulate_response(
     upstream: ByteStream,
     model: String,
+    tool_catalog: ToolCatalog,
     request_id: Option<String>,
 ) -> Result<AnthropicResponse> {
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
-    let mut reducer = CodexReducer::new(message_id.clone(), model.clone(), request_id.clone());
+    let mut reducer = CodexReducer::new(
+        message_id.clone(),
+        model.clone(),
+        tool_catalog,
+        request_id.clone(),
+    );
     let mut parser = SseParser::default();
     futures_util::pin_mut!(upstream);
     while let Some(chunk) = upstream.next().await {
@@ -61,6 +71,81 @@ pub async fn accumulate_response(
         let _ = reducer.process_event(&event);
     }
     Ok(reducer.finish_response())
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolCatalog {
+    tools: BTreeMap<String, ToolSpec>,
+}
+
+impl ToolCatalog {
+    pub fn from_anthropic_tools(tools: Option<&[AnthropicTool]>) -> Self {
+        let mut catalog = Self::default();
+        let Some(tools) = tools else {
+            return catalog;
+        };
+        for tool in tools {
+            catalog.tools.insert(
+                tool.name.clone(),
+                ToolSpec {
+                    required: schema_string_set(tool.input_schema.as_ref(), "required"),
+                    properties: schema_property_set(tool.input_schema.as_ref()),
+                },
+            );
+        }
+        catalog
+    }
+
+    fn validate(&self, tool_name: &str, arguments: &Value) -> ToolValidation {
+        let input_keys = value_key_set(arguments);
+        let Some(spec) = self.tools.get(tool_name) else {
+            return ToolValidation {
+                known: false,
+                required: BTreeSet::new(),
+                properties: BTreeSet::new(),
+                input_keys,
+                missing_required: BTreeSet::new(),
+                extra_input_keys: BTreeSet::new(),
+            };
+        };
+        let missing_required = spec
+            .required
+            .difference(&input_keys)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let extra_input_keys = if spec.properties.is_empty() {
+            BTreeSet::new()
+        } else {
+            input_keys
+                .difference(&spec.properties)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        ToolValidation {
+            known: true,
+            required: spec.required.clone(),
+            properties: spec.properties.clone(),
+            input_keys,
+            missing_required,
+            extra_input_keys,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolSpec {
+    required: BTreeSet<String>,
+    properties: BTreeSet<String>,
+}
+
+#[derive(Debug)]
+struct ToolValidation {
+    known: bool,
+    required: BTreeSet<String>,
+    properties: BTreeSet<String>,
+    input_keys: BTreeSet<String>,
+    missing_required: BTreeSet<String>,
+    extra_input_keys: BTreeSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -118,6 +203,7 @@ fn parse_sse_event(raw: &str, request_id: Option<&str>) -> Option<Value> {
 struct CodexReducer {
     message_id: String,
     model: String,
+    tool_catalog: ToolCatalog,
     request_id: Option<String>,
     text_open: bool,
     text_index: usize,
@@ -130,10 +216,16 @@ struct CodexReducer {
 }
 
 impl CodexReducer {
-    fn new(message_id: String, model: String, request_id: Option<String>) -> Self {
+    fn new(
+        message_id: String,
+        model: String,
+        tool_catalog: ToolCatalog,
+        request_id: Option<String>,
+    ) -> Self {
         Self {
             message_id,
             model,
+            tool_catalog,
             request_id,
             text_open: false,
             text_index: 0,
@@ -154,20 +246,7 @@ impl CodexReducer {
     fn process_event(&mut self, event: &Value) -> Vec<Bytes> {
         let mut out = Vec::new();
         if let Some(delta) = extract_text_delta(event, self.text.is_empty()) {
-            if !self.text_open {
-                self.text_open = true;
-                self.text_index = self.next_index;
-                self.next_index += 1;
-                out.push(response::content_block_start(
-                    self.text_index,
-                    json!({ "type": "text", "text": "" }),
-                ));
-            }
-            self.text.push_str(&delta);
-            out.push(response::content_block_delta(
-                self.text_index,
-                json!({ "type": "text_delta", "text": delta }),
-            ));
+            self.push_text(&mut out, &delta);
         }
         for tool in extract_function_calls(event, self.request_id.as_deref()) {
             if self
@@ -175,6 +254,49 @@ impl CodexReducer {
                 .iter()
                 .any(|block| block.id.as_deref() == Some(tool.call_id.as_str()))
             {
+                continue;
+            }
+            let validation = self.tool_catalog.validate(&tool.name, &tool.arguments);
+            if !validation.known {
+                warn!(
+                    request_id = self.request_id.as_deref().unwrap_or("untracked"),
+                    call_id = %tool.call_id,
+                    tool_name = %tool.name,
+                    input_kind = value_kind(&tool.arguments),
+                    input_keys = %join_set(&validation.input_keys),
+                    raw_arguments = %truncate_for_log(&tool.arguments.to_string(), 1_000),
+                    "upstream requested a tool that Claude Code did not offer; skipping tool_use"
+                );
+                self.push_text(
+                    &mut out,
+                    &format!(
+                        "Skipped unsupported upstream tool call `{}` because Claude Code did not offer that tool.",
+                        tool.name
+                    ),
+                );
+                continue;
+            }
+            if !validation.missing_required.is_empty() {
+                warn!(
+                    request_id = self.request_id.as_deref().unwrap_or("untracked"),
+                    call_id = %tool.call_id,
+                    tool_name = %tool.name,
+                    required = %join_set(&validation.required),
+                    properties = %join_set(&validation.properties),
+                    missing_required = %join_set(&validation.missing_required),
+                    input_kind = value_kind(&tool.arguments),
+                    input_keys = %join_set(&validation.input_keys),
+                    raw_arguments = %truncate_for_log(&tool.arguments.to_string(), 1_000),
+                    "upstream tool call is missing required Claude Code input keys; skipping tool_use"
+                );
+                self.push_text(
+                    &mut out,
+                    &format!(
+                        "Skipped invalid upstream tool call `{}` because required input keys were missing: {}.",
+                        tool.name,
+                        join_set(&validation.missing_required)
+                    ),
+                );
                 continue;
             }
             let index = self.next_index;
@@ -188,7 +310,10 @@ impl CodexReducer {
                 call_id = %tool.call_id,
                 tool_name = %tool.name,
                 input_kind = value_kind(&tool.arguments),
-                input_keys = %object_keys(&tool.arguments),
+                input_keys = %join_set(&validation.input_keys),
+                required = %join_set(&validation.required),
+                properties = %join_set(&validation.properties),
+                extra_input_keys = %join_set(&validation.extra_input_keys),
                 "emitting Claude tool_use"
             );
             let block = AnthropicContentBlock {
@@ -219,6 +344,23 @@ impl CodexReducer {
             self.stopped = true;
         }
         out
+    }
+
+    fn push_text(&mut self, out: &mut Vec<Bytes>, delta: &str) {
+        if !self.text_open {
+            self.text_open = true;
+            self.text_index = self.next_index;
+            self.next_index += 1;
+            out.push(response::content_block_start(
+                self.text_index,
+                json!({ "type": "text", "text": "" }),
+            ));
+        }
+        self.text.push_str(delta);
+        out.push(response::content_block_delta(
+            self.text_index,
+            json!({ "type": "text_delta", "text": delta }),
+        ));
     }
 
     fn finish_events(&mut self) -> Vec<Bytes> {
@@ -459,18 +601,37 @@ fn value_kind(value: &Value) -> &'static str {
     }
 }
 
-fn object_keys(value: &Value) -> String {
+fn value_key_set(value: &Value) -> BTreeSet<String> {
     value
         .as_object()
-        .map(|object| {
-            object
-                .keys()
-                .take(20)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("|")
+        .map(|object| object.keys().cloned().collect::<BTreeSet<_>>())
+        .unwrap_or_default()
+}
+
+fn schema_string_set(schema: Option<&Value>, key: &str) -> BTreeSet<String> {
+    schema
+        .and_then(|schema| schema.get(key))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
         })
         .unwrap_or_default()
+}
+
+fn schema_property_set(schema: Option<&Value>) -> BTreeSet<String> {
+    schema
+        .and_then(|schema| schema.get("properties"))
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn join_set(values: &BTreeSet<String>) -> String {
+    values.iter().cloned().collect::<Vec<_>>().join("|")
 }
 
 fn extract_usage(event: &Value) -> Option<AnthropicUsage> {
@@ -541,15 +702,36 @@ mod tests {
     use super::*;
     use futures_util::stream;
 
+    fn read_tool_catalog(required: &[&str]) -> ToolCatalog {
+        let tool = AnthropicTool {
+            name: "Read".into(),
+            description: Some("Read a file".into()),
+            input_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": required
+            })),
+            extra: Default::default(),
+        };
+        ToolCatalog::from_anthropic_tools(Some(&[tool]))
+    }
+
     #[tokio::test]
     async fn accumulates_text_delta() {
         let chunks = vec![Ok(Bytes::from(
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n\
              data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
-            .await
-            .unwrap();
+        let response = accumulate_response(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            ToolCatalog::default(),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.content[0].text.as_deref(), Some("hi"));
         assert_eq!(response.usage.input_tokens, 2);
     }
@@ -560,9 +742,14 @@ mod tests {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n\
              data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
-            .await
-            .unwrap();
+        let response = accumulate_response(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            ToolCatalog::default(),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.content[0].text.as_deref(), Some("hi"));
     }
 
@@ -571,9 +758,14 @@ mod tests {
         let chunks = vec![Ok(Bytes::from(
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"snapshot\"}]}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
-            .await
-            .unwrap();
+        let response = accumulate_response(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            ToolCatalog::default(),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.content[0].text.as_deref(), Some("snapshot"));
     }
 
@@ -582,9 +774,14 @@ mod tests {
         let chunks = vec![Ok(Bytes::from(
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
-            .await
-            .unwrap();
+        let response = accumulate_response(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            read_tool_catalog(&["path"]),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.content[0].kind, "tool_use");
         assert_eq!(response.content[0].id.as_deref(), Some("call_1"));
         assert_eq!(response.content[0].name.as_deref(), Some("Read"));
@@ -600,12 +797,40 @@ mod tests {
         let chunks = vec![Ok(Bytes::from(
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"not json\"}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
-            .await
-            .unwrap();
+        let response = accumulate_response(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            read_tool_catalog(&[]),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.content[0].kind, "tool_use");
         assert_eq!(response.content[0].name.as_deref(), Some("Read"));
         assert_eq!(response.content[0].input.as_ref().unwrap(), &json!({}));
+    }
+
+    #[tokio::test]
+    async fn unoffered_function_call_is_not_forwarded_to_claude() {
+        let chunks = vec![Ok(Bytes::from(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"TaskCreate\",\"arguments\":\"{\\\"subject\\\":\\\"hi\\\"}\"}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+        ))];
+        let response = accumulate_response(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            read_tool_catalog(&["path"]),
+            Some("req_test".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.content[0].kind, "text");
+        assert!(response
+            .content
+            .first()
+            .and_then(|block| block.text.as_deref())
+            .unwrap()
+            .contains("Skipped unsupported upstream tool call `TaskCreate`"));
+        assert_eq!(response.stop_reason.as_deref(), Some("end_turn"));
     }
 
     #[tokio::test]
@@ -613,9 +838,14 @@ mod tests {
         let chunks = vec![Ok(Bytes::from(
             "data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":25}}}\n\n",
         ))];
-        let response = accumulate_response(Box::pin(stream::iter(chunks)), "gpt-5.4".into(), None)
-            .await
-            .unwrap();
+        let response = accumulate_response(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            ToolCatalog::default(),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.usage.input_tokens, 75);
         assert_eq!(response.usage.cache_read_input_tokens, 25);
         assert_eq!(response.usage.output_tokens, 5);

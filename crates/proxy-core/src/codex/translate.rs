@@ -6,6 +6,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+const TOOL_ROUTING_INSTRUCTION: &str = "When calling tools, only call functions that are explicitly listed in this request's tools array. Do not call internal Codex task or planning tools such as TaskCreate, TaskUpdate, or TaskDelete. If no listed tool fits, answer in text instead.";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponsesRequest {
     pub model: String,
@@ -35,6 +37,7 @@ pub fn translate_request(
     if let Some(system) = &request.system {
         push_instruction_part(&mut instruction_parts, system);
     }
+    instruction_parts.push(TOOL_ROUTING_INSTRUCTION.to_string());
 
     let input = build_input(&request.messages)?;
     let instructions = (!instruction_parts.is_empty()).then(|| instruction_parts.join("\n\n"));
@@ -460,10 +463,9 @@ mod tests {
 
         let translated = translate_request(&req, &resolved(), None).unwrap();
 
-        assert_eq!(
-            translated.instructions.as_deref(),
-            Some("top-level instructions")
-        );
+        let instructions = translated.instructions.as_deref().unwrap();
+        assert!(instructions.starts_with("top-level instructions"));
+        assert!(instructions.contains(TOOL_ROUTING_INSTRUCTION));
         assert_eq!(translated.input.len(), 2);
         assert_eq!(
             translated.input[0],
