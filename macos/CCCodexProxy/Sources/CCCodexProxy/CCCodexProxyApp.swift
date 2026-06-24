@@ -8,7 +8,7 @@ struct CCCodexProxyApp: App {
         MenuBarExtra {
             ContentView()
                 .environmentObject(model)
-                .frame(width: 360)
+                .frame(width: 420, height: 640)
                 .task {
                     await model.refresh()
                 }
@@ -18,4 +18,3 @@ struct CCCodexProxyApp: App {
         .menuBarExtraStyle(.window)
     }
 }
-
