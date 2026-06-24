@@ -23,7 +23,7 @@ final class ProxyAppModel: ObservableObject {
     @Published var claudeSettingsPreview: ClaudeSettingsPreview?
     @Published var claudeSettingsPreviewError: String?
     @Published var lastMessage = ""
-    @Published var model = "gpt-5.4[1m]"
+    @Published var model = "gpt-5.5[1m]"
     @Published var smallModel = "gpt-5.4-mini[1m]"
     @Published var port = 18765
     @Published var autoCompactWindow = 272_000
