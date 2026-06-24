@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 pub struct ResponsesRequest {
     pub model: String,
     pub input: Vec<Value>,
+    pub store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +70,7 @@ pub fn translate_request(
     Ok(ResponsesRequest {
         model: resolved.upstream_model.clone(),
         input,
+        store: false,
         instructions,
         tools,
         tool_choice,
@@ -392,6 +394,34 @@ mod tests {
         );
         assert_eq!(translated.input.len(), 1);
         assert_eq!(translated.input[0]["role"], "user");
+    }
+
+    #[test]
+    fn serializes_store_false_for_codex() {
+        let req = AnthropicRequest {
+            model: "gpt-5.4".into(),
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: Some(true),
+            system: None,
+            messages: vec![crate::anthropic::schema::AnthropicMessage {
+                role: "user".into(),
+                content: json!("hi"),
+                extra: Default::default(),
+            }],
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            output_config: None,
+            thinking: None,
+            extra: Default::default(),
+        };
+
+        let translated = translate_request(&req, &resolved(), None).unwrap();
+        let serialized = serde_json::to_value(translated).unwrap();
+
+        assert_eq!(serialized["store"], false);
     }
 
     #[test]
