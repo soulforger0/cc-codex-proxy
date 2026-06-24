@@ -43,13 +43,13 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | `tool_use` | `function_call` | Preserves call id, tool name, and JSON arguments. |
 | `tool_result` | `function_call_output` | Text is forwarded; image results become placeholders. |
 | `tools[]` | `tools[]` with `type: "function"` | Anthropic `input_schema` becomes Responses `parameters`; `strict` is disabled for Claude Code compatibility. |
-| `web_search_20250305` | `web_search` | Hosted web-search bridge. |
-| `tool_choice` | `tool_choice` | `auto`, `none`, `any`, and forced tool choices map to Responses equivalents. |
+| `type: web_search_*`, `name: web_search` | `web_search` | Hosted web-search bridge. `allowed_domains`/`blocked_domains` map to `filters`; `user_location` is forwarded. Anthropic `max_uses` and `response_inclusion` have no direct Responses equivalent and are not forwarded. |
+| `tool_choice` | `tool_choice` | `auto`, `none`, `any`, forced function tools, and forced `web_search` map to Responses equivalents. |
 | `max_tokens` | `max_output_tokens` | Output limit only. |
 | `temperature`, `top_p` | same names | Forwarded when Claude Code sends them. |
 | `metadata` | `metadata` | Forwarded unchanged. |
-| `output_config.effort` | `reasoning.effort` | `max` maps to `xhigh`; unknown values fall back to `medium`. |
-| `thinking.budget_tokens` | `reasoning.effort` | Budgets above 40k become `high`; lower budgets become `medium`. |
+| `output_config.effort` | `reasoning.effort` | `auto` omits the field; `max`/`ultracode` map to `xhigh`; `none`, `minimal`, `low`, `medium`, `high`, and `xhigh` are forwarded. Unknown values are omitted. |
+| `thinking.budget_tokens` | `reasoning.effort` | Deprecated Claude fixed thinking budgets are mapped as a fallback: `0` -> `none`, up to 4k -> `low`, up to 32k -> `medium`, above 32k -> `high`. |
 | `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting. |
 | `x-claude-code-session-id` | `prompt_cache_key` and upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. |
 

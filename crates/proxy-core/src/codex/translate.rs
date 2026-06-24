@@ -203,8 +203,8 @@ fn tool_result_output(block: &Value) -> String {
 fn translate_tools(tools: &[AnthropicTool]) -> Result<Vec<Value>> {
     let mut out = Vec::with_capacity(tools.len());
     for tool in tools {
-        if tool.name == "web_search_20250305" {
-            out.push(json!({ "type": "web_search" }));
+        if is_anthropic_web_search_tool(tool) {
+            out.push(translate_web_search_tool(tool));
             continue;
         }
         out.push(json!({
@@ -218,16 +218,59 @@ fn translate_tools(tools: &[AnthropicTool]) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+fn is_anthropic_web_search_tool(tool: &AnthropicTool) -> bool {
+    tool.extra
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.starts_with("web_search_"))
+        || tool.name.starts_with("web_search_")
+}
+
+fn translate_web_search_tool(tool: &AnthropicTool) -> Value {
+    let mut out = serde_json::Map::new();
+    out.insert("type".into(), json!("web_search"));
+
+    if let Some(context_size) = tool
+        .extra
+        .get("search_context_size")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "low" | "medium" | "high"))
+    {
+        out.insert("search_context_size".into(), json!(context_size));
+    }
+    if let Some(location) = tool.extra.get("user_location") {
+        out.insert("user_location".into(), location.clone());
+    }
+
+    let mut filters = serde_json::Map::new();
+    if let Some(allowed) = tool.extra.get("allowed_domains") {
+        filters.insert("allowed_domains".into(), allowed.clone());
+    }
+    if let Some(blocked) = tool.extra.get("blocked_domains") {
+        filters.insert("blocked_domains".into(), blocked.clone());
+    }
+    if !filters.is_empty() {
+        out.insert("filters".into(), Value::Object(filters));
+    }
+
+    Value::Object(out)
+}
+
 fn translate_tool_choice(choice: &Value) -> Option<Value> {
     let choice_type = choice.get("type").and_then(Value::as_str)?;
     match choice_type {
         "auto" => Some(json!("auto")),
         "none" => Some(json!("none")),
         "any" => Some(json!("required")),
-        "tool" => choice
-            .get("name")
-            .and_then(Value::as_str)
-            .map(|name| json!({ "type": "function", "name": name })),
+        "tool" => choice.get("name").and_then(Value::as_str).map(|name| {
+            if name == "web_search" {
+                json!({ "type": "web_search" })
+            } else {
+                json!({ "type": "function", "name": name })
+            }
+        }),
+        "web_search" => Some(json!({ "type": "web_search" })),
+        kind if kind.starts_with("web_search_") => Some(json!({ "type": "web_search" })),
         _ => None,
     }
 }
@@ -238,22 +281,39 @@ fn reasoning_from_request(request: &AnthropicRequest) -> Option<Value> {
         .as_ref()
         .and_then(|value| value.get("effort"))
         .and_then(Value::as_str)
+        .and_then(map_effort)
         .or_else(|| {
             request
                 .thinking
                 .as_ref()
                 .and_then(|value| value.get("budget_tokens"))
                 .and_then(Value::as_u64)
-                .map(|budget| if budget > 40_000 { "high" } else { "medium" })
+                .and_then(map_thinking_budget)
         });
-    effort.map(|effort| {
-        let mapped = match effort {
-            "max" => "xhigh",
-            "none" | "low" | "medium" | "high" | "xhigh" => effort,
-            _ => "medium",
-        };
-        json!({ "effort": mapped })
-    })
+    effort.map(|effort| json!({ "effort": effort }))
+}
+
+fn map_effort(effort: &str) -> Option<&'static str> {
+    match effort {
+        "auto" => None,
+        "max" | "ultracode" => Some("xhigh"),
+        "none" => Some("none"),
+        "minimal" => Some("minimal"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        _ => None,
+    }
+}
+
+fn map_thinking_budget(budget: u64) -> Option<&'static str> {
+    match budget {
+        0 => Some("none"),
+        1..=4_096 => Some("low"),
+        4_097..=32_768 => Some("medium"),
+        _ => Some("high"),
+    }
 }
 
 fn text_format_from_request(request: &AnthropicRequest) -> Option<Value> {
@@ -354,5 +414,96 @@ mod tests {
         assert_eq!(translated.temperature, Some(0.2));
         assert_eq!(translated.top_p, Some(0.9));
         assert_eq!(translated.metadata.as_ref().unwrap()["session"], "s1");
+    }
+
+    #[test]
+    fn translates_reasoning_effort_values() {
+        let mut req = AnthropicRequest {
+            model: "gpt-5.4".into(),
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: Some(true),
+            system: None,
+            messages: vec![crate::anthropic::schema::AnthropicMessage {
+                role: "user".into(),
+                content: json!("hello"),
+                extra: Default::default(),
+            }],
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            output_config: Some(json!({ "effort": "max" })),
+            thinking: None,
+            extra: Default::default(),
+        };
+
+        let translated = translate_request(&req, &resolved(), None).unwrap();
+        assert_eq!(translated.reasoning.as_ref().unwrap()["effort"], "xhigh");
+
+        req.output_config = Some(json!({ "effort": "auto" }));
+        let translated = translate_request(&req, &resolved(), None).unwrap();
+        assert!(translated.reasoning.is_none());
+
+        req.output_config = None;
+        req.thinking = Some(json!({ "type": "enabled", "budget_tokens": 4096 }));
+        let translated = translate_request(&req, &resolved(), None).unwrap();
+        assert_eq!(translated.reasoning.as_ref().unwrap()["effort"], "low");
+    }
+
+    #[test]
+    fn translates_anthropic_web_search_tool() {
+        let web_search_extra = json!({
+            "type": "web_search_20250305",
+            "max_uses": 5,
+            "allowed_domains": ["example.com"],
+            "blocked_domains": ["blocked.example"],
+            "user_location": {
+                "type": "approximate",
+                "city": "Melbourne",
+                "region": "Victoria",
+                "country": "AU",
+                "timezone": "Australia/Melbourne"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let req = AnthropicRequest {
+            model: "gpt-5.4".into(),
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: Some(true),
+            system: None,
+            messages: vec![crate::anthropic::schema::AnthropicMessage {
+                role: "user".into(),
+                content: json!("latest news"),
+                extra: Default::default(),
+            }],
+            tools: Some(vec![AnthropicTool {
+                name: "web_search".into(),
+                description: None,
+                input_schema: None,
+                extra: web_search_extra,
+            }]),
+            tool_choice: Some(json!({ "type": "tool", "name": "web_search" })),
+            metadata: None,
+            output_config: None,
+            thinking: None,
+            extra: Default::default(),
+        };
+
+        let translated = translate_request(&req, &resolved(), None).unwrap();
+        let tool = &translated.tools.as_ref().unwrap()[0];
+        assert_eq!(tool["type"], "web_search");
+        assert_eq!(tool["filters"]["allowed_domains"][0], "example.com");
+        assert_eq!(tool["filters"]["blocked_domains"][0], "blocked.example");
+        assert_eq!(tool["user_location"]["city"], "Melbourne");
+        assert_eq!(
+            translated.tool_choice.as_ref().unwrap(),
+            &json!({ "type": "web_search" })
+        );
+        assert!(tool.get("max_uses").is_none());
     }
 }
