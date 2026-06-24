@@ -2,7 +2,7 @@ cask "cc-codex-proxy-app" do
   version "0.1.0"
   sha256 "PLACEHOLDER"
 
-  url "https://github.com/soulforger0/cc-codex-proxy/releases/download/v#{version}/CCCodexProxy.zip"
+  url "https://github.com/soulforger0/cc-codex-proxy/releases/download/v#{version}/CCCodexProxy-#{version}-macOS.dmg"
   name "CC Codex Proxy"
   desc "Self-contained macOS menu bar app for Claude Code to ChatGPT Codex proxying"
   homepage "https://github.com/soulforger0/cc-codex-proxy"

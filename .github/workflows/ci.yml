@@ -19,3 +19,11 @@ jobs:
       - uses: actions/checkout@v4
       - run: swift build --package-path macos/CCCodexProxy
 
+  package:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: CCP_VERSION=0.0.0 CCP_BUILD_NUMBER="$GITHUB_RUN_NUMBER" scripts/build-app.sh
+      - run: hdiutil verify dist/CCCodexProxy-0.0.0-macOS.dmg
+

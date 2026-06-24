@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run Rust tests
+        run: cargo test --all
+      - name: Build Swift app
+        run: swift build --package-path macos/CCCodexProxy
+      - name: Derive release version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build release artifacts
+        run: CCP_VERSION="$VERSION" CCP_BUILD_NUMBER="$GITHUB_RUN_NUMBER" scripts/build-app.sh
+      - name: Verify release artifacts
+        run: |
+          test -f "dist/CCCodexProxy-$VERSION-macOS.dmg"
+          test -f "dist/CCCodexProxy-$VERSION-macOS.zip"
+          test -f "dist/SHA256SUMS"
+          hdiutil verify "dist/CCCodexProxy-$VERSION-macOS.dmg"
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/CCCodexProxy-${{ env.VERSION }}-macOS.dmg
+            dist/CCCodexProxy-${{ env.VERSION }}-macOS.zip
+            dist/SHA256SUMS
+          generate_release_notes: true
