@@ -35,7 +35,9 @@ struct ContentView: View {
         HStack(alignment: .center, spacing: 14) {
             ZStack {
                 Circle()
-                    .fill(statusColor.opacity(0.16))
+                    .fill(.thinMaterial)
+                Circle()
+                    .stroke(AppTheme.hairline, lineWidth: 1)
                 Image(systemName: model.isRunning ? "bolt.horizontal.fill" : "bolt.horizontal")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(statusColor)
@@ -61,17 +63,16 @@ struct ContentView: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.largeRadius, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [statusColor.opacity(model.isRunning ? 0.14 : 0.07), Color(nsColor: .controlBackgroundColor).opacity(0.78)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+                .fill(.regularMaterial)
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppTheme.largeRadius, style: .continuous)
-                .stroke(statusColor.opacity(model.isRunning ? 0.32 : 0.16), lineWidth: 1)
+                .fill(AppTheme.panelHighlight)
+                .blendMode(.plusLighter)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppTheme.largeRadius, style: .continuous)
+                .stroke(AppTheme.hairline, lineWidth: 1)
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(model.isRunning ? "CC Codex Proxy running" : "CC Codex Proxy stopped")
@@ -87,7 +88,10 @@ struct ContentView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Capsule().fill(statusColor.opacity(model.isRunning ? 0.16 : 0.10)))
+        .background(Capsule().fill(AppTheme.subtleFill))
+        .overlay(
+            Capsule().stroke(statusColor.opacity(model.isRunning ? 0.28 : 0.16), lineWidth: 1)
+        )
         .foregroundStyle(statusColor)
     }
 
@@ -101,7 +105,7 @@ struct ContentView: View {
                         title: "Start",
                         detail: "Begin proxy",
                         systemImage: "play.fill",
-                        tint: .green,
+                        tint: AppTheme.success,
                         isDisabled: model.isRunning
                     ) {
                         Task { await model.startProxy() }
@@ -111,7 +115,7 @@ struct ContentView: View {
                         title: "Stop",
                         detail: "End proxy",
                         systemImage: "stop.fill",
-                        tint: .red,
+                        tint: AppTheme.danger,
                         isDisabled: !model.isRunning
                     ) {
                         Task { await model.stopProxy() }
@@ -122,7 +126,7 @@ struct ContentView: View {
                         title: "Refresh",
                         detail: "Check status",
                         systemImage: "arrow.clockwise",
-                        tint: .blue
+                        tint: AppTheme.accent
                     ) {
                         Task { await model.refresh() }
                     }
@@ -131,7 +135,7 @@ struct ContentView: View {
                         title: "Logs",
                         detail: "Open file",
                         systemImage: "doc.text.magnifyingglass",
-                        tint: .purple
+                        tint: AppTheme.accent
                     ) {
                         model.openLogs()
                     }
@@ -168,7 +172,7 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "doc.badge.gearshape")
                         .frame(width: 18)
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(AppTheme.accent)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Advanced settings.json")
                             .font(.subheadline.weight(.semibold))
@@ -208,14 +212,17 @@ struct ContentView: View {
                     .font(.caption.weight(.semibold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Capsule().fill(authStatusColor.opacity(0.18)))
+                    .background(Capsule().fill(AppTheme.subtleFill))
+                    .overlay(
+                        Capsule().stroke(authStatusColor.opacity(0.24), lineWidth: 1)
+                    )
                     .foregroundStyle(authStatusColor)
             }
         }
     }
 
     private var authStatusColor: Color {
-        model.isAuthenticated ? .green : .orange
+        model.isAuthenticated ? AppTheme.success : AppTheme.warning
     }
 
     private var authStatusTitle: String {
@@ -243,7 +250,7 @@ struct ContentView: View {
             title: "Claude command",
             detail: model.claudeShimStatusText,
             systemImage: "terminal",
-            tint: .blue,
+            tint: AppTheme.accent,
             accessibilityLabel: "Claude command shim status"
         ) {
             if model.isInstallingClaudeShim {
@@ -256,7 +263,7 @@ struct ContentView: View {
                 } label: {
                     Label("Repair", systemImage: "wrench.adjustable")
                 }
-                .buttonStyle(AppPressButtonStyle(tint: .blue, compact: true))
+                .buttonStyle(AppPressButtonStyle(tint: AppTheme.accent, compact: true))
             }
         }
     }
@@ -276,7 +283,7 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .buttonStyle(AppPressButtonStyle(tint: .blue, compact: true, iconOnly: true))
+                .buttonStyle(AppPressButtonStyle(tint: AppTheme.accent, compact: true, iconOnly: true))
                 .disabled(model.isRefreshingClaudeSettings)
                 .help("Refresh Claude Code settings preview")
                 .accessibilityLabel("Refresh Claude Code settings preview")
@@ -313,11 +320,11 @@ struct ContentView: View {
                         }
                         .disabled(!preview.canRestore || model.isRestoringClaudeSettings)
                     }
-                    .buttonStyle(AppPressButtonStyle(tint: .blue, compact: true))
+                    .buttonStyle(AppPressButtonStyle(tint: AppTheme.accent, compact: true))
                 } else if let error = model.claudeSettingsPreviewError {
-                    noticeLabel(error, systemImage: "exclamationmark.triangle", tint: .orange)
+                    noticeLabel(error, systemImage: "exclamationmark.triangle", tint: AppTheme.warning)
                 } else {
-                    noticeLabel("Loading settings preview", systemImage: "hourglass", tint: .secondary)
+                    noticeLabel("Loading settings preview", systemImage: "hourglass", tint: AppTheme.muted)
                 }
             }
         }
@@ -400,7 +407,7 @@ struct ContentView: View {
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                .fill(Color(nsColor: .textBackgroundColor).opacity(0.42))
+                .fill(AppTheme.insetSurface)
         )
         .font(.caption)
     }
@@ -448,7 +455,7 @@ struct ContentView: View {
             .padding(10)
             .background(
                 RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                    .fill(Color(nsColor: .textBackgroundColor).opacity(0.42))
+                    .fill(AppTheme.insetSurface)
             )
         case .current:
             codePreview(preview.currentSettings)
@@ -458,7 +465,7 @@ struct ContentView: View {
             if let restoreSettings = preview.restoreSettings {
                 codePreview(restoreSettings)
             } else {
-                noticeLabel("No backup is available to restore.", systemImage: "tray", tint: .secondary)
+                noticeLabel("No backup is available to restore.", systemImage: "tray", tint: AppTheme.muted)
             }
         }
     }
@@ -474,11 +481,11 @@ struct ContentView: View {
         .frame(maxHeight: 176)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                .fill(Color(nsColor: .textBackgroundColor).opacity(0.58))
+                .fill(AppTheme.codeSurface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
+                .stroke(AppTheme.hairline, lineWidth: 1)
         )
     }
 
@@ -496,11 +503,11 @@ struct ContentView: View {
     private func settingsActionColor(_ action: ClaudeEnvAction) -> Color {
         switch action {
         case .add:
-            return .green
+            return AppTheme.success
         case .change:
-            return .orange
+            return AppTheme.warning
         case .keep:
-            return .secondary
+            return AppTheme.muted
         }
     }
 
@@ -606,18 +613,22 @@ struct ContentView: View {
     private func noticeLabel(_ text: String, systemImage: String, tint: Color) -> some View {
         Label(text, systemImage: systemImage)
             .font(.caption)
-            .foregroundStyle(tint == .secondary ? Color.secondary : tint)
+            .foregroundStyle(tint == AppTheme.muted ? Color.secondary : tint)
             .lineLimit(3)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                    .fill(tint.opacity(tint == .secondary ? 0.08 : 0.10))
+                    .fill(AppTheme.insetSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+                    .stroke(tint == AppTheme.muted ? AppTheme.hairline : tint.opacity(0.18), lineWidth: 1)
             )
     }
 
     private var statusColor: Color {
-        model.isRunning ? .green : .secondary
+        model.isRunning ? AppTheme.success : AppTheme.muted
     }
 
     private var footerIcon: String {
@@ -625,7 +636,7 @@ struct ContentView: View {
     }
 
     private var footerColor: Color {
-        model.lastMessage.localizedCaseInsensitiveContains("failed") ? .orange : .secondary
+        model.lastMessage.localizedCaseInsensitiveContains("failed") ? AppTheme.warning : AppTheme.muted
     }
 }
 
@@ -637,15 +648,36 @@ private enum AppTheme {
     static let smallRadius: CGFloat = 8
     static let motion = Animation.easeOut(duration: 0.18)
 
+    static let accent = Color(nsColor: .controlAccentColor)
+    static let success = Color(nsColor: .systemGreen)
+    static let warning = Color(nsColor: .systemOrange)
+    static let danger = Color(nsColor: .systemRed)
+    static let muted = Color.secondary
+
+    static let hairline = Color.primary.opacity(0.10)
+    static let subtleFill = Color.primary.opacity(0.045)
+    static let pressedFill = Color.primary.opacity(0.075)
+    static let disabledFill = Color.primary.opacity(0.028)
+    static let panelHighlight = LinearGradient(
+        colors: [Color.white.opacity(0.12), Color.white.opacity(0.02)],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+    static let insetSurface = Color(nsColor: .textBackgroundColor).opacity(0.46)
+    static let codeSurface = Color(nsColor: .textBackgroundColor).opacity(0.64)
+
     static var background: some View {
-        LinearGradient(
-            colors: [
-                Color(nsColor: .windowBackgroundColor),
-                Color(nsColor: .underPageBackgroundColor).opacity(0.72)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.08),
+                    Color(nsColor: .underPageBackgroundColor).opacity(0.28)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
     }
 }
 
@@ -657,12 +689,25 @@ private struct PanelCard: ViewModifier {
             .padding(12)
             .background(
                 RoundedRectangle(cornerRadius: AppTheme.cardRadius, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.72))
+                    .fill(.regularMaterial)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: AppTheme.cardRadius, style: .continuous)
-                    .stroke((tint ?? Color.secondary).opacity(tint == nil ? 0.16 : 0.24), lineWidth: 1)
+                    .fill(AppTheme.panelHighlight)
+                    .blendMode(.plusLighter)
+                    .allowsHitTesting(false)
             )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppTheme.cardRadius, style: .continuous)
+                    .stroke(AppTheme.hairline, lineWidth: 1)
+                    .allowsHitTesting(false)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppTheme.cardRadius, style: .continuous)
+                    .stroke((tint ?? Color.clear).opacity(tint == nil ? 0 : 0.14), lineWidth: 1)
+                    .allowsHitTesting(false)
+            )
+            .shadow(color: Color.black.opacity(0.05), radius: 12, x: 0, y: 6)
     }
 }
 
@@ -686,23 +731,23 @@ private struct AppPressButtonStyle: ButtonStyle {
             .frame(width: iconOnly ? 28 : nil, height: iconOnly ? 28 : nil)
             .background(
                 RoundedRectangle(cornerRadius: compact || iconOnly ? 7 : 9, style: .continuous)
-                    .fill(tint.opacity(backgroundOpacity(isPressed: configuration.isPressed)))
+                    .fill(backgroundFill(isPressed: configuration.isPressed))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: compact || iconOnly ? 7 : 9, style: .continuous)
-                    .stroke(tint.opacity(isEnabled ? 0.20 : 0.10), lineWidth: 1)
+                    .stroke(tint.opacity(isEnabled ? 0.22 : 0.10), lineWidth: 1)
             )
-            .foregroundStyle(tint.opacity(isEnabled ? 1 : 0.46))
+            .foregroundStyle(tint.opacity(isEnabled ? 0.92 : 0.42))
             .scaleEffect(configuration.isPressed && isEnabled ? 0.97 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.12), value: isEnabled)
     }
 
-    private func backgroundOpacity(isPressed: Bool) -> Double {
+    private func backgroundFill(isPressed: Bool) -> Color {
         if !isEnabled {
-            return 0.05
+            return AppTheme.disabledFill
         }
-        return isPressed ? 0.18 : 0.10
+        return isPressed ? AppTheme.pressedFill : AppTheme.subtleFill
     }
 }
 
