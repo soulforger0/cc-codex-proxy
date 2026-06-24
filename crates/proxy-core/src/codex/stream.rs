@@ -177,21 +177,30 @@ impl SseParser {
 }
 
 fn parse_sse_event(raw: &str, request_id: Option<&str>) -> Option<Value> {
-    let data = raw
+    let data_lines = raw
         .lines()
         .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect::<Vec<_>>();
+    let data = data_lines.join("\n");
     if data.is_empty() || data == "[DONE]" {
         return None;
     }
     match serde_json::from_str(&data) {
         Ok(value) => Some(value),
         Err(err) => {
+            let raw_line_count = raw.lines().count();
+            let data_line_count = data_lines.len();
+            let first_unprefixed_line = first_unprefixed_sse_line(raw).unwrap_or_default();
             warn!(
                 request_id = request_id.unwrap_or("untracked"),
                 error = %err,
-                event_preview = %truncate_for_log(&data, 1_000),
+                raw_len = raw.len(),
+                data_len = data.len(),
+                raw_line_count,
+                data_line_count,
+                first_unprefixed_line = %truncate_for_log_escaped(first_unprefixed_line, 240),
+                event_preview = %truncate_for_log_escaped(&data, 1_000),
+                raw_event_preview = %truncate_for_log_escaped(raw, 1_000),
                 "failed to parse upstream SSE JSON event"
             );
             None
@@ -732,6 +741,29 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
         out.push_str("...[truncated]");
     }
     out
+}
+
+fn truncate_for_log_escaped(value: &str, max_chars: usize) -> String {
+    truncate_for_log(&escape_for_log(value), max_chars)
+}
+
+fn escape_for_log(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+fn first_unprefixed_sse_line(raw: &str) -> Option<&str> {
+    raw.lines().find(|line| {
+        !line.is_empty()
+            && !line.starts_with(':')
+            && !line.starts_with("data:")
+            && !line.starts_with("event:")
+            && !line.starts_with("id:")
+            && !line.starts_with("retry:")
+    })
 }
 
 #[cfg(test)]

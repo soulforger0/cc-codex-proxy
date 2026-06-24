@@ -234,13 +234,18 @@ impl CodexClient {
         let first = read_first_websocket_event(&mut socket).await?;
         self.transport_state
             .record_method(CodexTransportMethod::WebSocket);
+        let session_id_for_log = session_id.map(str::to_owned);
         let stream = try_stream! {
+            let mut frame_index = 0_u64;
+            log_websocket_frame(&first, frame_index, session_id_for_log.as_deref());
             if let Some(bytes) = websocket_message_to_bytes(first) {
                 yield bytes;
             }
             while let Some(message) = socket.next().await {
                 match message {
                     Ok(message) => {
+                        frame_index += 1;
+                        log_websocket_frame(&message, frame_index, session_id_for_log.as_deref());
                         if let Some(bytes) = websocket_message_to_bytes(message) {
                             yield bytes;
                         }
@@ -304,6 +309,18 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
         out.push_str("...[truncated]");
     }
     out
+}
+
+fn truncate_for_log_escaped(value: &str, max_chars: usize) -> String {
+    truncate_for_log(&escape_for_log(value), max_chars)
+}
+
+fn escape_for_log(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 #[derive(Debug, Default)]
@@ -452,9 +469,94 @@ where
 
 fn websocket_message_to_bytes(message: Message) -> Option<Bytes> {
     match message {
-        Message::Text(text) => Some(Bytes::from(format!("data: {text}\n\n"))),
-        Message::Binary(bytes) => Some(Bytes::copy_from_slice(bytes.as_ref())),
+        Message::Text(text) => Some(sse_data_event(text.as_str())),
+        Message::Binary(bytes) => match String::from_utf8(bytes.to_vec()) {
+            Ok(text) => Some(sse_data_event(&text)),
+            Err(_) => Some(Bytes::copy_from_slice(bytes.as_ref())),
+        },
         Message::Close(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => None,
+    }
+}
+
+fn log_websocket_frame(message: &Message, frame_index: u64, session_id: Option<&str>) {
+    match message {
+        Message::Text(text) => {
+            let text = text.as_str();
+            let newline_count = text.matches('\n').count();
+            debug!(
+                session_id = session_id.unwrap_or("none"),
+                frame_index,
+                frame_kind = "text",
+                byte_len = text.len(),
+                newline_count,
+                line_count = sse_line_count(text),
+                preview = %truncate_for_log_escaped(text, 240),
+                "received Codex websocket frame"
+            );
+        }
+        Message::Binary(bytes) => {
+            debug!(
+                session_id = session_id.unwrap_or("none"),
+                frame_index,
+                frame_kind = "binary",
+                byte_len = bytes.len(),
+                utf8 = std::str::from_utf8(bytes).is_ok(),
+                "received Codex websocket frame"
+            );
+        }
+        Message::Close(frame) => {
+            debug!(
+                session_id = session_id.unwrap_or("none"),
+                frame_index,
+                frame_kind = "close",
+                code = frame.as_ref().map(|frame| frame.code.to_string()),
+                reason = frame.as_ref().map(|frame| frame.reason.as_ref()),
+                "received Codex websocket frame"
+            );
+        }
+        Message::Ping(bytes) | Message::Pong(bytes) => {
+            debug!(
+                session_id = session_id.unwrap_or("none"),
+                frame_index,
+                frame_kind = if matches!(message, Message::Ping(_)) {
+                    "ping"
+                } else {
+                    "pong"
+                },
+                byte_len = bytes.len(),
+                "received Codex websocket frame"
+            );
+        }
+        Message::Frame(_) => {
+            debug!(
+                session_id = session_id.unwrap_or("none"),
+                frame_index,
+                frame_kind = "raw",
+                "received Codex websocket frame"
+            );
+        }
+    }
+}
+
+fn sse_data_event(text: &str) -> Bytes {
+    let mut out = String::new();
+    for line in text.lines() {
+        out.push_str("data: ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    if text.is_empty() {
+        out.push_str("data: \n");
+    }
+    out.push('\n');
+    Bytes::from(out)
+}
+
+fn sse_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        1
+    } else {
+        text.lines().count()
     }
 }
 
@@ -516,5 +618,18 @@ mod tests {
         assert_eq!(headers.get("authorization").unwrap(), "Bearer access-token");
         assert_eq!(headers.get("ChatGPT-Account-Id").unwrap(), "account-id");
         assert_eq!(headers.get("x-client-request-id").unwrap(), "session-id");
+    }
+
+    #[test]
+    fn websocket_text_frame_with_pretty_json_is_valid_sse_data() {
+        let bytes = websocket_message_to_bytes(Message::Text(
+            "{\n  \"type\": \"response.completed\"\n}".into(),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            bytes,
+            Bytes::from_static(b"data: {\ndata:   \"type\": \"response.completed\"\ndata: }\n\n")
+        );
     }
 }
