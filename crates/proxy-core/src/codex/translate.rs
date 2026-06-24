@@ -44,7 +44,11 @@ pub fn translate_request(
             }))
         })
         .collect::<Result<Vec<_>>>()?;
-    let tools = request.tools.as_ref().map(|tools| translate_tools(tools)).transpose()?;
+    let tools = request
+        .tools
+        .as_ref()
+        .map(|tools| translate_tools(tools))
+        .transpose()?;
     let reasoning = reasoning_from_request(request);
     let text = text_format_from_request(request);
     Ok(ResponsesRequest {
@@ -66,7 +70,9 @@ fn map_role(role: &str) -> Result<&'static str> {
         "user" => Ok("user"),
         "assistant" => Ok("assistant"),
         "system" => Ok("system"),
-        other => Err(ProxyError::InvalidRequest(format!("unsupported message role \"{other}\""))),
+        other => Err(ProxyError::InvalidRequest(format!(
+            "unsupported message role \"{other}\""
+        ))),
     }
 }
 
@@ -76,9 +82,11 @@ fn system_to_instructions(system: &Value) -> String {
         Value::Array(items) => items
             .iter()
             .filter_map(|item| {
-                item.as_str()
-                    .map(ToOwned::to_owned)
-                    .or_else(|| item.get("text").and_then(Value::as_str).map(ToOwned::to_owned))
+                item.as_str().map(ToOwned::to_owned).or_else(|| {
+                    item.get("text")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
             })
             .collect::<Vec<_>>()
             .join("\n\n"),
@@ -89,7 +97,10 @@ fn system_to_instructions(system: &Value) -> String {
 fn content_to_codex_parts(role: &str, content: &Value) -> Vec<Value> {
     match content {
         Value::String(text) => vec![text_part(role, text)],
-        Value::Array(items) => items.iter().flat_map(|item| block_to_codex_parts(role, item)).collect(),
+        Value::Array(items) => items
+            .iter()
+            .flat_map(|item| block_to_codex_parts(role, item))
+            .collect(),
         other => vec![text_part(role, &other.to_string())],
     }
 }
@@ -99,7 +110,10 @@ fn block_to_codex_parts(role: &str, block: &Value) -> Vec<Value> {
     match kind {
         "text" => vec![text_part(
             role,
-            block.get("text").and_then(Value::as_str).unwrap_or_default(),
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
         )],
         "image" => block_to_image_part(block).into_iter().collect(),
         "tool_use" => vec![json!({
@@ -118,7 +132,11 @@ fn block_to_codex_parts(role: &str, block: &Value) -> Vec<Value> {
 }
 
 fn text_part(role: &str, text: &str) -> Value {
-    let part_type = if role == "assistant" { "output_text" } else { "input_text" };
+    let part_type = if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    };
     json!({ "type": part_type, "text": text })
 }
 
@@ -126,7 +144,10 @@ fn block_to_image_part(block: &Value) -> Option<Value> {
     let source = block.get("source")?;
     match source.get("type").and_then(Value::as_str) {
         Some("base64") => {
-            let media = source.get("media_type").and_then(Value::as_str).unwrap_or("image/png");
+            let media = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("image/png");
             let data = source.get("data").and_then(Value::as_str)?;
             Some(json!({
                 "type": "input_image",
@@ -149,8 +170,14 @@ fn tool_result_output(block: &Value) -> String {
         Some(Value::Array(items)) => items
             .iter()
             .map(|item| match item.get("type").and_then(Value::as_str) {
-                Some("text") => item.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
-                Some("image") => "[image omitted: Codex function_call_output accepts text only]".to_string(),
+                Some("text") => item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                Some("image") => {
+                    "[image omitted: Codex function_call_output accepts text only]".to_string()
+                }
                 _ => item.to_string(),
             })
             .collect::<Vec<_>>()
@@ -249,8 +276,9 @@ mod tests {
             extra: Default::default(),
         };
         let translated = translate_request(&req, &resolved(), Some("s")).unwrap();
-        let output = translated.input[0]["content"][0]["output"].as_str().unwrap();
+        let output = translated.input[0]["content"][0]["output"]
+            .as_str()
+            .unwrap();
         assert!(output.contains("image omitted"));
     }
 }
-

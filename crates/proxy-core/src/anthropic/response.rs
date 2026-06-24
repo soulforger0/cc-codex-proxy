@@ -90,4 +90,3 @@ pub fn message_stop() -> Bytes {
 pub fn response_json(response: AnthropicResponse) -> Value {
     serde_json::to_value(response).unwrap_or_else(|_| json!({}))
 }
-

@@ -10,4 +10,3 @@ pub mod server;
 
 pub use config::{AppConfig, AppPaths};
 pub use server::{serve, ServerHandle};
-

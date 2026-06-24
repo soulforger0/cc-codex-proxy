@@ -35,10 +35,17 @@ impl CodexClient {
         Ok(Self { http, config, auth })
     }
 
-    pub async fn post(&self, body: &ResponsesRequest, session_id: Option<&str>) -> Result<CodexResponse> {
+    pub async fn post(
+        &self,
+        body: &ResponsesRequest,
+        session_id: Option<&str>,
+    ) -> Result<CodexResponse> {
         let auth = self.auth.get_auth().await?;
-        let mut response = self.post_with_access(body, session_id, &auth.access, auth.account_id.as_deref()).await;
-        if matches!(&response, Err(ProxyError::Upstream { status, .. }) if *status == StatusCode::UNAUTHORIZED) {
+        let mut response = self
+            .post_with_access(body, session_id, &auth.access, auth.account_id.as_deref())
+            .await;
+        if matches!(&response, Err(ProxyError::Upstream { status, .. }) if *status == StatusCode::UNAUTHORIZED)
+        {
             warn!("codex returned 401; forcing token refresh");
             let auth = self.auth.force_refresh().await?;
             response = self
@@ -56,13 +63,23 @@ impl CodexClient {
         account_id: Option<&str>,
     ) -> Result<CodexResponse> {
         match self.config.transport {
-            CodexTransport::Http => self.post_http(body, session_id, access_token, account_id).await,
-            CodexTransport::WebSocket => self.post_websocket(body, session_id, access_token, account_id).await,
-            CodexTransport::Auto => match self.post_websocket(body, session_id, access_token, account_id).await {
+            CodexTransport::Http => {
+                self.post_http(body, session_id, access_token, account_id)
+                    .await
+            }
+            CodexTransport::WebSocket => {
+                self.post_websocket(body, session_id, access_token, account_id)
+                    .await
+            }
+            CodexTransport::Auto => match self
+                .post_websocket(body, session_id, access_token, account_id)
+                .await
+            {
                 Ok(response) => Ok(response),
                 Err(err) => {
                     warn!(error = %err, "codex websocket setup failed; falling back to HTTP SSE");
-                    self.post_http(body, session_id, access_token, account_id).await
+                    self.post_http(body, session_id, access_token, account_id)
+                        .await
                 }
             },
         }
@@ -81,10 +98,16 @@ impl CodexClient {
             .post(&self.config.base_url)
             .headers(self.headers(access_token, account_id, session_id)?)
             .json(body);
-        let response = tokio::time::timeout(Duration::from_millis(self.config.header_timeout_ms), request.send())
-            .await
-            .map_err(|_| ProxyError::Transport("timed out waiting for Codex response headers".into()))??;
-        let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let response = tokio::time::timeout(
+            Duration::from_millis(self.config.header_timeout_ms),
+            request.send(),
+        )
+        .await
+        .map_err(|_| {
+            ProxyError::Transport("timed out waiting for Codex response headers".into())
+        })??;
+        let status =
+            StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         if !status.is_success() {
             let retry_after = response
                 .headers()
@@ -153,7 +176,9 @@ impl CodexClient {
                 Ok(Message::Binary(bytes)) => Some(Ok(Bytes::copy_from_slice(bytes.as_ref()))),
                 Ok(Message::Close(_)) => None,
                 Ok(_) => None,
-                Err(err) => Some(Err(ProxyError::Transport(format!("Codex websocket read failed: {err}")))),
+                Err(err) => Some(Err(ProxyError::Transport(format!(
+                    "Codex websocket read failed: {err}"
+                )))),
             }
         });
         Ok(CodexResponse {
@@ -169,7 +194,11 @@ impl CodexClient {
         session_id: Option<&str>,
     ) -> Result<reqwest::header::HeaderMap> {
         let mut headers = reqwest::header::HeaderMap::new();
-        insert_static(&mut headers, reqwest::header::CONTENT_TYPE, "application/json")?;
+        insert_static(
+            &mut headers,
+            reqwest::header::CONTENT_TYPE,
+            "application/json",
+        )?;
         insert_static(&mut headers, reqwest::header::ACCEPT, "text/event-stream")?;
         insert_static(
             &mut headers,
@@ -178,14 +207,22 @@ impl CodexClient {
         )?;
         insert_static(&mut headers, "openai-beta", "responses=experimental")?;
         insert_static(&mut headers, "originator", &self.config.originator)?;
-        insert_static(&mut headers, reqwest::header::USER_AGENT, &self.config.user_agent)?;
+        insert_static(
+            &mut headers,
+            reqwest::header::USER_AGENT,
+            &self.config.user_agent,
+        )?;
         if let Some(account_id) = account_id {
             insert_static(&mut headers, "ChatGPT-Account-Id", account_id)?;
         }
         if let Some(session_id) = session_id {
             insert_static(&mut headers, "session_id", session_id)?;
             insert_static(&mut headers, "x-client-request-id", session_id)?;
-            insert_static(&mut headers, "x-codex-window-id", &format!("{session_id}:0"))?;
+            insert_static(
+                &mut headers,
+                "x-codex-window-id",
+                &format!("{session_id}:0"),
+            )?;
         }
         Ok(headers)
     }
@@ -195,8 +232,9 @@ fn insert_static<K>(headers: &mut reqwest::header::HeaderMap, name: K, value: &s
 where
     K: reqwest::header::IntoHeaderName,
 {
-    let value = reqwest::header::HeaderValue::from_str(value)
-        .map_err(|err| ProxyError::Config(format!("invalid header value for upstream request: {err}")))?;
+    let value = reqwest::header::HeaderValue::from_str(value).map_err(|err| {
+        ProxyError::Config(format!("invalid header value for upstream request: {err}"))
+    })?;
     headers.insert(name, value);
     Ok(())
 }
@@ -207,6 +245,8 @@ fn websocket_url(url: &str) -> Result<String> {
     } else if let Some(rest) = url.strip_prefix("http://") {
         Ok(format!("ws://{rest}"))
     } else {
-        Err(ProxyError::Config(format!("Codex base URL must be http(s): {url}")))
+        Err(ProxyError::Config(format!(
+            "Codex base URL must be http(s): {url}"
+        )))
     }
 }

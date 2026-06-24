@@ -85,4 +85,3 @@ pub struct AnthropicResponse {
     pub stop_sequence: Option<String>,
     pub usage: AnthropicUsage,
 }
-

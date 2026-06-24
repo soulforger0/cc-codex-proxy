@@ -5,7 +5,10 @@ use crate::{
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::Value;
-use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::Mutex;
 
 const REFRESH_MARGIN_MS: i64 = 5 * 60 * 1000;
@@ -135,12 +138,18 @@ impl AuthManager {
     }
 }
 
-fn stored_auth_from_token_response(response: TokenResponse, previous: Option<&StoredAuth>) -> Result<StoredAuth> {
+fn stored_auth_from_token_response(
+    response: TokenResponse,
+    previous: Option<&StoredAuth>,
+) -> Result<StoredAuth> {
     if response.access_token.is_empty() {
-        return Err(ProxyError::InvalidRequest("token response missing access_token".into()));
+        return Err(ProxyError::InvalidRequest(
+            "token response missing access_token".into(),
+        ));
     }
     let refresh = response
         .refresh_token
+        .clone()
         .or_else(|| previous.map(|auth| auth.refresh.clone()))
         .ok_or_else(|| ProxyError::InvalidRequest("token response missing refresh_token".into()))?;
     let account_id = extract_chatgpt_account_id(&response)
@@ -213,7 +222,9 @@ mod tests {
             expires_at_ms: 1,
             account_id: None,
         });
-        let refresh = Arc::new(CountingRefresh { calls: AtomicUsize::new(0) });
+        let refresh = Arc::new(CountingRefresh {
+            calls: AtomicUsize::new(0),
+        });
         let manager = AuthManager::new(Arc::new(store), refresh.clone());
         let a = manager.get_auth().await.unwrap();
         let b = manager.get_auth().await.unwrap();

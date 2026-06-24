@@ -2,8 +2,7 @@ use crate::error::{ProxyError, Result};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
 };
@@ -29,7 +28,9 @@ pub struct AppPaths {
 impl AppPaths {
     pub fn discover() -> Result<Self> {
         let app_support = dirs::data_dir()
-            .ok_or_else(|| ProxyError::Config("cannot locate user application support directory".into()))?
+            .ok_or_else(|| {
+                ProxyError::Config("cannot locate user application support directory".into())
+            })?
             .join(APP_NAME);
         let logs_dir = dirs::home_dir()
             .ok_or_else(|| ProxyError::Config("cannot locate home directory".into()))?
@@ -175,7 +176,10 @@ impl AppConfig {
 }
 
 fn truthy(value: &str) -> bool {
-    matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 pub fn ensure_admin_token(path: &Path) -> Result<String> {
@@ -221,4 +225,3 @@ mod tests {
         assert!(first.len() >= 48);
     }
 }
-

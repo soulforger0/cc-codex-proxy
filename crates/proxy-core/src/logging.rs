@@ -12,11 +12,17 @@ pub fn init(paths: &AppPaths, stderr: bool, verbose: bool) -> Result<Vec<WorkerG
 
     let file_appender = tracing_appender::rolling::never(&paths.logs_dir, "proxy.log");
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
-    let file_layer = fmt::layer().json().with_writer(file_writer).with_ansi(false);
+    let file_layer = fmt::layer()
+        .json()
+        .with_writer(file_writer)
+        .with_ansi(false);
 
     let registry = tracing_subscriber::registry().with(filter).with(file_layer);
     if stderr {
-        registry.with(fmt::layer().with_writer(std::io::stderr)).try_init().ok();
+        registry
+            .with(fmt::layer().with_writer(std::io::stderr))
+            .try_init()
+            .ok();
     } else {
         registry.try_init().ok();
     }
@@ -34,4 +40,3 @@ pub fn redact_header(name: &str, value: &str) -> String {
         value.to_string()
     }
 }
-

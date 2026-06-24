@@ -1,9 +1,5 @@
 use crate::{
-    anthropic::{
-        response::response_json,
-        schema::AnthropicRequest,
-        tokens::estimate_input_tokens,
-    },
+    anthropic::{response::response_json, schema::AnthropicRequest, tokens::estimate_input_tokens},
     auth::AuthManager,
     codex::{
         client::CodexClient,
@@ -95,7 +91,10 @@ async fn healthz() -> impl IntoResponse {
     Json(json!({ "ok": true }))
 }
 
-async fn admin_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<serde_json::Value>> {
+async fn admin_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>> {
     require_admin(&state, &headers)?;
     let auth = state.auth.status().await?;
     Ok(Json(json!({
@@ -117,7 +116,9 @@ async fn count_tokens(
     Json(request): Json<AnthropicRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let _ = state.registry.resolve(&request.model)?;
-    Ok(Json(json!({ "input_tokens": estimate_input_tokens(&request) })))
+    Ok(Json(
+        json!({ "input_tokens": estimate_input_tokens(&request) }),
+    ))
 }
 
 async fn messages(
@@ -141,7 +142,9 @@ async fn messages(
             .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
             .header(header::CACHE_CONTROL, "no-cache")
             .body(body)
-            .map_err(|err| ProxyError::Transport(format!("failed to build streaming response: {err}")))
+            .map_err(|err| {
+                ProxyError::Transport(format!("failed to build streaming response: {err}"))
+            })
     } else {
         let response = accumulate_response(upstream.body, request.model.clone()).await?;
         Response::builder()
@@ -159,7 +162,8 @@ fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<()> {
     if supplied == Some(state.config.admin_token.as_str()) {
         Ok(())
     } else {
-        Err(ProxyError::InvalidRequest("missing or invalid admin token".into()))
+        Err(ProxyError::InvalidRequest(
+            "missing or invalid admin token".into(),
+        ))
     }
 }
-

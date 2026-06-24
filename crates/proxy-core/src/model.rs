@@ -72,10 +72,12 @@ impl ModelRegistry {
             .profiles
             .iter()
             .find(|profile| profile.id == base || profile.upstream_model == base)
-            .ok_or_else(|| ProxyError::InvalidRequest(format!(
-                "Unknown model \"{incoming}\". Supported: {}.",
-                self.supported_models().join(", ")
-            )))?;
+            .ok_or_else(|| {
+                ProxyError::InvalidRequest(format!(
+                    "Unknown model \"{incoming}\". Supported: {}.",
+                    self.supported_models().join(", ")
+                ))
+            })?;
         if service_tier.is_some() && !profile.supports_fast {
             return Err(ProxyError::InvalidRequest(format!(
                 "Model \"{}\" does not support -fast routing",
@@ -103,7 +105,9 @@ impl ModelRegistry {
     }
 
     pub fn default_small_fast(&self) -> Option<&ModelProfile> {
-        self.profiles.iter().find(|profile| profile.default_small_fast)
+        self.profiles
+            .iter()
+            .find(|profile| profile.default_small_fast)
     }
 }
 

@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use proxy_core::{
-    auth::{browser_login, default_oauth_options, AuthManager, KeychainTokenStore, OAuthRefreshClient},
-    claude::{default_settings_path, install_settings, restore_latest_backup, ClaudeSettingsOptions},
+    auth::{
+        browser_login, default_oauth_options, AuthManager, KeychainTokenStore, OAuthRefreshClient,
+    },
+    claude::{
+        default_settings_path, install_settings, restore_latest_backup, ClaudeSettingsOptions,
+    },
     config::{AppConfig, DEFAULT_PORT},
     logging,
     model::ModelRegistry,
@@ -99,7 +103,10 @@ struct BenchArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Command::Serve(ServeArgs { port: None })) {
+    match cli
+        .command
+        .unwrap_or(Command::Serve(ServeArgs { port: None }))
+    {
         Command::Serve(args) => cmd_serve(args).await,
         Command::Auth(args) => cmd_auth(args).await,
         Command::Doctor(args) => cmd_doctor(args).await,
@@ -135,7 +142,8 @@ async fn cmd_auth(args: AuthCommand) -> Result<()> {
     let manager = auth_manager(&config);
     match args.command {
         AuthSubcommand::Login => {
-            let opts = default_oauth_options(config.codex.oauth_issuer, config.codex.oauth_client_id);
+            let opts =
+                default_oauth_options(config.codex.oauth_issuer, config.codex.oauth_client_id);
             let tokens = browser_login(opts).await?;
             let stored = manager.persist_initial(tokens).await?;
             println!("Authenticated.");

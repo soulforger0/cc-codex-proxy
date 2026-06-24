@@ -61,24 +61,27 @@ async fn count_tokens_is_local() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.json::<serde_json::Value>().await.unwrap()["input_tokens"].as_u64().unwrap() > 0);
+    assert!(
+        response.json::<serde_json::Value>().await.unwrap()["input_tokens"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     server.stop().await;
 }
 
 #[tokio::test]
 async fn upstream_429_is_preserved() {
-    let upstream = start_mock_upstream(
-        Router::new().route(
-            "/rate-limit",
-            post(|| async {
-                Response::builder()
-                    .status(StatusCode::TOO_MANY_REQUESTS)
-                    .header(header::RETRY_AFTER, "5")
-                    .body(Body::from("slow down"))
-                    .unwrap()
-            }),
-        ),
-    )
+    let upstream = start_mock_upstream(Router::new().route(
+        "/rate-limit",
+        post(|| async {
+            Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header(header::RETRY_AFTER, "5")
+                .body(Body::from("slow down"))
+                .unwrap()
+        }),
+    ))
     .await;
     let (config, paths) = test_config(upstream, "/rate-limit").await;
     let server = serve(config, paths, test_auth()).await.unwrap();
@@ -115,7 +118,9 @@ fn mock_success_app() -> Router {
 }
 
 async fn start_mock_upstream(app: Router) -> std::net::SocketAddr {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -124,7 +129,7 @@ async fn start_mock_upstream(app: Router) -> std::net::SocketAddr {
 }
 
 async fn test_config(upstream: std::net::SocketAddr, path: &str) -> (AppConfig, AppPaths) {
-    let dir = tempfile::tempdir().unwrap().into_path();
+    let dir = tempfile::tempdir().unwrap().keep();
     let paths = AppPaths {
         config_dir: dir.join("config"),
         logs_dir: dir.join("logs"),

@@ -58,7 +58,9 @@ impl TokenStore for KeychainTokenStore {
         match entry.get_password() {
             Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(err) => Err(ProxyError::Config(format!("cannot read Keychain token: {err}"))),
+            Err(err) => Err(ProxyError::Config(format!(
+                "cannot read Keychain token: {err}"
+            ))),
         }
     }
 
@@ -76,7 +78,9 @@ impl TokenStore for KeychainTokenStore {
             .map_err(|err| ProxyError::Config(format!("cannot open Keychain entry: {err}")))?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(err) => Err(ProxyError::Config(format!("cannot delete Keychain token: {err}"))),
+            Err(err) => Err(ProxyError::Config(format!(
+                "cannot delete Keychain token: {err}"
+            ))),
         }
     }
 
@@ -135,4 +139,3 @@ mod tests {
         assert!(!auth.is_expiring(4_000, 5_000));
     }
 }
-

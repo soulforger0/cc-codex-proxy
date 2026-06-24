@@ -36,10 +36,14 @@ pub struct TokenResponse {
 impl TokenResponse {
     pub fn validate_initial(&self) -> Result<()> {
         if self.access_token.is_empty() {
-            return Err(ProxyError::InvalidRequest("OAuth response did not include access_token".into()));
+            return Err(ProxyError::InvalidRequest(
+                "OAuth response did not include access_token".into(),
+            ));
         }
         if self.refresh_token.as_deref().unwrap_or("").is_empty() {
-            return Err(ProxyError::InvalidRequest("OAuth response did not include refresh_token".into()));
+            return Err(ProxyError::InvalidRequest(
+                "OAuth response did not include refresh_token".into(),
+            ));
         }
         Ok(())
     }
@@ -56,7 +60,11 @@ pub async fn browser_login(opts: OAuthOptions) -> Result<TokenResponse> {
     exchange_code(&opts, &code, &pkce.verifier).await
 }
 
-pub async fn exchange_code(opts: &OAuthOptions, code: &str, verifier: &str) -> Result<TokenResponse> {
+pub async fn exchange_code(
+    opts: &OAuthOptions,
+    code: &str,
+    verifier: &str,
+) -> Result<TokenResponse> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
@@ -86,8 +94,11 @@ pub async fn exchange_code(opts: &OAuthOptions, code: &str, verifier: &str) -> R
 }
 
 fn build_authorization_url(opts: &OAuthOptions, pkce: &Pkce) -> Result<Url> {
-    let mut url = Url::parse(&format!("{}/oauth/authorize", opts.issuer.trim_end_matches('/')))
-        .map_err(|err| ProxyError::Config(format!("bad OAuth issuer URL: {err}")))?;
+    let mut url = Url::parse(&format!(
+        "{}/oauth/authorize",
+        opts.issuer.trim_end_matches('/')
+    ))
+    .map_err(|err| ProxyError::Config(format!("bad OAuth issuer URL: {err}")))?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", &opts.client_id)
@@ -105,31 +116,48 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
     let n = socket.read(&mut buf).await?;
     let req = String::from_utf8_lossy(&buf[..n]);
     let first_line = req.lines().next().unwrap_or_default();
-    let path = first_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| ProxyError::InvalidRequest("OAuth callback did not include request path".into()))?;
+    let path = first_line.split_whitespace().nth(1).ok_or_else(|| {
+        ProxyError::InvalidRequest("OAuth callback did not include request path".into())
+    })?;
     let url = Url::parse(&format!("http://localhost{path}"))
         .map_err(|err| ProxyError::InvalidRequest(format!("bad OAuth callback URL: {err}")))?;
-    let state = url.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.to_string());
+    let state = url
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.to_string());
     if state.as_deref() != Some(expected_state) {
         let _ = write_callback_response(&mut socket, 400, "OAuth state mismatch").await;
         return Err(ProxyError::InvalidRequest("OAuth state mismatch".into()));
     }
-    let code = url.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.to_string());
+    let code = url
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.to_string());
     match code {
         Some(code) if !code.is_empty() => {
-            write_callback_response(&mut socket, 200, "Authentication complete. You can close this tab.").await?;
+            write_callback_response(
+                &mut socket,
+                200,
+                "Authentication complete. You can close this tab.",
+            )
+            .await?;
             Ok(code)
         }
         _ => {
-            write_callback_response(&mut socket, 400, "OAuth callback did not include a code").await?;
-            Err(ProxyError::InvalidRequest("OAuth callback did not include a code".into()))
+            write_callback_response(&mut socket, 400, "OAuth callback did not include a code")
+                .await?;
+            Err(ProxyError::InvalidRequest(
+                "OAuth callback did not include a code".into(),
+            ))
         }
     }
 }
 
-async fn write_callback_response(socket: &mut tokio::net::TcpStream, status: u16, body: &str) -> Result<()> {
+async fn write_callback_response(
+    socket: &mut tokio::net::TcpStream,
+    status: u16,
+    body: &str,
+) -> Result<()> {
     let status_text = if status == 200 { "OK" } else { "Bad Request" };
     let html = format!("<html><body>{body}</body></html>");
     let response = format!(
@@ -192,4 +220,3 @@ mod tests {
         assert!(tokens.validate_initial().is_err());
     }
 }
-

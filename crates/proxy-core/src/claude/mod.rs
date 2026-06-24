@@ -1,4 +1,7 @@
-use crate::{config::DEFAULT_PORT, error::{ProxyError, Result}};
+use crate::{
+    config::DEFAULT_PORT,
+    error::{ProxyError, Result},
+};
 use chrono::Utc;
 use serde_json::{json, Map, Value};
 use std::{
@@ -43,7 +46,8 @@ pub struct InstallResult {
 }
 
 pub fn default_settings_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| ProxyError::Config("cannot locate home directory".into()))?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| ProxyError::Config("cannot locate home directory".into()))?;
     Ok(home.join(".claude").join("settings.json"))
 }
 
@@ -94,8 +98,14 @@ pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
         "ANTHROPIC_BASE_URL".into(),
         Value::String(format!("http://127.0.0.1:{}", options.port)),
     );
-    env.insert("ANTHROPIC_AUTH_TOKEN".into(), Value::String("unused".into()));
-    env.insert("ANTHROPIC_MODEL".into(), Value::String(options.model.clone()));
+    env.insert(
+        "ANTHROPIC_AUTH_TOKEN".into(),
+        Value::String("unused".into()),
+    );
+    env.insert(
+        "ANTHROPIC_MODEL".into(),
+        Value::String(options.model.clone()),
+    );
     env.insert(
         "ANTHROPIC_SMALL_FAST_MODEL".into(),
         Value::String(options.small_fast_model.clone()),
@@ -104,8 +114,14 @@ pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
         Value::Number(options.auto_compact_window.into()),
     );
-    env.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), Value::Number(1.into()));
-    env.insert("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK".into(), Value::Number(1.into()));
+    env.insert(
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
+        Value::Number(1.into()),
+    );
+    env.insert(
+        "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK".into(),
+        Value::Number(1.into()),
+    );
     env
 }
 
@@ -116,7 +132,9 @@ fn backup_existing(path: &Path) -> Result<Option<PathBuf>> {
     let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
     let backup = path.with_file_name(format!(
         "{}.backup-{timestamp}",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("settings.json")
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("settings.json")
     ));
     fs::copy(path, &backup)?;
     Ok(Some(backup))
@@ -135,7 +153,9 @@ fn merge_env(settings: &mut Value, managed: Map<String, Value>) {
     if !settings.is_object() {
         *settings = json!({});
     }
-    let root = settings.as_object_mut().expect("object after normalization");
+    let root = settings
+        .as_object_mut()
+        .expect("object after normalization");
     let env = root.entry("env").or_insert_with(|| json!({}));
     if !env.is_object() {
         *env = json!({});
@@ -162,7 +182,11 @@ mod tests {
     fn install_preserves_unmanaged_env_and_creates_backup() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        fs::write(&path, r#"{"env":{"KEEP":"yes","ANTHROPIC_MODEL":"old"},"theme":"dark"}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"env":{"KEEP":"yes","ANTHROPIC_MODEL":"old"},"theme":"dark"}"#,
+        )
+        .unwrap();
         let result = install_settings(&path, &ClaudeSettingsOptions::default()).unwrap();
         assert!(result.backup_path.unwrap().exists());
         let value: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
@@ -178,4 +202,3 @@ mod tests {
         assert!(restore_latest_backup(&path).unwrap().is_none());
     }
 }
-

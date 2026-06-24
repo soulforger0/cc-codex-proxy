@@ -176,7 +176,8 @@ impl CodexReducer {
             self.usage = usage;
         }
         if is_completion_event(event) {
-            self.stop_reason = Some(extract_stop_reason(event).unwrap_or_else(|| "end_turn".into()));
+            self.stop_reason =
+                Some(extract_stop_reason(event).unwrap_or_else(|| "end_turn".into()));
             self.stopped = true;
         }
         out
@@ -188,7 +189,10 @@ impl CodexReducer {
             out.push(response::content_block_stop(self.text_index));
             self.text_open = false;
         }
-        out.push(response::message_delta(self.stop_reason.as_deref(), self.usage.clone()));
+        out.push(response::message_delta(
+            self.stop_reason.as_deref(),
+            self.usage.clone(),
+        ));
         out.push(response::message_stop());
         out
     }
@@ -226,12 +230,18 @@ struct ToolCall {
 }
 
 fn extract_text_delta(event: &Value) -> Option<String> {
-    let typ = event.get("type").and_then(Value::as_str).unwrap_or_default();
+    let typ = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if typ.contains("reasoning") {
         return None;
     }
     if typ.contains("output_text.delta") || typ.contains("text.delta") {
-        return event.get("delta").and_then(Value::as_str).map(ToOwned::to_owned);
+        return event
+            .get("delta")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
     }
     event
         .pointer("/response/output/0/content/0/text")
@@ -239,7 +249,10 @@ fn extract_text_delta(event: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
         .or_else(|| {
             if typ.contains("message.delta") {
-                event.get("text").and_then(Value::as_str).map(ToOwned::to_owned)
+                event
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
             } else {
                 None
             }
@@ -247,7 +260,10 @@ fn extract_text_delta(event: &Value) -> Option<String> {
 }
 
 fn extract_function_call(event: &Value) -> Option<ToolCall> {
-    let item = event.get("item").or_else(|| event.get("output_item")).unwrap_or(event);
+    let item = event
+        .get("item")
+        .or_else(|| event.get("output_item"))
+        .unwrap_or(event);
     let item_type = item.get("type").and_then(Value::as_str)?;
     if item_type != "function_call" {
         return None;
@@ -258,7 +274,11 @@ fn extract_function_call(event: &Value) -> Option<ToolCall> {
         .and_then(Value::as_str)
         .unwrap_or("tool_call")
         .to_string();
-    let name = item.get("name").and_then(Value::as_str).unwrap_or("tool").to_string();
+    let name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("tool")
+        .to_string();
     let arguments = item
         .get("arguments")
         .and_then(Value::as_str)
@@ -273,9 +293,17 @@ fn extract_function_call(event: &Value) -> Option<ToolCall> {
 }
 
 fn extract_usage(event: &Value) -> Option<AnthropicUsage> {
-    let usage = event.get("usage").or_else(|| event.pointer("/response/usage"))?;
-    let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let output = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let usage = event
+        .get("usage")
+        .or_else(|| event.pointer("/response/usage"))?;
+    let input = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let cached = usage
         .pointer("/input_tokens_details/cached_tokens")
         .and_then(Value::as_u64)
@@ -289,13 +317,18 @@ fn extract_usage(event: &Value) -> Option<AnthropicUsage> {
 }
 
 fn is_completion_event(event: &Value) -> bool {
-    let typ = event.get("type").and_then(Value::as_str).unwrap_or_default();
-    typ.contains("completed") || typ.contains("done") || event.get("response").is_some_and(|response| {
-        response
-            .get("status")
-            .and_then(Value::as_str)
-            .is_some_and(|status| status == "completed")
-    })
+    let typ = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    typ.contains("completed")
+        || typ.contains("done")
+        || event.get("response").is_some_and(|response| {
+            response
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status == "completed")
+        })
 }
 
 fn extract_stop_reason(event: &Value) -> Option<String> {
@@ -304,12 +337,14 @@ fn extract_stop_reason(event: &Value) -> Option<String> {
         .or_else(|| event.pointer("/response/status_details/reason"))
         .or_else(|| event.get("stop_reason"))
         .and_then(Value::as_str)?;
-    Some(match reason {
-        "max_output_tokens" | "max_tokens" => "max_tokens",
-        "tool_calls" | "function_call" => "tool_use",
-        _ => "end_turn",
-    }
-    .to_string())
+    Some(
+        match reason {
+            "max_output_tokens" | "max_tokens" => "max_tokens",
+            "tool_calls" | "function_call" => "tool_use",
+            _ => "end_turn",
+        }
+        .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -330,4 +365,3 @@ mod tests {
         assert_eq!(response.usage.input_tokens, 2);
     }
 }
-
