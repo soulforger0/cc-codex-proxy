@@ -63,6 +63,18 @@ cc-codex-proxy claude restore-settings
 
 The managed settings point Claude Code at the local Anthropic-compatible proxy, set primary and Haiku/small model defaults, enable reasoning-effort requests for the custom model names, and set the auto-compaction window to match the Codex context window.
 
+### Transport Selection
+
+Claude Code always talks to the local proxy over HTTP. Streaming responses are returned as Anthropic-compatible SSE.
+
+The proxy's upstream Codex transport defaults to `auto`: try WebSocket first, then fall back to HTTP SSE for a cooldown period if WebSocket setup fails. Override when needed:
+
+```sh
+export CCP_CODEX_TRANSPORT=http       # most conservative
+export CCP_CODEX_TRANSPORT=websocket  # fail hard if WebSocket is unavailable
+export CCP_CODEX_TRANSPORT=auto       # default
+```
+
 ## Runtime Files
 
 - Config: `~/Library/Application Support/CCCodexProxy/config.json`

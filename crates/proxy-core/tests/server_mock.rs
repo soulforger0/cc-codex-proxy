@@ -3,7 +3,7 @@ use axum::{
     body::Body,
     extract::State,
     http::{header, Response, StatusCode},
-    routing::post,
+    routing::{get, post},
     Router,
 };
 use bytes::Bytes;
@@ -112,6 +112,37 @@ async fn upstream_429_is_preserved() {
     server.stop().await;
 }
 
+#[tokio::test]
+async fn auto_transport_falls_back_to_http_and_cools_down_websocket() {
+    let state = Arc::new(HttpOnlyState::default());
+    let upstream = start_mock_upstream(mock_http_only_app(state.clone())).await;
+    let (mut config, paths) = test_config(upstream, "/codex").await;
+    config.codex.transport = CodexTransport::Auto;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+
+    for _ in 0..2 {
+        let response = client
+            .post(format!("http://{}/v1/messages", server.addr))
+            .json(&serde_json::json!({
+                "model": "gpt-5.4",
+                "max_tokens": 64,
+                "stream": false,
+                "messages": [{"role": "user", "content": "hello"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["content"][0]["text"], "hello from http");
+    }
+
+    assert!(state.websocket_attempts.load(Ordering::SeqCst) <= 1);
+    assert_eq!(state.http_posts.load(Ordering::SeqCst), 2);
+    server.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn streaming_load_completes_100_agents() {
     let state = Arc::new(LoadState::default());
@@ -215,6 +246,43 @@ fn mock_success_app() -> Router {
                 .unwrap()
         }),
     )
+}
+
+#[derive(Default)]
+struct HttpOnlyState {
+    websocket_attempts: AtomicUsize,
+    http_posts: AtomicUsize,
+}
+
+fn mock_http_only_app(state: Arc<HttpOnlyState>) -> Router {
+    Router::new()
+        .route(
+            "/codex",
+            get(mock_http_only_websocket_attempt).post(mock_http_only_response),
+        )
+        .with_state(state)
+}
+
+async fn mock_http_only_websocket_attempt(
+    State(state): State<Arc<HttpOnlyState>>,
+) -> Response<Body> {
+    state.websocket_attempts.fetch_add(1, Ordering::SeqCst);
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .body(Body::from("websocket unavailable"))
+        .unwrap()
+}
+
+async fn mock_http_only_response(State(state): State<Arc<HttpOnlyState>>) -> Response<Body> {
+    state.http_posts.fetch_add(1, Ordering::SeqCst);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello from http\"}\n\n\
+             data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":3}}\n\n",
+        ))
+        .unwrap()
 }
 
 #[derive(Default)]

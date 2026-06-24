@@ -8,11 +8,18 @@ use bytes::Bytes;
 use futures_util::{SinkExt, Stream, StreamExt};
 use http::StatusCode;
 use serde_json::json;
-use std::{pin::Pin, time::Duration};
+use std::{
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, warn};
 
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
+
+const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const WEBSOCKET_FAILURE_COOLDOWN: Duration = Duration::from_secs(120);
 
 pub struct CodexResponse {
     pub body: ByteStream,
@@ -24,6 +31,7 @@ pub struct CodexClient {
     http: reqwest::Client,
     config: CodexConfig,
     auth: AuthManager,
+    transport_state: Arc<TransportState>,
 }
 
 impl CodexClient {
@@ -32,7 +40,12 @@ impl CodexClient {
             .connect_timeout(Duration::from_secs(15))
             .pool_idle_timeout(Duration::from_secs(90))
             .build()?;
-        Ok(Self { http, config, auth })
+        Ok(Self {
+            http,
+            config,
+            auth,
+            transport_state: Arc::new(TransportState::default()),
+        })
     }
 
     pub async fn post(
@@ -71,17 +84,38 @@ impl CodexClient {
                 self.post_websocket(body, session_id, access_token, account_id)
                     .await
             }
-            CodexTransport::Auto => match self
-                .post_websocket(body, session_id, access_token, account_id)
-                .await
-            {
-                Ok(response) => Ok(response),
-                Err(err) => {
-                    warn!(error = %err, "codex websocket setup failed; falling back to HTTP SSE");
-                    self.post_http(body, session_id, access_token, account_id)
-                        .await
+            CodexTransport::Auto => {
+                if let Some(remaining) = self.transport_state.websocket_cooldown_remaining() {
+                    debug!(
+                        cooldown_ms = remaining.as_millis(),
+                        "skipping Codex websocket during fallback cooldown"
+                    );
+                    return self
+                        .post_http(body, session_id, access_token, account_id)
+                        .await;
                 }
-            },
+
+                match self
+                    .post_websocket(body, session_id, access_token, account_id)
+                    .await
+                {
+                    Ok(response) => {
+                        self.transport_state.record_websocket_success();
+                        Ok(response)
+                    }
+                    Err(err) => {
+                        self.transport_state
+                            .record_websocket_failure(WEBSOCKET_FAILURE_COOLDOWN);
+                        warn!(
+                            error = %err,
+                            cooldown_ms = WEBSOCKET_FAILURE_COOLDOWN.as_millis(),
+                            "codex websocket setup failed; falling back to HTTP SSE"
+                        );
+                        self.post_http(body, session_id, access_token, account_id)
+                            .await
+                    }
+                }
+            }
         }
     }
 
@@ -161,10 +195,13 @@ impl CodexClient {
         let request = request
             .body(())
             .map_err(|err| ProxyError::Transport(format!("bad websocket request: {err}")))?;
-        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(request))
-            .await
-            .map_err(|_| ProxyError::Transport("timed out opening Codex websocket".into()))?
-            .map_err(|err| ProxyError::Transport(format!("Codex websocket setup failed: {err}")))?;
+        let (mut socket, _) =
+            tokio::time::timeout(WEBSOCKET_CONNECT_TIMEOUT, connect_async(request))
+                .await
+                .map_err(|_| ProxyError::Transport("timed out opening Codex websocket".into()))?
+                .map_err(|err| {
+                    ProxyError::Transport(format!("Codex websocket setup failed: {err}"))
+                })?;
         let payload = json!({ "type": "responses.create", "request": body }).to_string();
         socket
             .send(Message::Text(payload.into()))
@@ -228,6 +265,44 @@ impl CodexClient {
     }
 }
 
+#[derive(Debug, Default)]
+struct TransportState {
+    websocket_disabled_until: Mutex<Option<Instant>>,
+}
+
+impl TransportState {
+    fn websocket_cooldown_remaining(&self) -> Option<Duration> {
+        let mut disabled_until = self
+            .websocket_disabled_until
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let until = (*disabled_until)?;
+        let now = Instant::now();
+        if until > now {
+            Some(until.saturating_duration_since(now))
+        } else {
+            *disabled_until = None;
+            None
+        }
+    }
+
+    fn record_websocket_failure(&self, cooldown: Duration) {
+        let mut disabled_until = self
+            .websocket_disabled_until
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *disabled_until = Some(Instant::now() + cooldown);
+    }
+
+    fn record_websocket_success(&self) {
+        let mut disabled_until = self
+            .websocket_disabled_until
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *disabled_until = None;
+    }
+}
+
 fn insert_static<K>(headers: &mut reqwest::header::HeaderMap, name: K, value: &str) -> Result<()>
 where
     K: reqwest::header::IntoHeaderName,
@@ -248,5 +323,30 @@ fn websocket_url(url: &str) -> Result<String> {
         Err(ProxyError::Config(format!(
             "Codex base URL must be http(s): {url}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn websocket_cooldown_tracks_failures_and_successes() {
+        let state = TransportState::default();
+        assert!(state.websocket_cooldown_remaining().is_none());
+
+        state.record_websocket_failure(Duration::from_secs(60));
+        assert!(state.websocket_cooldown_remaining().is_some());
+
+        state.record_websocket_success();
+        assert!(state.websocket_cooldown_remaining().is_none());
+    }
+
+    #[test]
+    fn websocket_cooldown_expires() {
+        let state = TransportState::default();
+        state.record_websocket_failure(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(state.websocket_cooldown_remaining().is_none());
     }
 }

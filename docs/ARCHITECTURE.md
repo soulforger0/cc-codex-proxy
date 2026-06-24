@@ -18,6 +18,29 @@ The proxy does not implement a generic provider abstraction. It keeps small inte
 - Dropping the downstream response body drops the upstream request stream, so client disconnects cancel in-flight work promptly.
 - Upstream 429/403/400 responses are returned to Claude Code as failures. The proxy does not queue or retry 429s.
 
+## Transport Selection
+
+The Claude Code-facing side is always HTTP. Claude Code points `ANTHROPIC_BASE_URL` at the local server, sends Anthropic Messages requests to `/v1/messages`, and receives either JSON or Anthropic SSE depending on the request `stream` flag.
+
+The Codex upstream side supports three modes through `codex.transport` or `CCP_CODEX_TRANSPORT`:
+
+| Mode | Behavior | When to use |
+| --- | --- | --- |
+| `auto` | Try Codex WebSocket first. If WebSocket setup fails, fall back to HTTP SSE and suppress more WebSocket attempts for 120 seconds. | Default for app users. Gives WebSocket a chance without repeatedly delaying requests on networks that block it. |
+| `http` / `sse` | Use upstream HTTP SSE only. | Most conservative mode for CI, debugging, restricted corporate networks, or any environment where WebSocket setup is unreliable. |
+| `websocket` / `ws` | Use upstream WebSocket only. | Diagnostics or explicit performance experiments where hard failure is preferred over fallback. |
+
+Both upstream modes are reduced into the same internal byte stream and then translated into Anthropic-compatible events. The proxy only falls back before an upstream response stream is committed. Once streaming has started, it surfaces stream errors instead of replaying the request, because replaying a partially served agent turn can duplicate tool calls or chargeable work.
+
+## Fallback Strategy
+
+- Transport fallback: `auto` demotes WebSocket to HTTP SSE for a short cooldown after setup failure. This avoids a per-request WebSocket timeout tax when a network, proxy, or upstream deployment rejects upgrades.
+- Auth fallback: a Codex 401 forces one token refresh and one retry.
+- Launch fallback: the managed `claude` shim only injects proxy environment variables while the app PID is alive and `/healthz` succeeds. If the app is gone, it launches the original Claude command without proxy variables. If the app is alive but the helper is unhealthy, it fails fast so new sessions do not start with inconsistent routing.
+- Capacity fallback: 429, 403, 400, and `Retry-After` are passed through to Claude Code. The proxy does not queue, fan out, or retry rate-limited work because that would hide subscription limits and can amplify load.
+
+Recommended setup: leave app users on `auto`; force `CCP_CODEX_TRANSPORT=http` for controlled reliability tests or known WebSocket-hostile networks; use `websocket` only when validating WebSocket behavior directly.
+
 ## Auth
 
 - Browser login uses OAuth PKCE against `auth.openai.com`.
