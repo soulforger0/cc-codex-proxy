@@ -40,18 +40,24 @@ pub fn translate_request(
     resolved: &ResolvedModel,
     session_id: Option<&str>,
 ) -> Result<ResponsesRequest> {
-    let instructions = request.system.as_ref().map(system_to_instructions);
-    let input = request
-        .messages
-        .iter()
-        .map(|message| {
-            Ok(json!({
-                "type": "message",
-                "role": map_role(&message.role)?,
-                "content": content_to_codex_parts(&message.role, &message.content),
-            }))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut instruction_parts = Vec::new();
+    if let Some(system) = &request.system {
+        push_instruction_part(&mut instruction_parts, system);
+    }
+
+    let mut input = Vec::with_capacity(request.messages.len());
+    for message in &request.messages {
+        if message.role == "system" {
+            push_instruction_part(&mut instruction_parts, &message.content);
+            continue;
+        }
+        input.push(json!({
+            "type": "message",
+            "role": map_role(&message.role)?,
+            "content": content_to_codex_parts(&message.role, &message.content),
+        }));
+    }
+    let instructions = (!instruction_parts.is_empty()).then(|| instruction_parts.join("\n\n"));
     let tools = request
         .tools
         .as_ref()
@@ -82,10 +88,16 @@ fn map_role(role: &str) -> Result<&'static str> {
     match role {
         "user" => Ok("user"),
         "assistant" => Ok("assistant"),
-        "system" => Ok("system"),
         other => Err(ProxyError::InvalidRequest(format!(
             "unsupported message role \"{other}\""
         ))),
+    }
+}
+
+fn push_instruction_part(parts: &mut Vec<String>, system: &Value) {
+    let text = system_to_instructions(system);
+    if !text.is_empty() {
+        parts.push(text);
     }
 }
 
@@ -338,6 +350,48 @@ mod tests {
             service_tier: None,
             context_window: 272_000,
         }
+    }
+
+    #[test]
+    fn hoists_system_messages_to_instructions() {
+        let req = AnthropicRequest {
+            model: "gpt-5.4".into(),
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: Some(true),
+            system: Some(json!("top-level instructions")),
+            messages: vec![
+                crate::anthropic::schema::AnthropicMessage {
+                    role: "system".into(),
+                    content: json!([
+                        {"type": "text", "text": "message instructions"},
+                        {"type": "text", "text": "more instructions"}
+                    ]),
+                    extra: Default::default(),
+                },
+                crate::anthropic::schema::AnthropicMessage {
+                    role: "user".into(),
+                    content: json!("hello"),
+                    extra: Default::default(),
+                },
+            ],
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            output_config: None,
+            thinking: None,
+            extra: Default::default(),
+        };
+
+        let translated = translate_request(&req, &resolved(), None).unwrap();
+
+        assert_eq!(
+            translated.instructions.as_deref(),
+            Some("top-level instructions\n\nmessage instructions\n\nmore instructions")
+        );
+        assert_eq!(translated.input.len(), 1);
+        assert_eq!(translated.input[0]["role"], "user");
     }
 
     #[test]

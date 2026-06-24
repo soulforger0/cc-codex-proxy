@@ -13,7 +13,13 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest, handshake::client::Request as WebSocketRequest,
+        ClientRequestBuilder, Message,
+    },
+};
 use tracing::{debug, warn};
 
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
@@ -172,29 +178,8 @@ impl CodexClient {
         account_id: Option<&str>,
     ) -> Result<CodexResponse> {
         let ws_url = websocket_url(&self.config.base_url)?;
-        let request = http::Request::builder()
-            .method("GET")
-            .uri(ws_url.as_str())
-            .header("authorization", format!("Bearer {access_token}"))
-            .header("openai-beta", "responses=experimental")
-            .header("originator", self.config.originator.as_str())
-            .header("user-agent", self.config.user_agent.as_str());
-        let request = if let Some(account_id) = account_id {
-            request.header("ChatGPT-Account-Id", account_id)
-        } else {
-            request
-        };
-        let request = if let Some(session_id) = session_id {
-            request
-                .header("session_id", session_id)
-                .header("x-client-request-id", session_id)
-                .header("x-codex-window-id", format!("{session_id}:0"))
-        } else {
-            request
-        };
-        let request = request
-            .body(())
-            .map_err(|err| ProxyError::Transport(format!("bad websocket request: {err}")))?;
+        let request =
+            build_websocket_request(&ws_url, &self.config, access_token, account_id, session_id)?;
         let (mut socket, _) =
             tokio::time::timeout(WEBSOCKET_CONNECT_TIMEOUT, connect_async(request))
                 .await
@@ -326,6 +311,35 @@ fn websocket_url(url: &str) -> Result<String> {
     }
 }
 
+fn build_websocket_request(
+    ws_url: &str,
+    config: &CodexConfig,
+    access_token: &str,
+    account_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<WebSocketRequest> {
+    let uri = ws_url
+        .parse::<http::Uri>()
+        .map_err(|err| ProxyError::Transport(format!("bad websocket URL: {err}")))?;
+    let mut request = ClientRequestBuilder::new(uri)
+        .with_header("authorization", format!("Bearer {access_token}"))
+        .with_header("openai-beta", "responses=experimental")
+        .with_header("originator", config.originator.as_str())
+        .with_header("user-agent", config.user_agent.as_str());
+    if let Some(account_id) = account_id {
+        request = request.with_header("ChatGPT-Account-Id", account_id);
+    }
+    if let Some(session_id) = session_id {
+        request = request
+            .with_header("session_id", session_id)
+            .with_header("x-client-request-id", session_id)
+            .with_header("x-codex-window-id", format!("{session_id}:0"));
+    }
+    request
+        .into_client_request()
+        .map_err(|err| ProxyError::Transport(format!("bad websocket request: {err}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +362,26 @@ mod tests {
         state.record_websocket_failure(Duration::from_millis(1));
         std::thread::sleep(Duration::from_millis(5));
         assert!(state.websocket_cooldown_remaining().is_none());
+    }
+
+    #[test]
+    fn websocket_request_includes_handshake_and_codex_headers() {
+        let config = CodexConfig::default();
+        let request = build_websocket_request(
+            "wss://example.test/backend-api/codex/responses",
+            &config,
+            "access-token",
+            Some("account-id"),
+            Some("session-id"),
+        )
+        .unwrap();
+        let headers = request.headers();
+
+        assert!(headers.contains_key("Sec-WebSocket-Key"));
+        assert_eq!(headers.get("Connection").unwrap(), "Upgrade");
+        assert_eq!(headers.get("Upgrade").unwrap(), "websocket");
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer access-token");
+        assert_eq!(headers.get("ChatGPT-Account-Id").unwrap(), "account-id");
+        assert_eq!(headers.get("x-client-request-id").unwrap(), "session-id");
     }
 }
