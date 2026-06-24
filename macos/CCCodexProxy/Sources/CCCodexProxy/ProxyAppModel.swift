@@ -4,7 +4,11 @@ import SwiftUI
 @MainActor
 final class ProxyAppModel: ObservableObject {
     @Published var isRunning = false
+    @Published var isAuthenticated = false
+    @Published var isLoggingIn = false
     @Published var statusText = "Not checked"
+    @Published var authStatusText = "Checking authentication"
+    @Published var authDetailText = "OAuth status has not been checked yet."
     @Published var lastMessage = ""
     @Published var model = "gpt-5.4[1m]"
     @Published var port = 18765
@@ -12,6 +16,11 @@ final class ProxyAppModel: ObservableObject {
     private var proxyProcess: Process?
 
     func refresh() async {
+        await refreshProxyStatus(updateLastMessage: true)
+        await refreshAuthStatus()
+    }
+
+    private func refreshProxyStatus(updateLastMessage: Bool) async {
         do {
             let output = try await runCLI(["admin", "status"], allowFailure: true)
             if output.contains("\"ok\":true") || output.contains("\"ok\": true") {
@@ -21,11 +30,26 @@ final class ProxyAppModel: ObservableObject {
                 isRunning = false
                 statusText = "Stopped"
             }
-            lastMessage = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if updateLastMessage {
+                lastMessage = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
         } catch {
             isRunning = false
             statusText = "Stopped"
-            lastMessage = error.localizedDescription
+            if updateLastMessage {
+                lastMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func refreshAuthStatus() async {
+        do {
+            let output = try await runCLI(["auth", "status"], allowFailure: true)
+            applyAuthStatus(from: output, authenticated: output.contains("Authenticated: yes"))
+        } catch {
+            isAuthenticated = false
+            authStatusText = "Authentication unavailable"
+            authDetailText = error.localizedDescription
         }
     }
 
@@ -54,11 +78,18 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func login() async {
+        isLoggingIn = true
+        defer { isLoggingIn = false }
+
         do {
-            lastMessage = try await runCLI(["auth", "login"])
-            await refresh()
+            let output = try await runCLI(["auth", "login"])
+            applyAuthStatus(from: output, authenticated: true)
+            lastMessage = successMessage(from: output)
+            await refreshProxyStatus(updateLastMessage: false)
+            await refreshAuthStatus()
         } catch {
             lastMessage = "Login failed: \(error.localizedDescription)"
+            await refreshAuthStatus()
         }
     }
 
@@ -106,6 +137,44 @@ final class ProxyAppModel: ObservableObject {
             }
             return output
         }.value
+    }
+
+    private func applyAuthStatus(from output: String, authenticated: Bool) {
+        guard authenticated else {
+            isAuthenticated = false
+            authStatusText = "Not signed in"
+            authDetailText = "Login to complete ChatGPT OAuth."
+            return
+        }
+
+        isAuthenticated = true
+        authStatusText = "Signed in"
+
+        if let account = value(for: "Account", in: output), !account.isEmpty {
+            authDetailText = "Account \(account)"
+        } else if let storage = value(for: "Storage", in: output), !storage.isEmpty {
+            authDetailText = "Stored in \(storage)."
+        } else {
+            authDetailText = "OAuth tokens are stored for this Mac."
+        }
+    }
+
+    private func successMessage(from output: String) -> String {
+        if let storage = value(for: "Storage", in: output), !storage.isEmpty {
+            return "OAuth login complete. Tokens saved in \(storage)."
+        }
+        return "OAuth login complete."
+    }
+
+    private func value(for label: String, in output: String) -> String? {
+        output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line -> String? in
+                let prefix = "\(label):"
+                guard line.hasPrefix(prefix) else { return nil }
+                return line.dropFirst(prefix.count).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .first
     }
 }
 

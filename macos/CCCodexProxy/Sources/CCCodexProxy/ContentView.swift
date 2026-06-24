@@ -82,12 +82,14 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 90)
             }
+            authStatus
             HStack {
                 Button {
                     Task { await model.login() }
                 } label: {
-                    Label("Login", systemImage: "person.crop.circle.badge.checkmark")
+                    Label(model.isAuthenticated ? "Reconnect" : "Login", systemImage: "person.crop.circle.badge.checkmark")
                 }
+                .disabled(model.isLoggingIn)
                 Button {
                     Task { await model.installClaudeSettings() }
                 } label: {
@@ -96,6 +98,56 @@ struct ContentView: View {
             }
             .buttonStyle(.bordered)
         }
+    }
+
+    private var authStatus: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: model.isAuthenticated ? "checkmark.seal.fill" : "person.crop.circle.badge.exclamationmark")
+                .font(.title3)
+                .foregroundStyle(authStatusColor)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.isLoggingIn ? "OAuth in progress" : model.authStatusText)
+                    .font(.subheadline.weight(.semibold))
+                Text(model.isLoggingIn ? "Complete the browser sign-in to finish." : model.authDetailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            if model.isLoggingIn {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("OAuth login in progress")
+            } else {
+                Text(model.isAuthenticated ? "OAuth OK" : "OAuth needed")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(authStatusColor.opacity(model.isAuthenticated ? 0.18 : 0.12))
+                    )
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(authStatusColor.opacity(model.isAuthenticated ? 0.10 : 0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(authStatusColor.opacity(model.isAuthenticated ? 0.45 : 0.22))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(model.isAuthenticated ? "OAuth signed in" : "OAuth not signed in")
+    }
+
+    private var authStatusColor: Color {
+        model.isAuthenticated ? .green : .secondary
     }
 
     private var footer: some View {
