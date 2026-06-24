@@ -28,7 +28,46 @@ The proxy does not implement a generic provider abstraction. It keeps small inte
 - Claude Code messages, system prompts, tools, tool calls, tool results, images, JSON output formats, and reasoning effort are translated into the Codex Responses request shape.
 - Hosted web search maps to Codex `web_search`.
 - Unsupported reasoning stream events are dropped.
-- Image blocks inside tool results become text placeholders because Codex function outputs are text-only.
+- Image blocks inside tool results become text placeholders because this proxy serializes function outputs as text for Codex compatibility.
+
+### Claude Code To Responses Mapping
+
+The proxy intentionally implements the subset of Anthropic Messages semantics that Claude Code relies on for local agent work.
+
+| Claude Code / Anthropic field | Codex Responses field | Notes |
+| --- | --- | --- |
+| `model` | `model` | Resolved through `model-profiles.json`; Claude `[1m]` and proxy `-fast` hints are stripped before upstream. |
+| `system` | `instructions` | String and text-block arrays are joined into one instruction string. |
+| user/assistant text blocks | `input[].content[].input_text` / `output_text` | Assistant history is preserved as Responses input items. |
+| image blocks | `input_image.image_url` | Supports base64 data URLs and URL images. |
+| `tool_use` | `function_call` | Preserves call id, tool name, and JSON arguments. |
+| `tool_result` | `function_call_output` | Text is forwarded; image results become placeholders. |
+| `tools[]` | `tools[]` with `type: "function"` | Anthropic `input_schema` becomes Responses `parameters`; `strict` is disabled for Claude Code compatibility. |
+| `web_search_20250305` | `web_search` | Hosted web-search bridge. |
+| `tool_choice` | `tool_choice` | `auto`, `none`, `any`, and forced tool choices map to Responses equivalents. |
+| `max_tokens` | `max_output_tokens` | Output limit only. |
+| `temperature`, `top_p` | same names | Forwarded when Claude Code sends them. |
+| `metadata` | `metadata` | Forwarded unchanged. |
+| `output_config.effort` | `reasoning.effort` | `max` maps to `xhigh`; unknown values fall back to `medium`. |
+| `thinking.budget_tokens` | `reasoning.effort` | Budgets above 40k become `high`; lower budgets become `medium`. |
+| `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting. |
+| `x-claude-code-session-id` | `prompt_cache_key` and upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. |
+
+### Context Compaction
+
+Claude Code owns conversation compaction when it talks to a gateway. The proxy supports that path by exposing `/v1/messages/count_tokens` and by installing `CLAUDE_CODE_AUTO_COMPACT_WINDOW` so Claude Code compacts near the Codex context window rather than relying on a model-name heuristic.
+
+OpenAI Responses also has server-side compaction features, but this proxy does not currently call `/responses/compact`. Claude Code sends a complete Anthropic-shaped transcript after its own compaction, and the proxy translates that transcript as the source of truth.
+
+### Status Line Metrics
+
+Claude Code status-line scripts receive their JSON from Claude Code, not from this proxy. The proxy influences those metrics only through:
+
+- `/v1/messages/count_tokens`, which drives Claude Code context estimates and compaction timing.
+- Anthropic response `usage`, which maps Codex `input_tokens`, `output_tokens`, and `input_tokens_details.cached_tokens` into `input_tokens`, `output_tokens`, and `cache_read_input_tokens`.
+- Installed model environment variables, which determine the active primary and small model names Claude Code reports.
+
+ChatGPT Codex subscription cost and rate-limit state are not exposed through a stable Anthropic-compatible contract, so this proxy does not synthesize Claude Code `cost` or `rate_limits` values.
 
 ## Configuration
 

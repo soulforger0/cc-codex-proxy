@@ -15,11 +15,19 @@ pub struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,6 +57,7 @@ pub fn translate_request(
         .as_ref()
         .map(|tools| translate_tools(tools))
         .transpose()?;
+    let tool_choice = request.tool_choice.as_ref().and_then(translate_tool_choice);
     let reasoning = reasoning_from_request(request);
     let text = text_format_from_request(request);
     Ok(ResponsesRequest {
@@ -56,9 +65,13 @@ pub fn translate_request(
         input,
         instructions,
         tools,
+        tool_choice,
         reasoning,
         text,
         max_output_tokens: request.max_tokens,
+        temperature: request.temperature,
+        top_p: request.top_p,
+        metadata: request.metadata.clone(),
         service_tier: resolved.service_tier.clone(),
         prompt_cache_key: session_id.map(ToOwned::to_owned),
         stream: true,
@@ -205,6 +218,20 @@ fn translate_tools(tools: &[AnthropicTool]) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+fn translate_tool_choice(choice: &Value) -> Option<Value> {
+    let choice_type = choice.get("type").and_then(Value::as_str)?;
+    match choice_type {
+        "auto" => Some(json!("auto")),
+        "none" => Some(json!("none")),
+        "any" => Some(json!("required")),
+        "tool" => choice
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|name| json!({ "type": "function", "name": name })),
+        _ => None,
+    }
+}
+
 fn reasoning_from_request(request: &AnthropicRequest) -> Option<Value> {
     let effort = request
         .output_config
@@ -258,6 +285,8 @@ mod tests {
         let req = AnthropicRequest {
             model: "gpt-5.4".into(),
             max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
             stream: Some(true),
             system: None,
             messages: vec![crate::anthropic::schema::AnthropicMessage {
@@ -270,6 +299,7 @@ mod tests {
                 extra: Default::default(),
             }],
             tools: None,
+            tool_choice: None,
             metadata: None,
             output_config: None,
             thinking: None,
@@ -280,5 +310,49 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(output.contains("image omitted"));
+    }
+
+    #[test]
+    fn translates_tool_choice_sampling_and_metadata() {
+        let req = AnthropicRequest {
+            model: "gpt-5.4".into(),
+            max_tokens: Some(100),
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+            stream: Some(true),
+            system: None,
+            messages: vec![crate::anthropic::schema::AnthropicMessage {
+                role: "user".into(),
+                content: json!("hello"),
+                extra: Default::default(),
+            }],
+            tools: Some(vec![AnthropicTool {
+                name: "Read".into(),
+                description: Some("Read a file".into()),
+                input_schema: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    },
+                    "required": ["path"]
+                })),
+                extra: Default::default(),
+            }]),
+            tool_choice: Some(json!({ "type": "tool", "name": "Read" })),
+            metadata: Some(json!({ "session": "s1" })),
+            output_config: None,
+            thinking: None,
+            extra: Default::default(),
+        };
+
+        let translated = translate_request(&req, &resolved(), Some("s")).unwrap();
+
+        assert_eq!(
+            translated.tool_choice.as_ref().unwrap(),
+            &json!({ "type": "function", "name": "Read" })
+        );
+        assert_eq!(translated.temperature, Some(0.2));
+        assert_eq!(translated.top_p, Some(0.9));
+        assert_eq!(translated.metadata.as_ref().unwrap()["session"], "s1");
     }
 }

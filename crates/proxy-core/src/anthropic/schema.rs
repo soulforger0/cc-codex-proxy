@@ -7,6 +7,10 @@ pub struct AnthropicRequest {
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
     pub stream: Option<bool>,
     #[serde(default)]
     pub system: Option<Value>,
@@ -14,6 +18,8 @@ pub struct AnthropicRequest {
     pub messages: Vec<AnthropicMessage>,
     #[serde(default)]
     pub tools: Option<Vec<AnthropicTool>>,
+    #[serde(default)]
+    pub tool_choice: Option<Value>,
     #[serde(default)]
     pub metadata: Option<Value>,
     #[serde(default)]

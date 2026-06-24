@@ -15,8 +15,10 @@ pub const MANAGED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK",
 ];
@@ -177,8 +179,16 @@ pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
         Value::String(options.small_fast_model.clone()),
     );
     env.insert(
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
+        Value::String(options.small_fast_model.clone()),
+    );
+    env.insert(
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
         Value::Number(options.auto_compact_window.into()),
+    );
+    env.insert(
+        "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT".into(),
+        Value::Number(1.into()),
     );
     env.insert(
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),

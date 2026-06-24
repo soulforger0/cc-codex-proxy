@@ -57,6 +57,8 @@ The command backs up `~/.claude/settings.json` before merging managed environmen
 cc-codex-proxy claude restore-settings
 ```
 
+The managed settings point Claude Code at the local Anthropic-compatible proxy, set primary and Haiku/small model defaults, enable reasoning-effort requests for the custom model names, and set the auto-compaction window to match the Codex context window.
+
 ## Runtime Files
 
 - Config: `~/Library/Application Support/CCCodexProxy/config.json`

@@ -131,7 +131,9 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     println!("  export ANTHROPIC_BASE_URL=\"http://{}\"", handle.addr);
     println!("  export ANTHROPIC_AUTH_TOKEN=\"unused\"");
     println!("  export ANTHROPIC_MODEL=\"gpt-5.4[1m]\"");
+    println!("  export ANTHROPIC_DEFAULT_HAIKU_MODEL=\"gpt-5.4-mini[1m]\"");
     println!("  export ANTHROPIC_SMALL_FAST_MODEL=\"gpt-5.4-mini[1m]\"");
+    println!("  export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=\"1\"");
     tokio::signal::ctrl_c().await?;
     handle.stop().await;
     Ok(())
