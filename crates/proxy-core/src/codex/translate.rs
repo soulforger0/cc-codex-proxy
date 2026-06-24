@@ -21,19 +21,15 @@ pub struct ResponsesRequest {
     pub reasoning: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<String>>,
-    pub parallel_tool_calls: bool,
-    pub text: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_cache_key: Option<String>,
+    pub text: Option<Value>,
     pub stream: bool,
 }
 
 pub fn translate_request(
     request: &AnthropicRequest,
     resolved: &ResolvedModel,
-    session_id: Option<&str>,
+    _session_id: Option<&str>,
 ) -> Result<ResponsesRequest> {
     let mut instruction_parts = Vec::new();
     if let Some(system) = &request.system {
@@ -52,7 +48,7 @@ pub fn translate_request(
     let include = reasoning
         .as_ref()
         .map(|_| vec!["reasoning.encrypted_content".to_string()]);
-    let text = text_config_from_request(request);
+    let text = text_format_from_request(request);
     Ok(ResponsesRequest {
         model: resolved.upstream_model.clone(),
         input,
@@ -62,10 +58,7 @@ pub fn translate_request(
         tool_choice,
         reasoning,
         include,
-        parallel_tool_calls: true,
         text,
-        service_tier: resolved.service_tier.clone(),
-        prompt_cache_key: session_id.map(ToOwned::to_owned),
         stream: true,
     })
 }
@@ -368,26 +361,21 @@ fn map_thinking_budget(budget: u64) -> Option<&'static str> {
     }
 }
 
-fn text_config_from_request(request: &AnthropicRequest) -> Value {
-    let mut text = serde_json::Map::new();
-    text.insert("verbosity".into(), json!("low"));
-    if let Some(format) = request
+fn text_format_from_request(request: &AnthropicRequest) -> Option<Value> {
+    let format = request
         .output_config
         .as_ref()
         .and_then(|value| value.get("format"))
-        .filter(|format| format.get("type").and_then(Value::as_str) == Some("json_schema"))
-    {
-        text.insert(
-            "format".into(),
-            json!({
-                "type": "json_schema",
-                "name": format.get("name").and_then(Value::as_str).unwrap_or("response"),
-                "schema": normalize_strict_json_schema(format.get("schema").cloned().unwrap_or_else(|| json!({}))),
-                "strict": true
-            }),
-        );
-    }
-    Value::Object(text)
+        .filter(|format| format.get("type").and_then(Value::as_str) == Some("json_schema"))?;
+
+    Some(json!({
+        "format": {
+            "type": "json_schema",
+            "name": format.get("name").and_then(Value::as_str).unwrap_or("response"),
+            "schema": normalize_strict_json_schema(format.get("schema").cloned().unwrap_or_else(|| json!({}))),
+            "strict": true
+        }
+    }))
 }
 
 fn normalize_strict_json_schema(schema: Value) -> Value {
@@ -540,7 +528,10 @@ mod tests {
         assert!(serialized.get("temperature").is_none());
         assert!(serialized.get("top_p").is_none());
         assert!(serialized.get("metadata").is_none());
-        assert_eq!(serialized["prompt_cache_key"], "session-id");
+        assert!(serialized.get("prompt_cache_key").is_none());
+        assert!(serialized.get("service_tier").is_none());
+        assert!(serialized.get("parallel_tool_calls").is_none());
+        assert!(serialized.get("text").is_none());
     }
 
     #[test]
@@ -615,9 +606,9 @@ mod tests {
             translated.tool_choice.as_ref().unwrap(),
             &json!({ "type": "function", "name": "Read" })
         );
-        assert_eq!(serialized["parallel_tool_calls"], true);
-        assert_eq!(serialized["prompt_cache_key"], "s");
-        assert_eq!(serialized["text"]["verbosity"], "low");
+        assert!(serialized.get("parallel_tool_calls").is_none());
+        assert!(serialized.get("prompt_cache_key").is_none());
+        assert!(serialized.get("text").is_none());
         assert!(serialized.get("temperature").is_none());
         assert!(serialized.get("top_p").is_none());
         assert!(serialized.get("metadata").is_none());
@@ -785,7 +776,6 @@ mod tests {
                 "input",
                 "instructions",
                 "model",
-                "parallel_tool_calls",
                 "reasoning",
                 "store",
                 "stream",
@@ -831,11 +821,12 @@ mod tests {
         };
 
         let translated = translate_request(&req, &resolved(), None).unwrap();
-        assert_eq!(translated.text["format"]["type"], "json_schema");
-        assert_eq!(translated.text["format"]["name"], "response");
-        assert_eq!(translated.text["format"]["strict"], true);
+        let text = translated.text.as_ref().unwrap();
+        assert_eq!(text["format"]["type"], "json_schema");
+        assert_eq!(text["format"]["name"], "response");
+        assert_eq!(text["format"]["strict"], true);
         assert_eq!(
-            translated.text["format"]["schema"]["required"],
+            text["format"]["schema"]["required"],
             json!(["answer", "confidence"])
         );
     }

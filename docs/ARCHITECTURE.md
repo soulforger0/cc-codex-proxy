@@ -77,10 +77,8 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | `output_config.effort` | `reasoning.effort` | `auto` omits the field; `max`/`ultracode` map to `xhigh`; `none`, `minimal`, `low`, `medium`, `high`, and `xhigh` are forwarded. Unknown values are omitted. |
 | non-auto reasoning effort | `include: ["reasoning.encrypted_content"]` | Matches the Codex backend request shape used for reasoning continuity. |
 | `thinking.budget_tokens` | `reasoning.effort` | Deprecated Claude fixed thinking budgets are mapped as a fallback: `0` -> `none`, up to 4k -> `low`, up to 32k -> `medium`, above 32k -> `high`. |
-| all requests | `parallel_tool_calls: true` | Enables Codex parallel function calls, matching the reference proxy. |
-| all requests | `text.verbosity: "low"` | Keeps Codex responses compact for agent turns. |
 | `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting with `strict: true`; object schemas are normalized so all properties are required. |
-| `x-claude-code-session-id` | `prompt_cache_key` and upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. |
+| `x-claude-code-session-id` | upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. The proxy does not send `prompt_cache_key` in the body on the ChatGPT Codex path. |
 
 ### Context Compaction
 
