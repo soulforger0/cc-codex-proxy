@@ -1,0 +1,10 @@
+/target/
+/.DS_Store
+/.swiftpm/
+/macos/CCCodexProxy/.build/
+/dist/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+DerivedData/
+
