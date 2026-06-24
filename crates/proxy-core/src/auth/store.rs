@@ -1,7 +1,12 @@
-use crate::error::{ProxyError, Result};
+use crate::error::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{
+    fs,
+    io::{ErrorKind, Write},
+    path::PathBuf,
+    sync::Arc,
+};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,65 +32,58 @@ pub trait TokenStore: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct KeychainTokenStore {
-    service: String,
-    account: String,
+pub struct FileTokenStore {
+    path: PathBuf,
 }
 
-impl Default for KeychainTokenStore {
-    fn default() -> Self {
-        Self {
-            service: "CCCodexProxy.codex".to_string(),
-            account: "auth".to_string(),
-        }
-    }
-}
-
-impl KeychainTokenStore {
-    pub fn new(service: impl Into<String>, account: impl Into<String>) -> Self {
-        Self {
-            service: service.into(),
-            account: account.into(),
-        }
+impl FileTokenStore {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
     }
 }
 
 #[async_trait]
-impl TokenStore for KeychainTokenStore {
+impl TokenStore for FileTokenStore {
     async fn load(&self) -> Result<Option<StoredAuth>> {
-        let entry = keyring::Entry::new(&self.service, &self.account)
-            .map_err(|err| ProxyError::Config(format!("cannot open Keychain entry: {err}")))?;
-        match entry.get_password() {
+        match fs::read_to_string(&self.path) {
+            Ok(raw) if raw.trim().is_empty() => Ok(None),
             Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(err) => Err(ProxyError::Config(format!(
-                "cannot read Keychain token: {err}"
-            ))),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
         }
     }
 
     async fn save(&self, auth: &StoredAuth) -> Result<()> {
-        let entry = keyring::Entry::new(&self.service, &self.account)
-            .map_err(|err| ProxyError::Config(format!("cannot open Keychain entry: {err}")))?;
-        entry
-            .set_password(&serde_json::to_string(auth)?)
-            .map_err(|err| ProxyError::Config(format!("cannot write Keychain token: {err}")))?;
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        writeln!(file, "{}", serde_json::to_string_pretty(auth)?)?;
         Ok(())
     }
 
     async fn clear(&self) -> Result<()> {
-        let entry = keyring::Entry::new(&self.service, &self.account)
-            .map_err(|err| ProxyError::Config(format!("cannot open Keychain entry: {err}")))?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(err) => Err(ProxyError::Config(format!(
-                "cannot delete Keychain token: {err}"
-            ))),
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
         }
     }
 
     fn label(&self) -> &'static str {
-        "macOS Keychain"
+        "local auth file"
     }
 }
 
@@ -137,5 +135,31 @@ mod tests {
         };
         assert!(auth.is_expiring(6_000, 5_000));
         assert!(!auth.is_expiring(4_000, 5_000));
+    }
+
+    #[tokio::test]
+    async fn file_store_round_trips_and_clears_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let store = FileTokenStore::new(path.clone());
+        let auth = StoredAuth {
+            access: "access".into(),
+            refresh: "refresh".into(),
+            expires_at_ms: 123,
+            account_id: Some("acct".into()),
+        };
+
+        store.save(&auth).await.unwrap();
+        assert_eq!(store.load().await.unwrap(), Some(auth));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        store.clear().await.unwrap();
+        assert_eq!(store.load().await.unwrap(), None);
     }
 }

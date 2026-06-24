@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use proxy_core::{
-    auth::{
-        browser_login, default_oauth_options, AuthManager, KeychainTokenStore, OAuthRefreshClient,
-    },
+    auth::{browser_login, default_oauth_options, AuthManager, FileTokenStore, OAuthRefreshClient},
     claude::{
         default_settings_path, install_settings, preview_settings, restore_latest_backup,
         ClaudeSettingsOptions,
@@ -124,7 +122,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         config.port = port;
     }
     let _guards = logging::init(&paths, config.log.stderr, config.log.verbose)?;
-    let auth = auth_manager(&config);
+    let auth = auth_manager(&config, &paths);
     let handle = serve(config.clone(), paths.clone(), auth).await?;
     println!("Proxy listening on http://{}", handle.addr);
     println!("Health: http://{}/healthz", handle.addr);
@@ -140,8 +138,8 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
 }
 
 async fn cmd_auth(args: AuthCommand) -> Result<()> {
-    let (config, _) = AppConfig::load_default()?;
-    let manager = auth_manager(&config);
+    let (config, paths) = AppConfig::load_default()?;
+    let manager = auth_manager(&config, &paths);
     match args.command {
         AuthSubcommand::Login => {
             let opts =
@@ -185,7 +183,7 @@ async fn cmd_doctor(args: DoctorArgs) -> Result<()> {
     println!("Model profiles: {}", paths.model_profiles_file.display());
     println!("Model: {} -> {}", args.model, resolved.upstream_model);
     println!("Transport: {:?}", config.codex.transport);
-    let manager = auth_manager(&config);
+    let manager = auth_manager(&config, &paths);
     match manager.get_auth().await {
         Ok(auth) => {
             println!("Auth: ok");
@@ -290,9 +288,9 @@ async fn cmd_bench(args: BenchArgs) -> Result<()> {
     Ok(())
 }
 
-fn auth_manager(config: &AppConfig) -> AuthManager {
+fn auth_manager(config: &AppConfig, paths: &proxy_core::AppPaths) -> AuthManager {
     AuthManager::new(
-        Arc::new(KeychainTokenStore::default()),
+        Arc::new(FileTokenStore::new(paths.auth_file.clone())),
         Arc::new(OAuthRefreshClient::new(
             config.codex.oauth_issuer.clone(),
             config.codex.oauth_client_id.clone(),

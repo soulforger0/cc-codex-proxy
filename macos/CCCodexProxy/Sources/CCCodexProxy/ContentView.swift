@@ -101,7 +101,14 @@ struct ContentView: View {
                 } label: {
                     Label(model.isAuthenticated ? "Reconnect" : "Login", systemImage: "person.crop.circle.badge.checkmark")
                 }
-                .disabled(model.isLoggingIn)
+                .disabled(model.isLoggingIn || model.isCheckingAuthStatus)
+
+                Button {
+                    Task { await model.checkAuthStatus() }
+                } label: {
+                    Label("Check OAuth", systemImage: "key")
+                }
+                .disabled(model.isLoggingIn || model.isCheckingAuthStatus)
             }
             .buttonStyle(.bordered)
         }
@@ -115,9 +122,9 @@ struct ContentView: View {
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(model.isLoggingIn ? "OAuth in progress" : model.authStatusText)
+                Text(authStatusTitle)
                     .font(.subheadline.weight(.semibold))
-                Text(model.isLoggingIn ? "Complete the browser sign-in to finish." : model.authDetailText)
+                Text(authStatusDetail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -125,10 +132,10 @@ struct ContentView: View {
 
             Spacer()
 
-            if model.isLoggingIn {
+            if model.isLoggingIn || model.isCheckingAuthStatus {
                 ProgressView()
                     .controlSize(.small)
-                    .accessibilityLabel("OAuth login in progress")
+                    .accessibilityLabel(model.isLoggingIn ? "OAuth login in progress" : "Checking OAuth status")
             } else {
                 Text(model.isAuthenticated ? "OAuth OK" : "OAuth needed")
                     .font(.caption.weight(.semibold))
@@ -155,6 +162,26 @@ struct ContentView: View {
 
     private var authStatusColor: Color {
         model.isAuthenticated ? .green : .secondary
+    }
+
+    private var authStatusTitle: String {
+        if model.isLoggingIn {
+            return "OAuth in progress"
+        }
+        if model.isCheckingAuthStatus {
+            return "Checking OAuth"
+        }
+        return model.authStatusText
+    }
+
+    private var authStatusDetail: String {
+        if model.isLoggingIn {
+            return "Complete the browser sign-in to finish."
+        }
+        if model.isCheckingAuthStatus {
+            return "Reading the local auth file."
+        }
+        return model.authDetailText
     }
 
     private var claudeSettingsStatus: some View {

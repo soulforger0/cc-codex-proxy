@@ -19,7 +19,7 @@ The proxy does not implement a generic provider abstraction. It keeps small inte
 ## Auth
 
 - Browser login uses OAuth PKCE against `auth.openai.com`.
-- Tokens are stored in macOS Keychain under `CCCodexProxy.codex`.
+- Tokens are stored in `~/Library/Application Support/CCCodexProxy/auth.json` with user-only file permissions.
 - Access-token refresh is single-flight inside `AuthManager`.
 - A 401 response from Codex forces one refresh and one retry.
 
@@ -35,6 +35,7 @@ The proxy does not implement a generic provider abstraction. It keeps small inte
 - App config: `~/Library/Application Support/CCCodexProxy/config.json`
 - Model profiles: `~/Library/Application Support/CCCodexProxy/model-profiles.json`
 - Admin token: `~/Library/Application Support/CCCodexProxy/admin-token`
+- Auth: `~/Library/Application Support/CCCodexProxy/auth.json`
 - Logs: `~/Library/Logs/CCCodexProxy/proxy.log`
 
 Model names are intentionally data-driven. If ChatGPT Codex model identifiers change, update `model-profiles.json` instead of rebuilding.

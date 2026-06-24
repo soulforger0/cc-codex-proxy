@@ -17,7 +17,6 @@ chrono.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
 http.workspace = true
-keyring.workspace = true
 open.workspace = true
 rand.workspace = true
 reqwest.workspace = true
@@ -39,4 +38,3 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-

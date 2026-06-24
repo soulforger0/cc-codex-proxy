@@ -10,7 +10,7 @@ The implementation is intentionally ChatGPT/Codex-only. Kimi, Cursor, and generi
 - Rust/Tokio proxy helper embedded inside `CCCodexProxy.app/Contents/Helpers`.
 - Rust CLI remains available for development, tests, and optional headless installs.
 - Local-only proxy binding on `127.0.0.1`.
-- OAuth tokens stored in macOS Keychain.
+- OAuth tokens stored in a local user-only auth file.
 - Claude Code settings install/restore with timestamped backups.
 - Mockable upstream boundary and load-test harness for 100+ concurrent local agents.
 
@@ -63,7 +63,7 @@ cc-codex-proxy claude restore-settings
 - Model profiles: `~/Library/Application Support/CCCodexProxy/model-profiles.json`
 - Admin token: `~/Library/Application Support/CCCodexProxy/admin-token`
 - Logs: `~/Library/Logs/CCCodexProxy/proxy.log`
-- Auth: macOS Keychain service `CCCodexProxy.codex`
+- Auth: `~/Library/Application Support/CCCodexProxy/auth.json`
 
 ## Warning
 

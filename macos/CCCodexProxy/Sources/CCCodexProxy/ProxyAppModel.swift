@@ -6,12 +6,13 @@ final class ProxyAppModel: ObservableObject {
     @Published var isRunning = false
     @Published var isAuthenticated = false
     @Published var isLoggingIn = false
+    @Published var isCheckingAuthStatus = false
     @Published var isRefreshingClaudeSettings = false
     @Published var isInstallingClaudeSettings = false
     @Published var isRestoringClaudeSettings = false
     @Published var statusText = "Not checked"
-    @Published var authStatusText = "Checking authentication"
-    @Published var authDetailText = "OAuth status has not been checked yet."
+    @Published var authStatusText = "OAuth not checked"
+    @Published var authDetailText = "Login when you are ready to store or verify OAuth tokens."
     @Published var claudeSettingsPreview: ClaudeSettingsPreview?
     @Published var claudeSettingsPreviewError: String?
     @Published var lastMessage = ""
@@ -24,33 +25,33 @@ final class ProxyAppModel: ObservableObject {
 
     func refresh() async {
         await refreshProxyStatus(updateLastMessage: true)
-        await refreshAuthStatus()
         await refreshClaudeSettingsPreview()
     }
 
     private func refreshProxyStatus(updateLastMessage: Bool) async {
+        let healthURL = URL(string: "http://127.0.0.1:\(port)/healthz")!
+
         do {
-            let output = try await runCLI(["admin", "status"], allowFailure: true)
-            if output.contains("\"ok\":true") || output.contains("\"ok\": true") {
-                isRunning = true
-                statusText = "Running on 127.0.0.1:\(port)"
-            } else {
-                isRunning = false
-                statusText = "Stopped"
-            }
+            let (_, response) = try await URLSession.shared.data(from: healthURL)
+            let isHealthy = (response as? HTTPURLResponse)?.statusCode == 200
+            isRunning = isHealthy
+            statusText = isHealthy ? "Running on 127.0.0.1:\(port)" : "Stopped"
             if updateLastMessage {
-                lastMessage = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                lastMessage = isHealthy ? "Proxy is running." : "Proxy is stopped."
             }
         } catch {
             isRunning = false
             statusText = "Stopped"
             if updateLastMessage {
-                lastMessage = error.localizedDescription
+                lastMessage = "Proxy is stopped."
             }
         }
     }
 
-    private func refreshAuthStatus() async {
+    func checkAuthStatus() async {
+        isCheckingAuthStatus = true
+        defer { isCheckingAuthStatus = false }
+
         do {
             let output = try await runCLI(["auth", "status"], allowFailure: true)
             applyAuthStatus(from: output, authenticated: output.contains("Authenticated: yes"))
@@ -94,10 +95,11 @@ final class ProxyAppModel: ObservableObject {
             applyAuthStatus(from: output, authenticated: true)
             lastMessage = successMessage(from: output)
             await refreshProxyStatus(updateLastMessage: false)
-            await refreshAuthStatus()
         } catch {
             lastMessage = "Login failed: \(error.localizedDescription)"
-            await refreshAuthStatus()
+            isAuthenticated = false
+            authStatusText = "OAuth not verified"
+            authDetailText = "Login did not complete. The local auth file was not updated."
         }
     }
 
