@@ -8,7 +8,7 @@ use async_stream::try_stream;
 use bytes::Bytes;
 use futures_util::{SinkExt, Stream, StreamExt};
 use http::StatusCode;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     pin::Pin,
     sync::{Arc, Mutex},
@@ -226,19 +226,20 @@ impl CodexClient {
                     ProxyError::Transport(format!("Codex websocket setup failed: {err}"))
                 })?;
         info!(model = %body.model, input_items = body.input.len(), "Codex websocket connected");
-        let payload = json!({ "type": "responses.create", "request": body }).to_string();
+        let payload = websocket_create_payload(body);
         socket
             .send(Message::Text(payload.into()))
             .await
             .map_err(|err| ProxyError::Transport(format!("Codex websocket send failed: {err}")))?;
 
         let first = read_first_websocket_event(&mut socket).await?;
+        let session_id_for_log = session_id.map(str::to_owned);
+        log_websocket_frame(&first, 0, session_id_for_log.as_deref());
+        reject_websocket_error(&first)?;
         self.transport_state
             .record_method(CodexTransportMethod::WebSocket);
-        let session_id_for_log = session_id.map(str::to_owned);
         let stream = try_stream! {
             let mut frame_index = 0_u64;
-            log_websocket_frame(&first, frame_index, session_id_for_log.as_deref());
             if let Some(bytes) = websocket_message_to_bytes(first) {
                 yield bytes;
             }
@@ -448,6 +449,15 @@ fn build_websocket_request(
         .map_err(|err| ProxyError::Transport(format!("bad websocket request: {err}")))
 }
 
+fn websocket_create_payload(body: &ResponsesRequest) -> String {
+    let mut value = serde_json::to_value(body).unwrap_or_else(|_| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("type".into(), json!("response.create"));
+        object.remove("stream");
+    }
+    value.to_string()
+}
+
 async fn read_first_websocket_event<S>(socket: &mut WebSocketStream<S>) -> Result<Message>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -493,6 +503,53 @@ fn websocket_message_to_bytes(message: Message) -> Option<Bytes> {
             Ok(text) => Some(sse_data_event(&text)),
             Err(_) => Some(Bytes::copy_from_slice(bytes.as_ref())),
         },
+        Message::Close(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => None,
+    }
+}
+
+fn reject_websocket_error(message: &Message) -> Result<()> {
+    let Some(value) = websocket_json_value(message) else {
+        return Ok(());
+    };
+    let has_error_type = value.get("type").and_then(Value::as_str) == Some("error");
+    let has_error_status = value
+        .get("status")
+        .and_then(Value::as_u64)
+        .is_some_and(|status| status >= 400);
+    if !has_error_type && !has_error_status {
+        return Ok(());
+    }
+
+    let status = value
+        .get("status")
+        .and_then(Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
+        .and_then(|status| StatusCode::from_u16(status).ok())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let error_type = value
+        .pointer("/error/type")
+        .or_else(|| value.pointer("/error/code"))
+        .and_then(Value::as_str)
+        .unwrap_or("upstream_error");
+    let message = value
+        .pointer("/error/message")
+        .or_else(|| value.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("Codex websocket returned an error event");
+
+    Err(ProxyError::Upstream {
+        status,
+        body: format!("{error_type}: {message}"),
+        retry_after: None,
+    })
+}
+
+fn websocket_json_value(message: &Message) -> Option<Value> {
+    match message {
+        Message::Text(text) => serde_json::from_str(text).ok(),
+        Message::Binary(bytes) => std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|text| serde_json::from_str(text).ok()),
         Message::Close(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => None,
     }
 }
@@ -665,6 +722,19 @@ mod tests {
     }
 
     #[test]
+    fn websocket_create_payload_uses_top_level_response_create_event() {
+        let payload = websocket_create_payload(&minimal_response_request());
+        let value = serde_json::from_str::<Value>(&payload).unwrap();
+
+        assert_eq!(value["type"], "response.create");
+        assert_eq!(value["model"], "gpt-5.5");
+        assert_eq!(value["store"], false);
+        assert_eq!(value["input"][0]["role"], "user");
+        assert!(value.get("request").is_none());
+        assert!(value.get("stream").is_none());
+    }
+
+    #[test]
     fn websocket_text_frame_with_pretty_json_is_valid_sse_data() {
         let bytes = websocket_message_to_bytes(Message::Text(
             "{\n  \"type\": \"response.completed\"\n}".into(),
@@ -675,5 +745,50 @@ mod tests {
             bytes,
             Bytes::from_static(b"data: {\ndata:   \"type\": \"response.completed\"\ndata: }\n\n")
         );
+    }
+
+    #[test]
+    fn websocket_error_frame_is_rejected_before_stream_commit() {
+        let err = reject_websocket_error(&Message::Text(
+            json!({
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Expected a 'response.create' message as the first websocket event."
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .unwrap_err();
+
+        match err {
+            ProxyError::Upstream { status, body, .. } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(body.contains("invalid_request_error"));
+                assert!(body.contains("response.create"));
+            }
+            other => panic!("expected upstream error, got {other:?}"),
+        }
+    }
+
+    fn minimal_response_request() -> ResponsesRequest {
+        ResponsesRequest {
+            model: "gpt-5.5".into(),
+            input: vec![json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}],
+            })],
+            store: false,
+            instructions: None,
+            tools: None,
+            tool_choice: None,
+            reasoning: None,
+            include: None,
+            text: None,
+            stream: true,
+        }
     }
 }
