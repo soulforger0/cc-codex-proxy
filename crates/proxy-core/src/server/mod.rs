@@ -459,19 +459,33 @@ mod tests {
             Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n");
         let second =
             Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
-        let source = stream::once(async move { Ok(first) }).chain(stream::once(async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            Ok(second)
-        }));
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tx.send(Ok(first.clone())).await.unwrap();
+        let source = tokio_stream::wrappers::ReceiverStream::new(rx);
         let mut stream = with_sse_heartbeats(boxed(source), Duration::from_millis(10));
 
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            body.extend_from_slice(&chunk.expect("chunk should be ok"));
-        }
-        let body = String::from_utf8(body).expect("SSE body should be UTF-8");
+        let first_chunk = stream
+            .next()
+            .await
+            .expect("first frame should be forwarded")
+            .expect("first frame should be ok");
+        assert_eq!(first_chunk, first);
 
-        assert!(body.contains("event: message_start\ndata: {\"type\":\"message_start\"}\n\n: heartbeat\n\nevent: message_stop"));
-        assert!(body.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+        let heartbeat = tokio::time::timeout(Duration::from_millis(50), stream.next())
+            .await
+            .expect("heartbeat should be emitted before the next frame")
+            .expect("stream should stay open")
+            .expect("heartbeat should be ok");
+        assert_eq!(heartbeat, Bytes::from_static(SSE_HEARTBEAT_COMMENT));
+
+        tx.send(Ok(second.clone())).await.unwrap();
+        drop(tx);
+        let second_chunk = stream
+            .next()
+            .await
+            .expect("second frame should be forwarded")
+            .expect("second frame should be ok");
+        assert_eq!(second_chunk, second);
+        assert!(stream.next().await.is_none());
     }
 }

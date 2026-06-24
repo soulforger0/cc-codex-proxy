@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security-sensitive report
+    url: https://github.com/soulforger0/cc-codex-proxy/security/policy
+    about: Please do not post secrets, OAuth tokens, private prompts, or session details in public issues.

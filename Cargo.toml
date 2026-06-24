@@ -8,7 +8,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/lingli/cc-codex-proxy"
+repository = "https://github.com/soulforger0/cc-codex-proxy"
 rust-version = "1.78"
 
 [workspace.dependencies]
