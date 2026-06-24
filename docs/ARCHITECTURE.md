@@ -10,6 +10,7 @@ The proxy does not implement a generic provider abstraction. It keeps small inte
 
 - The shipped `CCCodexProxy.app` embeds the Rust proxy helper at `Contents/Helpers/cc-codex-proxy`.
 - The menu bar process starts/stops that bundled helper; app users do not need a separate CLI install.
+- On launch, the app temporarily replaces the shell-resolved `claude` command with a managed shim. The shim applies proxy environment variables only when the app PID is alive and `/healthz` succeeds; otherwise it either falls back to the original Claude command or reports that the proxy is stopped.
 - `cc-codex-proxy serve` binds only to `127.0.0.1`.
 - `/v1/messages` streams Anthropic SSE back to Claude Code without buffering the full upstream response.
 - Non-streaming requests are accumulated only after the upstream stream completes.
@@ -74,6 +75,7 @@ ChatGPT Codex subscription cost and rate-limit state are not exposed through a s
 - App config: `~/Library/Application Support/CCCodexProxy/config.json`
 - Model profiles: `~/Library/Application Support/CCCodexProxy/model-profiles.json`
 - Admin token: `~/Library/Application Support/CCCodexProxy/admin-token`
+- Claude shim state: `~/Library/Application Support/CCCodexProxy/claude-shim.json`
 - Auth: `~/Library/Application Support/CCCodexProxy/auth.json`
 - Logs: `~/Library/Logs/CCCodexProxy/proxy.log`
 

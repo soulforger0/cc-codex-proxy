@@ -10,7 +10,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         statusItemController = StatusItemController(model: model)
-        Task { await model.refresh() }
+        Task {
+            await model.refresh()
+            await model.installClaudeShim()
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        model.restoreClaudeShimForTermination()
     }
 }
 

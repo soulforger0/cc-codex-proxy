@@ -10,9 +10,11 @@ final class ProxyAppModel: ObservableObject {
     @Published var isRefreshingClaudeSettings = false
     @Published var isInstallingClaudeSettings = false
     @Published var isRestoringClaudeSettings = false
+    @Published var isInstallingClaudeShim = false
     @Published var statusText = "Not checked"
     @Published var authStatusText = "OAuth not checked"
     @Published var authDetailText = "Login when you are ready to store or verify OAuth tokens."
+    @Published var claudeShimStatusText = "Claude command shim not checked"
     @Published var claudeSettingsPreview: ClaudeSettingsPreview?
     @Published var claudeSettingsPreviewError: String?
     @Published var lastMessage = ""
@@ -74,6 +76,7 @@ final class ProxyAppModel: ObservableObject {
             isRunning = true
             statusText = "Running on 127.0.0.1:\(port)"
             lastMessage = "Proxy started."
+            await installClaudeShim(updateLastMessage: false)
         } catch {
             lastMessage = "Failed to start proxy: \(error.localizedDescription)"
         }
@@ -84,7 +87,7 @@ final class ProxyAppModel: ObservableObject {
         proxyProcess = nil
         isRunning = false
         statusText = "Stopped"
-        lastMessage = "Proxy stopped."
+        lastMessage = "Proxy stopped. New claude launches will show an error while this app remains open."
     }
 
     func login() async {
@@ -118,6 +121,40 @@ final class ProxyAppModel: ObservableObject {
             lastMessage = "Settings install failed: \(error.localizedDescription)"
             await refreshClaudeSettingsPreview()
         }
+    }
+
+    func installClaudeShim(updateLastMessage: Bool = true) async {
+        isInstallingClaudeShim = true
+        defer { isInstallingClaudeShim = false }
+
+        do {
+            let output = try await runCLI([
+                "claude",
+                "install-shim",
+                "--app-pid",
+                "\(ProcessInfo.processInfo.processIdentifier)"
+            ] + claudeSettingsArguments)
+            let message = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            claudeShimStatusText = firstLine(from: message) ?? "Claude command shim installed."
+            if updateLastMessage {
+                lastMessage = message
+            }
+        } catch {
+            claudeShimStatusText = "Claude command shim unavailable"
+            if updateLastMessage {
+                lastMessage = "Claude shim install failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func restoreClaudeShimForTermination() {
+        do {
+            _ = try runCLISync(["claude", "restore-shim"], allowFailure: true)
+        } catch {
+            // The app is terminating; leave the crash-safe shim fallback in place.
+        }
+        proxyProcess?.terminate()
+        proxyProcess = nil
     }
 
     func restoreClaudeSettings() async {
@@ -163,21 +200,25 @@ final class ProxyAppModel: ObservableObject {
 
     private func runCLI(_ arguments: [String], allowFailure: Bool = false) async throws -> String {
         try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = try helperURL()
-            process.arguments = arguments
-            process.standardOutput = pipe
-            process.standardError = pipe
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            if process.terminationStatus != 0 && !allowFailure {
-                throw ProxyAppError.commandFailed(output)
-            }
-            return output
+            try self.runCLISync(arguments, allowFailure: allowFailure)
         }.value
+    }
+
+    nonisolated private func runCLISync(_ arguments: [String], allowFailure: Bool = false) throws -> String {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = try helperURL()
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        if process.terminationStatus != 0 && !allowFailure {
+            throw ProxyAppError.commandFailed(output)
+        }
+        return output
     }
 
     private var claudeSettingsArguments: [String] {
@@ -218,6 +259,13 @@ final class ProxyAppModel: ObservableObject {
             return "OAuth login complete. Tokens saved in \(storage)."
         }
         return "OAuth login complete."
+    }
+
+    private func firstLine(from output: String) -> String? {
+        output
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
     }
 
     private func value(for label: String, in output: String) -> String? {

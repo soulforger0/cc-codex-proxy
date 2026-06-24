@@ -422,6 +422,7 @@ async fn test_config(upstream: std::net::SocketAddr, path: &str) -> (AppConfig, 
         config_file: dir.join("config/config.json"),
         model_profiles_file: dir.join("config/model-profiles.json"),
         admin_token_file: dir.join("config/admin-token"),
+        claude_shim_file: dir.join("config/claude-shim.json"),
         auth_file: dir.join("config/auth.json"),
     };
     let mut config = AppConfig::default();

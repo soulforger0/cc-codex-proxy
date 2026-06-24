@@ -11,7 +11,7 @@ The implementation is intentionally ChatGPT/Codex-only. Kimi, Cursor, and generi
 - Rust CLI remains available for development, tests, and optional headless installs.
 - Local-only proxy binding on `127.0.0.1`.
 - OAuth tokens stored in a local user-only auth file.
-- Claude Code settings install/restore with timestamped backups.
+- App-managed Claude Code command shim, plus advanced settings install/restore with timestamped backups.
 - Mockable upstream boundary and load-test harness for 100+ concurrent local agents.
 
 ## Build The App
@@ -44,7 +44,9 @@ cargo test -p proxy-core --test server_mock -- streaming_stress_250_agents --ign
 
 ## Claude Code Configuration
 
-Install managed Claude Code settings from the app, or use the development CLI after authenticating:
+Launching the macOS app installs a temporary managed `claude` command shim. New `claude` sessions route through the proxy only while the app is running and the proxy health check passes. If the app quits cleanly, the original `claude` command is restored. If the app crashes, the shim falls back to the original Claude command without proxy environment variables.
+
+The permanent `~/.claude/settings.json` workflow remains available as an advanced option in the app, or through the development CLI after authenticating:
 
 ```sh
 cc-codex-proxy auth login
@@ -64,6 +66,7 @@ The managed settings point Claude Code at the local Anthropic-compatible proxy, 
 - Config: `~/Library/Application Support/CCCodexProxy/config.json`
 - Model profiles: `~/Library/Application Support/CCCodexProxy/model-profiles.json`
 - Admin token: `~/Library/Application Support/CCCodexProxy/admin-token`
+- Claude shim state: `~/Library/Application Support/CCCodexProxy/claude-shim.json`
 - Logs: `~/Library/Logs/CCCodexProxy/proxy.log`
 - Auth: `~/Library/Application Support/CCCodexProxy/auth.json`
 

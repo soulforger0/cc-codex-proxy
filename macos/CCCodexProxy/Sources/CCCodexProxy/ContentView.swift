@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var model: ProxyAppModel
     @State private var settingsPreviewTab = ClaudeSettingsPreviewTab.changes
+    @State private var showAdvancedClaudeSettings = false
 
     var body: some View {
         ScrollView {
@@ -73,7 +74,14 @@ struct ContentView: View {
     private var settings: some View {
         VStack(alignment: .leading, spacing: 10) {
             authStatus
-            claudeSettingsStatus
+            claudeShimStatus
+            DisclosureGroup(isExpanded: $showAdvancedClaudeSettings) {
+                claudeSettingsStatus
+                    .padding(.top, 6)
+            } label: {
+                Label("Advanced settings.json", systemImage: "doc.badge.gearshape")
+                    .font(.subheadline.weight(.semibold))
+            }
         }
     }
 
@@ -153,6 +161,48 @@ struct ContentView: View {
             return "Reading the local auth file."
         }
         return model.authDetailText
+    }
+
+    private var claudeShimStatus: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "terminal")
+                .font(.title3)
+                .foregroundStyle(.blue)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Claude command")
+                    .font(.subheadline.weight(.semibold))
+                Text(model.claudeShimStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            if model.isInstallingClaudeShim {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Installing Claude command shim")
+            } else {
+                Button {
+                    Task { await model.installClaudeShim() }
+                } label: {
+                    Label("Repair", systemImage: "wrench.adjustable")
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.blue.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.blue.opacity(0.22))
+        )
     }
 
     private var claudeSettingsStatus: some View {
@@ -237,7 +287,10 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
                     .onSubmit {
-                        Task { await model.refreshClaudeSettingsPreview() }
+                        Task {
+                            await model.refreshClaudeSettingsPreview()
+                            await model.installClaudeShim()
+                        }
                     }
             }
             settingsInputRow(title: "Small Model") {
@@ -245,7 +298,10 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
                     .onSubmit {
-                        Task { await model.refreshClaudeSettingsPreview() }
+                        Task {
+                            await model.refreshClaudeSettingsPreview()
+                            await model.installClaudeShim()
+                        }
                     }
             }
             settingsInputRow(title: "Port") {
@@ -253,7 +309,10 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 90)
                     .onSubmit {
-                        Task { await model.refreshClaudeSettingsPreview() }
+                        Task {
+                            await model.refreshClaudeSettingsPreview()
+                            await model.installClaudeShim()
+                        }
                     }
             }
         }

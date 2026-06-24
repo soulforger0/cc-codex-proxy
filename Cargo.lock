@@ -246,6 +246,7 @@ dependencies = [
  "proxy-core",
  "reqwest",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

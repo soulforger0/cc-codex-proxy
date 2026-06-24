@@ -3,15 +3,19 @@ use clap::{Args, Parser, Subcommand};
 use proxy_core::{
     auth::{browser_login, default_oauth_options, AuthManager, FileTokenStore, OAuthRefreshClient},
     claude::{
-        default_settings_path, install_settings, preview_settings, restore_latest_backup,
-        ClaudeSettingsOptions,
+        default_settings_path, install_settings, install_shim, managed_env_strings,
+        preview_settings, restore_latest_backup, restore_shim, ClaudeSettingsOptions,
+        ClaudeShimInstallOptions, MANAGED_ENV_KEYS,
     },
     config::{AppConfig, DEFAULT_PORT},
     logging,
     model::ModelRegistry,
     serve,
 };
-use std::sync::Arc;
+use std::{path::PathBuf, process::Command as StdCommand, sync::Arc, time::Duration};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 #[derive(Debug, Parser)]
 #[command(name = "cc-codex-proxy")]
@@ -61,6 +65,9 @@ enum ClaudeSubcommand {
     InstallSettings(InstallSettingsArgs),
     PreviewSettings(InstallSettingsArgs),
     RestoreSettings,
+    InstallShim(InstallShimArgs),
+    RestoreShim,
+    Launch(LaunchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -79,6 +86,28 @@ struct InstallSettingsArgs {
     port: u16,
     #[arg(long, default_value_t = 272_000)]
     auto_compact_window: u32,
+}
+
+#[derive(Debug, Args)]
+struct InstallShimArgs {
+    #[command(flatten)]
+    settings: InstallSettingsArgs,
+    #[arg(long)]
+    app_pid: u32,
+    #[arg(long)]
+    claude_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct LaunchArgs {
+    #[arg(long)]
+    app_pid: u32,
+    #[arg(long)]
+    real_claude: PathBuf,
+    #[command(flatten)]
+    settings: InstallSettingsArgs,
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -225,6 +254,52 @@ async fn cmd_claude(args: ClaudeCommand) -> Result<()> {
                 std::process::exit(1);
             }
         },
+        ClaudeSubcommand::InstallShim(args) => {
+            let (_, paths) = AppConfig::load_default()?;
+            let helper_path = std::env::current_exe().context("failed to locate proxy helper")?;
+            let result = install_shim(
+                &paths.claude_shim_file,
+                &ClaudeShimInstallOptions {
+                    app_pid: args.app_pid,
+                    helper_path,
+                    claude_path: args.claude_path,
+                    settings: claude_settings_options(args.settings),
+                },
+            )?;
+            println!("Claude shims installed: {}", result.states.len());
+            for state in &result.states {
+                println!(
+                    "Shim: {} -> {}",
+                    state.shim_path.display(),
+                    state.real_claude_path.display()
+                );
+            }
+            println!("State: {}", paths.claude_shim_file.display());
+        }
+        ClaudeSubcommand::RestoreShim => {
+            let (_, paths) = AppConfig::load_default()?;
+            match restore_shim(&paths.claude_shim_file) {
+                Ok(result) => {
+                    println!("Claude shims restored: {}", result.restored.len());
+                    for path in &result.restored {
+                        println!("Restored: {}", path.display());
+                    }
+                    for skipped in &result.skipped {
+                        println!(
+                            "Skipped: {} ({})",
+                            skipped.shim_path.display(),
+                            skipped.reason
+                        );
+                    }
+                }
+                Err(err) => {
+                    println!("Claude shim restore skipped: {err}");
+                }
+            }
+        }
+        ClaudeSubcommand::Launch(args) => {
+            launch_claude(args).await?;
+        }
     }
     Ok(())
 }
@@ -236,6 +311,88 @@ fn claude_settings_options(args: InstallSettingsArgs) -> ClaudeSettingsOptions {
         small_fast_model: args.small_model,
         auto_compact_window: args.auto_compact_window,
     }
+}
+
+async fn launch_claude(args: LaunchArgs) -> Result<()> {
+    let settings = claude_settings_options(args.settings);
+    let app_is_alive = pid_is_alive(args.app_pid);
+    let mut command = StdCommand::new(&args.real_claude);
+    command.args(&args.args);
+    for key in MANAGED_ENV_KEYS {
+        command.env_remove(key);
+    }
+
+    if app_is_alive {
+        if proxy_health_ok(settings.port).await {
+            for (key, value) in managed_env_strings(&settings) {
+                command.env(key, value);
+            }
+        } else {
+            let message = format!(
+                "CC Codex Proxy is open, but the proxy server is stopped on 127.0.0.1:{}. Start the proxy before launching Claude Code.",
+                settings.port
+            );
+            eprintln!("{message}");
+            notify_proxy_stopped(&message);
+            std::process::exit(2);
+        }
+    }
+
+    exec_command(command)
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    StdCommand::new("/bin/kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+async fn proxy_health_ok(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/healthz");
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_millis(700))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    match client.get(url).send().await {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+fn notify_proxy_stopped(message: &str) {
+    let script = format!(
+        "display notification {} with title {}",
+        applescript_string(message),
+        applescript_string("CC Codex Proxy")
+    );
+    let _ = StdCommand::new("osascript").arg("-e").arg(script).spawn();
+}
+
+fn applescript_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(unix)]
+fn exec_command(mut command: StdCommand) -> Result<()> {
+    let err = command.exec();
+    Err(err).context("failed to launch Claude Code")
+}
+
+#[cfg(not(unix))]
+fn exec_command(mut command: StdCommand) -> Result<()> {
+    let status = command.status().context("failed to launch Claude Code")?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 async fn cmd_admin(args: AdminCommand) -> Result<()> {

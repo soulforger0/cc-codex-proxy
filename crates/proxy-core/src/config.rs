@@ -23,6 +23,7 @@ pub struct AppPaths {
     pub config_file: PathBuf,
     pub model_profiles_file: PathBuf,
     pub admin_token_file: PathBuf,
+    pub claude_shim_file: PathBuf,
     pub auth_file: PathBuf,
 }
 
@@ -42,6 +43,7 @@ impl AppPaths {
             config_file: app_support.join("config.json"),
             model_profiles_file: app_support.join("model-profiles.json"),
             admin_token_file: app_support.join("admin-token"),
+            claude_shim_file: app_support.join("claude-shim.json"),
             auth_file: app_support.join("auth.json"),
             config_dir: app_support,
             logs_dir,
