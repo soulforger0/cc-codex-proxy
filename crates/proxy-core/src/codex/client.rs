@@ -240,19 +240,38 @@ impl CodexClient {
             .record_method(CodexTransportMethod::WebSocket);
         let stream = try_stream! {
             let mut frame_index = 0_u64;
+            let first_is_terminal = websocket_message_is_terminal(&first);
             if let Some(bytes) = websocket_message_to_bytes(first) {
                 yield bytes;
+            }
+            if first_is_terminal {
+                info!(
+                    session_id = session_id_for_log.as_deref().unwrap_or("none"),
+                    frame_count = 1_u64,
+                    "Codex websocket response completed"
+                );
+                return;
             }
             let mut frame_count = 1_u64;
             loop {
                 match tokio::time::timeout(WEBSOCKET_READ_IDLE_WARN_INTERVAL, socket.next()).await {
                     Ok(Some(Ok(message))) => {
-                            frame_index += 1;
-                            frame_count += 1;
-                            log_websocket_frame(&message, frame_index, session_id_for_log.as_deref());
-                            if let Some(bytes) = websocket_message_to_bytes(message) {
-                                yield bytes;
-                            }
+                        frame_index += 1;
+                        frame_count += 1;
+                        log_websocket_frame(&message, frame_index, session_id_for_log.as_deref());
+                        reject_websocket_error(&message)?;
+                        let is_terminal = websocket_message_is_terminal(&message);
+                        if let Some(bytes) = websocket_message_to_bytes(message) {
+                            yield bytes;
+                        }
+                        if is_terminal {
+                            info!(
+                                session_id = session_id_for_log.as_deref().unwrap_or("none"),
+                                frame_count,
+                                "Codex websocket response completed"
+                            );
+                            break;
+                        }
                     }
                     Ok(Some(Err(err))) => Err(ProxyError::Transport(format!(
                             "Codex websocket read failed: {err}"
@@ -554,6 +573,25 @@ fn websocket_json_value(message: &Message) -> Option<Value> {
     }
 }
 
+fn websocket_message_is_terminal(message: &Message) -> bool {
+    websocket_json_value(message)
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .is_some_and(|typ| {
+            matches!(
+                typ.as_str(),
+                "response.completed"
+                    | "response.failed"
+                    | "response.incomplete"
+                    | "response.cancelled"
+            )
+        })
+}
+
 fn log_websocket_frame(message: &Message, frame_index: u64, session_id: Option<&str>) {
     let level_is_info = frame_index == 0 || matches!(message, Message::Close(_));
     match message {
@@ -771,6 +809,26 @@ mod tests {
             }
             other => panic!("expected upstream error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn websocket_terminal_detection_only_stops_on_response_terminal_events() {
+        assert!(websocket_message_is_terminal(&Message::Text(
+            json!({"type": "response.completed"}).to_string().into()
+        )));
+        assert!(websocket_message_is_terminal(&Message::Text(
+            json!({"type": "response.failed"}).to_string().into()
+        )));
+        assert!(!websocket_message_is_terminal(&Message::Text(
+            json!({"type": "response.output_text.done"})
+                .to_string()
+                .into()
+        )));
+        assert!(!websocket_message_is_terminal(&Message::Text(
+            json!({"type": "response.content_part.done"})
+                .to_string()
+                .into()
+        )));
     }
 
     fn minimal_response_request() -> ResponsesRequest {
