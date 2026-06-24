@@ -106,9 +106,9 @@ struct ContentView: View {
                 .lineLimit(3)
             HStack {
                 Button {
-                    model.openHomebrewInstructions()
+                    model.openProjectPage()
                 } label: {
-                    Label("Homebrew", systemImage: "shippingbox")
+                    Label("Project", systemImage: "folder")
                 }
                 Spacer()
                 Button("Quit") {
@@ -119,4 +119,3 @@ struct ContentView: View {
         }
     }
 }
-

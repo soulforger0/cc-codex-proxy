@@ -4,7 +4,7 @@ cask "cc-codex-proxy-app" do
 
   url "https://github.com/soulforger0/cc-codex-proxy/releases/download/v#{version}/CCCodexProxy.zip"
   name "CC Codex Proxy"
-  desc "macOS menu bar controller for cc-codex-proxy"
+  desc "Self-contained macOS menu bar app for Claude Code to ChatGPT Codex proxying"
   homepage "https://github.com/soulforger0/cc-codex-proxy"
 
   app "CCCodexProxy.app"
@@ -14,4 +14,3 @@ cask "cc-codex-proxy-app" do
     "~/Library/Logs/CCCodexProxy",
   ]
 end
-

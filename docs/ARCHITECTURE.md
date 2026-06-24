@@ -8,6 +8,8 @@ The proxy does not implement a generic provider abstraction. It keeps small inte
 
 ## Runtime
 
+- The shipped `CCCodexProxy.app` embeds the Rust proxy helper at `Contents/Helpers/cc-codex-proxy`.
+- The menu bar process starts/stops that bundled helper; app users do not need a separate CLI install.
 - `cc-codex-proxy serve` binds only to `127.0.0.1`.
 - `/v1/messages` streams Anthropic SSE back to Claude Code without buffering the full upstream response.
 - Non-streaming requests are accumulated only after the upstream stream completes.
@@ -42,4 +44,3 @@ Model names are intentionally data-driven. If ChatGPT Codex model identifiers ch
 - 100 concurrent local Claude Code-like sessions complete against a mock upstream.
 - 250-session stress runs record latency, cancellation, memory, and file descriptor behavior.
 - Live upstream limits are treated as external constraints and surfaced to clients.
-

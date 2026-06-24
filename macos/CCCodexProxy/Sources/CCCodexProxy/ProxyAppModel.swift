@@ -32,9 +32,9 @@ final class ProxyAppModel: ObservableObject {
     func startProxy() async {
         guard proxyProcess == nil else { return }
         let process = Process()
-        process.executableURL = cliURL()
         process.arguments = ["serve", "--port", "\(port)"]
         do {
+            process.executableURL = try helperURL()
             try process.run()
             proxyProcess = process
             isRunning = true
@@ -85,7 +85,7 @@ final class ProxyAppModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    func openHomebrewInstructions() {
+    func openProjectPage() {
         NSWorkspace.shared.open(URL(string: "https://github.com/soulforger0/cc-codex-proxy")!)
     }
 
@@ -93,7 +93,7 @@ final class ProxyAppModel: ObservableObject {
         try await Task.detached(priority: .userInitiated) {
             let process = Process()
             let pipe = Pipe()
-            process.executableURL = cliURL()
+            process.executableURL = try helperURL()
             process.arguments = arguments
             process.standardOutput = pipe
             process.standardError = pipe
@@ -109,21 +109,51 @@ final class ProxyAppModel: ObservableObject {
     }
 }
 
-private func cliURL() -> URL {
-    if let bundled = Bundle.main.url(forResource: "cc-codex-proxy", withExtension: nil) {
-        return bundled
+private func helperURL() throws -> URL {
+    let bundledHelper = Bundle.main.bundleURL
+        .appendingPathComponent("Contents")
+        .appendingPathComponent("Helpers")
+        .appendingPathComponent("cc-codex-proxy")
+    if FileManager.default.isExecutableFile(atPath: bundledHelper.path) {
+        return bundledHelper
     }
-    return URL(fileURLWithPath: "/opt/homebrew/bin/cc-codex-proxy")
+
+    if let resourceHelper = Bundle.main.url(forResource: "cc-codex-proxy", withExtension: nil),
+       FileManager.default.isExecutableFile(atPath: resourceHelper.path) {
+        return resourceHelper
+    }
+
+    if Bundle.main.bundleURL.pathExtension == "app" {
+        throw ProxyAppError.missingBundledHelper(bundledHelper.path)
+    }
+
+    for relativePath in [
+        "target/release/cc-codex-proxy",
+        "target/debug/cc-codex-proxy"
+    ] {
+        let devHelper = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(relativePath)
+        if FileManager.default.isExecutableFile(atPath: devHelper.path) {
+            return devHelper
+        }
+    }
+
+    throw ProxyAppError.missingDevelopmentHelper
 }
 
 enum ProxyAppError: LocalizedError {
     case commandFailed(String)
+    case missingBundledHelper(String)
+    case missingDevelopmentHelper
 
     var errorDescription: String? {
         switch self {
         case .commandFailed(let output):
             return output.isEmpty ? "Command failed" : output
+        case .missingBundledHelper(let path):
+            return "Bundled proxy helper is missing or not executable at \(path). Rebuild the app with scripts/build-app.sh."
+        case .missingDevelopmentHelper:
+            return "Proxy helper is missing. Run cargo build -p cc-codex-proxy before launching the SwiftPM app directly."
         }
     }
 }
-
