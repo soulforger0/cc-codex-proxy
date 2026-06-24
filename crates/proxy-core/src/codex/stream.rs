@@ -329,9 +329,19 @@ impl CodexReducer {
                     "type": "tool_use",
                     "id": tool.call_id,
                     "name": tool.name,
-                    "input": tool.arguments
+                    "input": {}
                 }),
             ));
+            let arguments_json = tool.arguments.to_string();
+            if arguments_json != "{}" {
+                out.push(response::content_block_delta(
+                    index,
+                    json!({
+                        "type": "input_json_delta",
+                        "partial_json": arguments_json
+                    }),
+                ));
+            }
             out.push(response::content_block_stop(index));
             self.tool_blocks.push(block);
         }
@@ -528,7 +538,12 @@ fn tool_call_from_item(item: &Value, request_id: Option<&str>) -> Option<ToolCal
         .and_then(Value::as_str)
         .unwrap_or("tool")
         .to_string();
-    let arguments = parse_tool_arguments(item.get("arguments"), &call_id, &name, request_id);
+    let arguments = sanitize_tool_arguments(
+        &name,
+        parse_tool_arguments(item.get("arguments"), &call_id, &name, request_id),
+        &call_id,
+        request_id,
+    );
     Some(ToolCall {
         call_id,
         name,
@@ -588,6 +603,28 @@ fn parse_tool_arguments(
         );
         json!({})
     }
+}
+
+fn sanitize_tool_arguments(
+    name: &str,
+    mut arguments: Value,
+    call_id: &str,
+    request_id: Option<&str>,
+) -> Value {
+    if name == "Read" {
+        if let Some(object) = arguments.as_object_mut() {
+            if object.get("pages").and_then(Value::as_str) == Some("") {
+                object.remove("pages");
+                info!(
+                    request_id = request_id.unwrap_or("untracked"),
+                    call_id = %call_id,
+                    tool_name = %name,
+                    "removed empty Read.pages argument before emitting Claude tool_use"
+                );
+            }
+        }
+    }
+    arguments
 }
 
 fn value_kind(value: &Value) -> &'static str {
@@ -700,22 +737,28 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::stream;
+    use futures_util::{stream, StreamExt};
 
-    fn read_tool_catalog(required: &[&str]) -> ToolCatalog {
+    fn tool_catalog(name: &str, required: &[&str], properties: &[&str]) -> ToolCatalog {
+        let properties = properties
+            .iter()
+            .map(|property| (property.to_string(), json!({ "type": "string" })))
+            .collect::<serde_json::Map<_, _>>();
         let tool = AnthropicTool {
-            name: "Read".into(),
-            description: Some("Read a file".into()),
+            name: name.into(),
+            description: Some(format!("{name} tool")),
             input_schema: Some(json!({
                 "type": "object",
-                "properties": {
-                    "path": { "type": "string" }
-                },
+                "properties": properties,
                 "required": required
             })),
             extra: Default::default(),
         };
         ToolCatalog::from_anthropic_tools(Some(&[tool]))
+    }
+
+    fn read_tool_catalog(required: &[&str]) -> ToolCatalog {
+        tool_catalog("Read", required, &["path", "pages"])
     }
 
     #[tokio::test]
@@ -789,6 +832,74 @@ mod tests {
         assert_eq!(
             response.content[0].input.as_ref().unwrap()["path"],
             "Cargo.toml"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_function_call_uses_input_json_delta() {
+        let chunks = vec![Ok(Bytes::from(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+        ))];
+        let stream = translate_stream(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            read_tool_catalog(&["path"]),
+            None,
+        );
+        let body = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|chunk| String::from_utf8(chunk.unwrap().to_vec()).unwrap())
+            .collect::<String>();
+
+        assert!(body.contains("\"input\":{}"));
+        assert!(body.contains("\"type\":\"input_json_delta\""));
+        assert!(body.contains("\\\"path\\\":\\\"Cargo.toml\\\""));
+    }
+
+    #[tokio::test]
+    async fn read_pages_empty_string_is_removed() {
+        let chunks = vec![Ok(Bytes::from(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\",\\\"pages\\\":\\\"\\\"}\"}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+        ))];
+        let response = accumulate_response(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            read_tool_catalog(&["path"]),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let input = response.content[0].input.as_ref().unwrap();
+        assert_eq!(input["path"], "Cargo.toml");
+        assert!(input.get("pages").is_none());
+    }
+
+    #[tokio::test]
+    async fn offered_task_create_is_forwarded() {
+        let chunks = vec![Ok(Bytes::from(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"TaskCreate\",\"arguments\":\"{\\\"subject\\\":\\\"Fix proxy\\\",\\\"description\\\":\\\"Investigate logs\\\",\\\"activeForm\\\":\\\"Fixing proxy\\\"}\"}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+        ))];
+        let response = accumulate_response(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            tool_catalog(
+                "TaskCreate",
+                &["subject"],
+                &["subject", "description", "activeForm"],
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.content[0].kind, "tool_use");
+        assert_eq!(response.content[0].name.as_deref(), Some("TaskCreate"));
+        assert_eq!(
+            response.content[0].input.as_ref().unwrap()["subject"],
+            "Fix proxy"
         );
     }
 

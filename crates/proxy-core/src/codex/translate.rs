@@ -6,7 +6,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-const TOOL_ROUTING_INSTRUCTION: &str = "When calling tools, only call functions that are explicitly listed in this request's tools array. Do not call internal Codex task or planning tools such as TaskCreate, TaskUpdate, or TaskDelete. If no listed tool fits, answer in text instead.";
+const TOOL_ROUTING_INSTRUCTION: &str = "When calling tools, only call functions explicitly listed in this request's tools array. Match each tool's input schema exactly, and omit optional fields when their value would be an empty string.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponsesRequest {
