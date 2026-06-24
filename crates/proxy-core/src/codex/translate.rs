@@ -20,15 +20,9 @@ pub struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
+    pub include: Option<Vec<String>>,
+    pub parallel_tool_calls: bool,
+    pub text: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,27 +40,19 @@ pub fn translate_request(
         push_instruction_part(&mut instruction_parts, system);
     }
 
-    let mut input = Vec::with_capacity(request.messages.len());
-    for message in &request.messages {
-        if message.role == "system" {
-            push_instruction_part(&mut instruction_parts, &message.content);
-            continue;
-        }
-        input.push(json!({
-            "type": "message",
-            "role": map_role(&message.role)?,
-            "content": content_to_codex_parts(&message.role, &message.content),
-        }));
-    }
+    let input = build_input(&request.messages)?;
     let instructions = (!instruction_parts.is_empty()).then(|| instruction_parts.join("\n\n"));
     let tools = request
         .tools
         .as_ref()
         .map(|tools| translate_tools(tools))
         .transpose()?;
-    let tool_choice = request.tool_choice.as_ref().and_then(translate_tool_choice);
+    let tool_choice = Some(translate_tool_choice(request.tool_choice.as_ref()));
     let reasoning = reasoning_from_request(request);
-    let text = text_format_from_request(request);
+    let include = reasoning
+        .as_ref()
+        .map(|_| vec!["reasoning.encrypted_content".to_string()]);
+    let text = text_config_from_request(request);
     Ok(ResponsesRequest {
         model: resolved.upstream_model.clone(),
         input,
@@ -75,25 +61,13 @@ pub fn translate_request(
         tools,
         tool_choice,
         reasoning,
+        include,
+        parallel_tool_calls: true,
         text,
-        max_tokens: request.max_tokens,
-        temperature: request.temperature,
-        top_p: request.top_p,
-        metadata: request.metadata.clone(),
         service_tier: resolved.service_tier.clone(),
         prompt_cache_key: session_id.map(ToOwned::to_owned),
         stream: true,
     })
-}
-
-fn map_role(role: &str) -> Result<&'static str> {
-    match role {
-        "user" => Ok("user"),
-        "assistant" => Ok("assistant"),
-        other => Err(ProxyError::InvalidRequest(format!(
-            "unsupported message role \"{other}\""
-        ))),
-    }
 }
 
 fn push_instruction_part(parts: &mut Vec<String>, system: &Value) {
@@ -121,50 +95,109 @@ fn system_to_instructions(system: &Value) -> String {
     }
 }
 
-fn content_to_codex_parts(role: &str, content: &Value) -> Vec<Value> {
+fn build_input(messages: &[crate::anthropic::schema::AnthropicMessage]) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for message in messages {
+        match message.role.as_str() {
+            "user" => push_user_input_items(&mut out, &message.content),
+            "assistant" => push_assistant_input_items(&mut out, &message.content),
+            "system" => push_developer_input_items(&mut out, &message.content),
+            other => {
+                return Err(ProxyError::InvalidRequest(format!(
+                    "unsupported message role \"{other}\""
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn push_user_input_items(out: &mut Vec<Value>, content: &Value) {
+    let mut parts = Vec::new();
+    for block in normalized_blocks(content) {
+        let kind = block.get("type").and_then(Value::as_str).unwrap_or("text");
+        match kind {
+            "text" => parts.push(json!({
+                "type": "input_text",
+                "text": block.get("text").and_then(Value::as_str).unwrap_or_default()
+            })),
+            "image" => {
+                if let Some(image) = block_to_image_part(&block) {
+                    parts.push(image);
+                }
+            }
+            "tool_result" => {
+                flush_message(out, "user", &mut parts);
+                out.push(json!({
+                    "type": "function_call_output",
+                    "call_id": block.get("tool_use_id").and_then(Value::as_str).unwrap_or("tool_call"),
+                    "output": tool_result_output(&block),
+                }));
+            }
+            _ => parts.push(json!({ "type": "input_text", "text": block.to_string() })),
+        }
+    }
+    flush_message(out, "user", &mut parts);
+}
+
+fn push_assistant_input_items(out: &mut Vec<Value>, content: &Value) {
+    let mut parts = Vec::new();
+    for block in normalized_blocks(content) {
+        let kind = block.get("type").and_then(Value::as_str).unwrap_or("text");
+        match kind {
+            "text" => parts.push(json!({
+                "type": "output_text",
+                "text": block.get("text").and_then(Value::as_str).unwrap_or_default()
+            })),
+            "tool_use" => {
+                flush_message(out, "assistant", &mut parts);
+                out.push(json!({
+                    "type": "function_call",
+                    "call_id": block.get("id").and_then(Value::as_str).unwrap_or("tool_call"),
+                    "name": block.get("name").and_then(Value::as_str).unwrap_or("tool"),
+                    "arguments": block.get("input").cloned().unwrap_or(Value::Null).to_string(),
+                }));
+            }
+            _ => parts.push(json!({ "type": "output_text", "text": block.to_string() })),
+        }
+    }
+    flush_message(out, "assistant", &mut parts);
+}
+
+fn push_developer_input_items(out: &mut Vec<Value>, content: &Value) {
+    let parts = normalized_blocks(content)
+        .into_iter()
+        .filter_map(|block| {
+            (block.get("type").and_then(Value::as_str).unwrap_or("text") == "text").then(|| {
+                json!({
+                    "type": "input_text",
+                    "text": block.get("text").and_then(Value::as_str).unwrap_or_default()
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    if !parts.is_empty() {
+        out.push(json!({ "type": "message", "role": "developer", "content": parts }));
+    }
+}
+
+fn normalized_blocks(content: &Value) -> Vec<Value> {
     match content {
-        Value::String(text) => vec![text_part(role, text)],
-        Value::Array(items) => items
-            .iter()
-            .flat_map(|item| block_to_codex_parts(role, item))
-            .collect(),
-        other => vec![text_part(role, &other.to_string())],
+        Value::String(text) => vec![json!({ "type": "text", "text": text })],
+        Value::Array(items) => items.clone(),
+        other => vec![json!({ "type": "text", "text": other.to_string() })],
     }
 }
 
-fn block_to_codex_parts(role: &str, block: &Value) -> Vec<Value> {
-    let kind = block.get("type").and_then(Value::as_str).unwrap_or("text");
-    match kind {
-        "text" => vec![text_part(
-            role,
-            block
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )],
-        "image" => block_to_image_part(block).into_iter().collect(),
-        "tool_use" => vec![json!({
-            "type": "function_call",
-            "call_id": block.get("id").and_then(Value::as_str).unwrap_or("tool_call"),
-            "name": block.get("name").and_then(Value::as_str).unwrap_or("tool"),
-            "arguments": block.get("input").cloned().unwrap_or(Value::Null).to_string(),
-        })],
-        "tool_result" => vec![json!({
-            "type": "function_call_output",
-            "call_id": block.get("tool_use_id").and_then(Value::as_str).unwrap_or("tool_call"),
-            "output": tool_result_output(block),
-        })],
-        _ => vec![text_part(role, &block.to_string())],
+fn flush_message(out: &mut Vec<Value>, role: &str, parts: &mut Vec<Value>) {
+    if parts.is_empty() {
+        return;
     }
-}
-
-fn text_part(role: &str, text: &str) -> Value {
-    let part_type = if role == "assistant" {
-        "output_text"
-    } else {
-        "input_text"
-    };
-    json!({ "type": part_type, "text": text })
+    out.push(json!({
+        "type": "message",
+        "role": role,
+        "content": std::mem::take(parts),
+    }));
 }
 
 fn block_to_image_part(block: &Value) -> Option<Value> {
@@ -243,24 +276,22 @@ fn is_anthropic_web_search_tool(tool: &AnthropicTool) -> bool {
 fn translate_web_search_tool(tool: &AnthropicTool) -> Value {
     let mut out = serde_json::Map::new();
     out.insert("type".into(), json!("web_search"));
-
-    if let Some(context_size) = tool
-        .extra
-        .get("search_context_size")
-        .and_then(Value::as_str)
-        .filter(|value| matches!(*value, "low" | "medium" | "high"))
-    {
-        out.insert("search_context_size".into(), json!(context_size));
-    }
-    if let Some(location) = tool.extra.get("user_location") {
-        out.insert("user_location".into(), location.clone());
-    }
+    out.insert("external_web_access".into(), json!(false));
+    out.insert("search_content_types".into(), json!(["text", "image"]));
 
     let mut filters = serde_json::Map::new();
-    if let Some(allowed) = tool.extra.get("allowed_domains") {
+    if let Some(allowed) = tool
+        .extra
+        .get("allowed_domains")
+        .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
+    {
         filters.insert("allowed_domains".into(), allowed.clone());
     }
-    if let Some(blocked) = tool.extra.get("blocked_domains") {
+    if let Some(blocked) = tool
+        .extra
+        .get("blocked_domains")
+        .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
+    {
         filters.insert("blocked_domains".into(), blocked.clone());
     }
     if !filters.is_empty() {
@@ -270,22 +301,29 @@ fn translate_web_search_tool(tool: &AnthropicTool) -> Value {
     Value::Object(out)
 }
 
-fn translate_tool_choice(choice: &Value) -> Option<Value> {
-    let choice_type = choice.get("type").and_then(Value::as_str)?;
+fn translate_tool_choice(choice: Option<&Value>) -> Value {
+    let Some(choice) = choice else {
+        return json!("auto");
+    };
+    let choice_type = choice.get("type").and_then(Value::as_str);
     match choice_type {
-        "auto" => Some(json!("auto")),
-        "none" => Some(json!("none")),
-        "any" => Some(json!("required")),
-        "tool" => choice.get("name").and_then(Value::as_str).map(|name| {
-            if name == "web_search" {
-                json!({ "type": "web_search" })
-            } else {
-                json!({ "type": "function", "name": name })
-            }
-        }),
-        "web_search" => Some(json!({ "type": "web_search" })),
-        kind if kind.starts_with("web_search_") => Some(json!({ "type": "web_search" })),
-        _ => None,
+        Some("auto") => json!("auto"),
+        Some("none") => json!("none"),
+        Some("any") => json!("required"),
+        Some("tool") => choice
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|name| {
+                if name == "web_search" || name.starts_with("web_search_") {
+                    json!({ "type": "web_search" })
+                } else {
+                    json!({ "type": "function", "name": name })
+                }
+            })
+            .unwrap_or_else(|| json!("required")),
+        Some("web_search") => json!({ "type": "web_search" }),
+        Some(kind) if kind.starts_with("web_search_") => json!({ "type": "web_search" }),
+        _ => json!("auto"),
     }
 }
 
@@ -330,12 +368,49 @@ fn map_thinking_budget(budget: u64) -> Option<&'static str> {
     }
 }
 
-fn text_format_from_request(request: &AnthropicRequest) -> Option<Value> {
-    let format = request.output_config.as_ref()?.get("format")?;
-    if format.get("type").and_then(Value::as_str) == Some("json_schema") {
-        Some(json!({ "format": format }))
-    } else {
-        None
+fn text_config_from_request(request: &AnthropicRequest) -> Value {
+    let mut text = serde_json::Map::new();
+    text.insert("verbosity".into(), json!("low"));
+    if let Some(format) = request
+        .output_config
+        .as_ref()
+        .and_then(|value| value.get("format"))
+        .filter(|format| format.get("type").and_then(Value::as_str) == Some("json_schema"))
+    {
+        text.insert(
+            "format".into(),
+            json!({
+                "type": "json_schema",
+                "name": format.get("name").and_then(Value::as_str).unwrap_or("response"),
+                "schema": normalize_strict_json_schema(format.get("schema").cloned().unwrap_or_else(|| json!({}))),
+                "strict": true
+            }),
+        );
+    }
+    Value::Object(text)
+}
+
+fn normalize_strict_json_schema(schema: Value) -> Value {
+    match schema {
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(normalize_strict_json_schema)
+                .collect(),
+        ),
+        Value::Object(mut object) => {
+            for value in object.values_mut() {
+                *value = normalize_strict_json_schema(std::mem::take(value));
+            }
+            if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                object.insert(
+                    "required".into(),
+                    Value::Array(properties.keys().cloned().map(Value::String).collect()),
+                );
+            }
+            Value::Object(object)
+        }
+        other => other,
     }
 }
 
@@ -390,10 +465,21 @@ mod tests {
 
         assert_eq!(
             translated.instructions.as_deref(),
-            Some("top-level instructions\n\nmessage instructions\n\nmore instructions")
+            Some("top-level instructions")
         );
-        assert_eq!(translated.input.len(), 1);
-        assert_eq!(translated.input[0]["role"], "user");
+        assert_eq!(translated.input.len(), 2);
+        assert_eq!(
+            translated.input[0],
+            json!({
+                "type": "message",
+                "role": "developer",
+                "content": [
+                    {"type": "input_text", "text": "message instructions"},
+                    {"type": "input_text", "text": "more instructions"}
+                ]
+            })
+        );
+        assert_eq!(translated.input[1]["role"], "user");
     }
 
     #[test]
@@ -425,12 +511,12 @@ mod tests {
     }
 
     #[test]
-    fn serializes_codex_max_tokens_field() {
+    fn omits_unsupported_codex_request_fields() {
         let req = AnthropicRequest {
             model: "gpt-5.4".into(),
             max_tokens: Some(123),
-            temperature: None,
-            top_p: None,
+            temperature: Some(0.2),
+            top_p: Some(0.9),
             stream: Some(true),
             system: None,
             messages: vec![crate::anthropic::schema::AnthropicMessage {
@@ -440,17 +526,21 @@ mod tests {
             }],
             tools: None,
             tool_choice: None,
-            metadata: None,
+            metadata: Some(json!({ "session": "s1" })),
             output_config: None,
             thinking: None,
             extra: Default::default(),
         };
 
-        let translated = translate_request(&req, &resolved(), None).unwrap();
+        let translated = translate_request(&req, &resolved(), Some("session-id")).unwrap();
         let serialized = serde_json::to_value(translated).unwrap();
 
-        assert_eq!(serialized["max_tokens"], 123);
+        assert!(serialized.get("max_tokens").is_none());
         assert!(serialized.get("max_output_tokens").is_none());
+        assert!(serialized.get("temperature").is_none());
+        assert!(serialized.get("top_p").is_none());
+        assert!(serialized.get("metadata").is_none());
+        assert_eq!(serialized["prompt_cache_key"], "session-id");
     }
 
     #[test]
@@ -479,14 +569,14 @@ mod tests {
             extra: Default::default(),
         };
         let translated = translate_request(&req, &resolved(), Some("s")).unwrap();
-        let output = translated.input[0]["content"][0]["output"]
-            .as_str()
-            .unwrap();
+        assert_eq!(translated.input[0]["type"], "function_call_output");
+        assert_eq!(translated.input[0]["call_id"], "toolu_1");
+        let output = translated.input[0]["output"].as_str().unwrap();
         assert!(output.contains("image omitted"));
     }
 
     #[test]
-    fn translates_tool_choice_sampling_and_metadata() {
+    fn translates_tool_choice_and_codex_defaults() {
         let req = AnthropicRequest {
             model: "gpt-5.4".into(),
             max_tokens: Some(100),
@@ -519,14 +609,18 @@ mod tests {
         };
 
         let translated = translate_request(&req, &resolved(), Some("s")).unwrap();
+        let serialized = serde_json::to_value(&translated).unwrap();
 
         assert_eq!(
             translated.tool_choice.as_ref().unwrap(),
             &json!({ "type": "function", "name": "Read" })
         );
-        assert_eq!(translated.temperature, Some(0.2));
-        assert_eq!(translated.top_p, Some(0.9));
-        assert_eq!(translated.metadata.as_ref().unwrap()["session"], "s1");
+        assert_eq!(serialized["parallel_tool_calls"], true);
+        assert_eq!(serialized["prompt_cache_key"], "s");
+        assert_eq!(serialized["text"]["verbosity"], "low");
+        assert!(serialized.get("temperature").is_none());
+        assert!(serialized.get("top_p").is_none());
+        assert!(serialized.get("metadata").is_none());
     }
 
     #[test]
@@ -553,10 +647,15 @@ mod tests {
 
         let translated = translate_request(&req, &resolved(), None).unwrap();
         assert_eq!(translated.reasoning.as_ref().unwrap()["effort"], "xhigh");
+        assert_eq!(
+            translated.include.as_ref().unwrap(),
+            &vec!["reasoning.encrypted_content".to_string()]
+        );
 
         req.output_config = Some(json!({ "effort": "auto" }));
         let translated = translate_request(&req, &resolved(), None).unwrap();
         assert!(translated.reasoning.is_none());
+        assert!(translated.include.is_none());
 
         req.output_config = None;
         req.thinking = Some(json!({ "type": "enabled", "budget_tokens": 4096 }));
@@ -610,13 +709,134 @@ mod tests {
         let translated = translate_request(&req, &resolved(), None).unwrap();
         let tool = &translated.tools.as_ref().unwrap()[0];
         assert_eq!(tool["type"], "web_search");
+        assert_eq!(tool["external_web_access"], false);
+        assert_eq!(tool["search_content_types"], json!(["text", "image"]));
         assert_eq!(tool["filters"]["allowed_domains"][0], "example.com");
         assert_eq!(tool["filters"]["blocked_domains"][0], "blocked.example");
-        assert_eq!(tool["user_location"]["city"], "Melbourne");
+        assert!(tool.get("user_location").is_none());
+        assert!(tool.get("search_context_size").is_none());
         assert_eq!(
             translated.tool_choice.as_ref().unwrap(),
             &json!({ "type": "web_search" })
         );
         assert!(tool.get("max_uses").is_none());
+    }
+
+    #[test]
+    fn serializes_reference_codex_field_set() {
+        let req = AnthropicRequest {
+            model: "gpt-5.4".into(),
+            max_tokens: Some(100),
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+            stream: Some(true),
+            system: Some(json!("be concise")),
+            messages: vec![crate::anthropic::schema::AnthropicMessage {
+                role: "user".into(),
+                content: json!("hello"),
+                extra: Default::default(),
+            }],
+            tools: Some(vec![AnthropicTool {
+                name: "lookup_weather".into(),
+                description: Some("Look up the weather".into()),
+                input_schema: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                })),
+                extra: Default::default(),
+            }]),
+            tool_choice: Some(json!({ "type": "tool", "name": "lookup_weather" })),
+            metadata: Some(json!({ "session": "s1" })),
+            output_config: Some(json!({
+                "effort": "high",
+                "format": {
+                    "type": "json_schema",
+                    "name": "weather_response",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "forecast": { "type": "string" }
+                        },
+                        "required": ["forecast"]
+                    }
+                }
+            })),
+            thinking: None,
+            extra: Default::default(),
+        };
+
+        let translated = translate_request(&req, &resolved(), None).unwrap();
+        let serialized = serde_json::to_value(translated).unwrap();
+        let mut keys = serialized
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+
+        assert_eq!(
+            keys,
+            vec![
+                "include",
+                "input",
+                "instructions",
+                "model",
+                "parallel_tool_calls",
+                "reasoning",
+                "store",
+                "stream",
+                "text",
+                "tool_choice",
+                "tools",
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_json_schema_format_for_strict_codex_output() {
+        let req = AnthropicRequest {
+            model: "gpt-5.4".into(),
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: Some(true),
+            system: None,
+            messages: vec![crate::anthropic::schema::AnthropicMessage {
+                role: "user".into(),
+                content: json!("hello"),
+                extra: Default::default(),
+            }],
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            output_config: Some(json!({
+                "format": {
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "answer": { "type": "string" },
+                            "confidence": { "type": "number" }
+                        },
+                        "required": ["answer"]
+                    }
+                }
+            })),
+            thinking: None,
+            extra: Default::default(),
+        };
+
+        let translated = translate_request(&req, &resolved(), None).unwrap();
+        assert_eq!(translated.text["format"]["type"], "json_schema");
+        assert_eq!(translated.text["format"]["name"], "response");
+        assert_eq!(translated.text["format"]["strict"], true);
+        assert_eq!(
+            translated.text["format"]["schema"]["required"],
+            json!(["answer", "confidence"])
+        );
     }
 }

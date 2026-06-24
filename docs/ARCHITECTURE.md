@@ -62,20 +62,24 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | Claude Code / Anthropic field | Codex Responses field | Notes |
 | --- | --- | --- |
 | `model` | `model` | Resolved through `model-profiles.json`; Claude `[1m]` and proxy `-fast` hints are stripped before upstream. |
-| `system` | `instructions` | String and text-block arrays are joined into one instruction string. |
+| top-level `system` | `instructions` | String and text-block arrays are joined into one instruction string. |
+| message role `system` | developer `input[]` message | Mid-conversation system messages are preserved as Responses developer messages; they are not sent as role `system`. |
 | user/assistant text blocks | `input[].content[].input_text` / `output_text` | Assistant history is preserved as Responses input items. |
 | image blocks | `input_image.image_url` | Supports base64 data URLs and URL images. |
 | `tool_use` | `function_call` | Preserves call id, tool name, and JSON arguments. |
 | `tool_result` | `function_call_output` | Text is forwarded; image results become placeholders. |
 | `tools[]` | `tools[]` with `type: "function"` | Anthropic `input_schema` becomes Responses `parameters`; `strict` is disabled for Claude Code compatibility. |
-| `type: web_search_*`, `name: web_search` | `web_search` | Hosted web-search bridge. `allowed_domains`/`blocked_domains` map to `filters`; `user_location` is forwarded. Anthropic `max_uses` and `response_inclusion` have no direct Responses equivalent and are not forwarded. |
+| `type: web_search_*`, `name: web_search` | `web_search` | Hosted web-search bridge. Sends `external_web_access: false`, `search_content_types: ["text", "image"]`, and non-empty `allowed_domains`/`blocked_domains` as `filters`. Anthropic `max_uses`, `response_inclusion`, `user_location`, and `search_context_size` are not forwarded. |
 | `tool_choice` | `tool_choice` | `auto`, `none`, `any`, forced function tools, and forced `web_search` map to Responses equivalents. |
-| `max_tokens` | `max_tokens` | Output limit only. |
-| `temperature`, `top_p` | same names | Forwarded when Claude Code sends them. |
-| `metadata` | `metadata` | Forwarded unchanged. |
+| `max_tokens` | omitted | The Codex backend rejects explicit output-limit parameters; Claude Code's field is not forwarded upstream. |
+| `temperature`, `top_p` | omitted | The ChatGPT Codex backend is stricter than the public Responses API and rejects these sampling parameters on this path. |
+| `metadata` | omitted | Anthropic request metadata is local client metadata; it is not forwarded as Responses `metadata` or `client_metadata`. |
 | `output_config.effort` | `reasoning.effort` | `auto` omits the field; `max`/`ultracode` map to `xhigh`; `none`, `minimal`, `low`, `medium`, `high`, and `xhigh` are forwarded. Unknown values are omitted. |
+| non-auto reasoning effort | `include: ["reasoning.encrypted_content"]` | Matches the Codex backend request shape used for reasoning continuity. |
 | `thinking.budget_tokens` | `reasoning.effort` | Deprecated Claude fixed thinking budgets are mapped as a fallback: `0` -> `none`, up to 4k -> `low`, up to 32k -> `medium`, above 32k -> `high`. |
-| `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting. |
+| all requests | `parallel_tool_calls: true` | Enables Codex parallel function calls, matching the reference proxy. |
+| all requests | `text.verbosity: "low"` | Keeps Codex responses compact for agent turns. |
+| `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting with `strict: true`; object schemas are normalized so all properties are required. |
 | `x-claude-code-session-id` | `prompt_cache_key` and upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. |
 
 ### Context Compaction
