@@ -549,33 +549,20 @@ struct ContentView: View {
     }
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: footerIcon)
-                    .foregroundStyle(footerColor)
-                    .frame(width: 16)
-                    .accessibilityHidden(true)
-                Text(model.lastMessage.isEmpty ? "Ready." : model.lastMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
+        HStack {
+            Button {
+                model.openProjectPage()
+            } label: {
+                Label("Project", systemImage: "folder")
             }
-
-            HStack {
-                Button {
-                    model.openProjectPage()
-                } label: {
-                    Label("Project", systemImage: "folder")
-                }
-                Spacer()
-                Button {
-                    NSApplication.shared.terminate(nil)
-                } label: {
-                    Label("Quit", systemImage: "power")
-                }
+            Spacer()
+            Button {
+                NSApplication.shared.terminate(nil)
+            } label: {
+                Label("Quit", systemImage: "power")
             }
-            .buttonStyle(.borderless)
         }
+        .buttonStyle(.borderless)
         .padding(.horizontal, 2)
     }
 
@@ -666,14 +653,6 @@ struct ContentView: View {
 
     private var statusColor: Color {
         model.isRunning ? AppTheme.success : AppTheme.muted
-    }
-
-    private var footerIcon: String {
-        model.lastMessage.localizedCaseInsensitiveContains("failed") ? "exclamationmark.triangle.fill" : "info.circle"
-    }
-
-    private var footerColor: Color {
-        model.lastMessage.localizedCaseInsensitiveContains("failed") ? AppTheme.warning : AppTheme.muted
     }
 }
 
