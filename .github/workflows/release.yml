@@ -26,8 +26,11 @@ jobs:
         run: |
           test -f "dist/CCCodexProxy-$VERSION-macOS.dmg"
           test -f "dist/CCCodexProxy-$VERSION-macOS.zip"
+          test -f "dist/CCCodexProxy-macOS.dmg"
+          test -f "dist/CCCodexProxy-macOS.zip"
           test -f "dist/SHA256SUMS"
           hdiutil verify "dist/CCCodexProxy-$VERSION-macOS.dmg"
+          hdiutil verify "dist/CCCodexProxy-macOS.dmg"
           (cd dist && shasum -a 256 -c SHA256SUMS)
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -35,5 +38,7 @@ jobs:
           files: |
             dist/CCCodexProxy-${{ env.VERSION }}-macOS.dmg
             dist/CCCodexProxy-${{ env.VERSION }}-macOS.zip
+            dist/CCCodexProxy-macOS.dmg
+            dist/CCCodexProxy-macOS.zip
             dist/SHA256SUMS
           generate_release_notes: true
