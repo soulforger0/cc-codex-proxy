@@ -7,6 +7,8 @@
 <p align="center">
   <a href="https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/CCCodexProxy-macOS.dmg"><strong>Download latest DMG</strong></a>
   ·
+  <a href="https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/SHA256SUMS">Checksums</a>
+  ·
   <a href="https://github.com/soulforger0/cc-codex-proxy/releases">All releases</a>
   ·
   <a href="https://github.com/soulforger0/cc-codex-proxy/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/soulforger0/cc-codex-proxy/actions/workflows/ci.yml/badge.svg?branch=main"></a>
@@ -40,7 +42,7 @@ It helps you:
 3. Launch `CCCodexProxy.app`.
 4. If macOS blocks the first launch, right-click the app and choose **Open**.
 
-If the direct DMG link ever fails, use the [GitHub Releases page](https://github.com/soulforger0/cc-codex-proxy/releases) and download the newest `CCCodexProxy-<version>-macOS.dmg` asset.
+If the direct DMG link ever fails, use the [GitHub Releases page](https://github.com/soulforger0/cc-codex-proxy/releases) and download the newest `CCCodexProxy-<version>-macOS.dmg` asset. Each release also includes checksums, a release manifest, and GitHub artifact attestations for the uploaded files.
 
 > [!NOTE]
 > Releases are currently ad-hoc signed but not Developer ID signed or notarized. macOS may show a Gatekeeper warning on first launch.
@@ -78,6 +80,20 @@ Advanced users can preview or repair managed Claude Code settings from the app's
 - **Codex transport fallback** — tries WebSocket first in `auto` mode, then falls back to HTTP SSE if needed.
 - **Embedded helper** — the SwiftUI app bundles the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`.
 
+## Verify a download
+
+Download `SHA256SUMS` from the release page, then verify the DMG checksum from the same directory:
+
+```sh
+shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+If you have the GitHub CLI installed, you can also verify the GitHub artifact attestation:
+
+```sh
+gh attestation verify CCCodexProxy-macOS.dmg --repo soulforger0/cc-codex-proxy
+```
+
 ## Runtime Files
 
 - Config/auth/model profiles: `~/Library/Application Support/CCCodexProxy/`
@@ -100,6 +116,7 @@ The output is:
 - `dist/CCCodexProxy-macOS.dmg`
 - `dist/CCCodexProxy-macOS.zip`
 - `dist/SHA256SUMS`
+- `dist/RELEASE_MANIFEST.json`
 
 ## Development
 
@@ -116,6 +133,8 @@ Run the explicit 250-agent mock streaming stress test with:
 ```sh
 cargo test -p proxy-core --test server_mock -- streaming_stress_250_agents --ignored --nocapture
 ```
+
+See [docs/RELEASING.md](docs/RELEASING.md) for the tag-based release process, artifact checks, attestations, and signing/notarization roadmap.
 
 ## Architecture
 

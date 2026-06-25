@@ -5,25 +5,38 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
     runs-on: macos-15
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all
 
   swift:
     runs-on: macos-15
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: swift build --package-path macos/CCCodexProxy
 
   package:
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: CCP_VERSION=0.0.0 CCP_BUILD_NUMBER="$GITHUB_RUN_NUMBER" scripts/build-app.sh
-      - run: hdiutil verify dist/CCCodexProxy-0.0.0-macOS.dmg
-
+      - run: |
+          test -f dist/RELEASE_MANIFEST.json
+          hdiutil verify dist/CCCodexProxy-0.0.0-macOS.dmg
+          hdiutil verify dist/CCCodexProxy-macOS.dmg
+          (cd dist && shasum -a 256 -c SHA256SUMS)

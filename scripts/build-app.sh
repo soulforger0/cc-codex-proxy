@@ -21,8 +21,9 @@ dmg_path="$dist/$artifact_prefix.dmg"
 latest_zip_path="$dist/CCCodexProxy-macOS.zip"
 latest_dmg_path="$dist/CCCodexProxy-macOS.dmg"
 checksums_path="$dist/SHA256SUMS"
+manifest_path="$dist/RELEASE_MANIFEST.json"
 
-rm -rf "$app_root" "$zip_path" "$dmg_path" "$latest_zip_path" "$latest_dmg_path" "$checksums_path"
+rm -rf "$app_root" "$zip_path" "$dmg_path" "$latest_zip_path" "$latest_dmg_path" "$checksums_path" "$manifest_path"
 mkdir -p "$macos" "$helpers" "$resources"
 
 cargo build --release -p cc-codex-proxy
@@ -57,6 +58,24 @@ hdiutil create \
   "$dmg_path"
 cp "$dmg_path" "$latest_dmg_path"
 
+cat > "$manifest_path" <<EOF
+{
+  "name": "CC Codex Proxy",
+  "version": "$version",
+  "build_number": "$build_number",
+  "artifacts": [
+    "$(basename "$dmg_path")",
+    "$(basename "$zip_path")",
+    "$(basename "$latest_dmg_path")",
+    "$(basename "$latest_zip_path")",
+    "$(basename "$checksums_path")",
+    "$(basename "$manifest_path")"
+  ],
+  "signed": "ad-hoc",
+  "notarized": false
+}
+EOF
+
 (
   cd "$dist"
   shasum -a 256 \
@@ -64,7 +83,8 @@ cp "$dmg_path" "$latest_dmg_path"
     "$(basename "$zip_path")" \
     "$(basename "$latest_dmg_path")" \
     "$(basename "$latest_zip_path")" \
+    "$(basename "$manifest_path")" \
     > "$(basename "$checksums_path")"
 )
 
-printf '%s\n' "$dmg_path" "$zip_path" "$latest_dmg_path" "$latest_zip_path" "$checksums_path"
+printf '%s\n' "$dmg_path" "$zip_path" "$latest_dmg_path" "$latest_zip_path" "$checksums_path" "$manifest_path"

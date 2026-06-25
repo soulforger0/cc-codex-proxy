@@ -7,21 +7,40 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
       - uses: dtolnay/rust-toolchain@stable
-      - name: Run Rust tests
-        run: cargo test --all
-      - name: Build Swift app
-        run: swift build --package-path macos/CCCodexProxy
+
       - name: Derive release version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Validate release version
+        run: |
+          grep -q "^version = \"$VERSION\"" crates/cc-codex-proxy/Cargo.toml
+          grep -q "^version = \"$VERSION\"" crates/proxy-core/Cargo.toml
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' macos/CCCodexProxy/Info.plist | grep -qx "$VERSION"
+
+      - name: Run Rust tests
+        run: cargo test --all
+
+      - name: Build Swift app
+        run: swift build --package-path macos/CCCodexProxy
+
       - name: Build release artifacts
         run: CCP_VERSION="$VERSION" CCP_BUILD_NUMBER="$GITHUB_RUN_NUMBER" scripts/build-app.sh
+
       - name: Verify release artifacts
         run: |
           test -f "dist/CCCodexProxy-$VERSION-macOS.dmg"
@@ -29,16 +48,35 @@ jobs:
           test -f "dist/CCCodexProxy-macOS.dmg"
           test -f "dist/CCCodexProxy-macOS.zip"
           test -f "dist/SHA256SUMS"
+          test -f "dist/RELEASE_MANIFEST.json"
           hdiutil verify "dist/CCCodexProxy-$VERSION-macOS.dmg"
           hdiutil verify "dist/CCCodexProxy-macOS.dmg"
           (cd dist && shasum -a 256 -c SHA256SUMS)
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+
+      - name: Attest release artifacts
+        uses: actions/attest@v4
         with:
-          files: |
+          subject-path: |
             dist/CCCodexProxy-${{ env.VERSION }}-macOS.dmg
             dist/CCCodexProxy-${{ env.VERSION }}-macOS.zip
             dist/CCCodexProxy-macOS.dmg
             dist/CCCodexProxy-macOS.zip
             dist/SHA256SUMS
-          generate_release_notes: true
+            dist/RELEASE_MANIFEST.json
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            --draft \
+            "dist/CCCodexProxy-$VERSION-macOS.dmg" \
+            "dist/CCCodexProxy-$VERSION-macOS.zip" \
+            "dist/CCCodexProxy-macOS.dmg" \
+            "dist/CCCodexProxy-macOS.zip" \
+            "dist/SHA256SUMS" \
+            "dist/RELEASE_MANIFEST.json"
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
