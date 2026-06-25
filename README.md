@@ -1,114 +1,175 @@
 # CC Codex Proxy
 
 <p align="center">
-  <strong>A macOS menu bar app that lets Claude Code run through your ChatGPT Codex subscription.</strong>
+  <strong>Run Claude Code through a ChatGPT subscription Codex session from a local macOS menu bar app.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/CCCodexProxy-macOS.dmg"><strong>Download latest DMG</strong></a>
   ·
-  <a href="https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/SHA256SUMS">Checksums</a>
+  <a href="https://github.com/soulforger0/cc-codex-proxy/releases">Releases</a>
   ·
-  <a href="https://github.com/soulforger0/cc-codex-proxy/releases">All releases</a>
+  <a href="docs/ARCHITECTURE.md">Architecture</a>
   ·
-  <a href="https://github.com/soulforger0/cc-codex-proxy/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/soulforger0/cc-codex-proxy/actions/workflows/ci.yml/badge.svg?branch=main"></a>
-  <a href="https://github.com/soulforger0/cc-codex-proxy/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/soulforger0/cc-codex-proxy?include_prereleases&sort=semver"></a>
-  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="CONTRIBUTING.md">Contributing</a>
+  ·
+  <a href="SECURITY.md">Security</a>
 </p>
 
-CC Codex Proxy is a local-only macOS app for people who want to use Claude Code with a ChatGPT subscription Codex session. It runs in your menu bar, starts a local Anthropic-compatible proxy, handles ChatGPT OAuth, and temporarily routes new `claude` launches through the proxy while the app is running.
+<p align="center">
+  <a href="https://github.com/soulforger0/cc-codex-proxy/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/soulforger0/cc-codex-proxy/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/soulforger0/cc-codex-proxy/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/soulforger0/cc-codex-proxy?include_prereleases&sort=semver"></a>
+  <a href="https://github.com/soulforger0/cc-codex-proxy/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/soulforger0/cc-codex-proxy/total?label=downloads"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-lightgrey">
+  <img alt="Built with Rust and Swift" src="https://img.shields.io/badge/built%20with-Rust%20%2B%20Swift-orange">
+</p>
 
-You do not need to install or configure a separate CLI. Download the app, sign in, click **Start**, then open a fresh Claude Code session.
+CC Codex Proxy is a local-only bridge for developers who prefer Claude Code's terminal workflow but want requests served by a ChatGPT subscription Codex session. The app runs in the macOS menu bar, handles ChatGPT OAuth, starts an Anthropic-compatible proxy on `127.0.0.1`, and temporarily routes new `claude` launches while the app is alive and healthy.
 
-> [!WARNING]
-> This project uses the ChatGPT subscription Codex backend, which is not a public OpenAI API contract. Backend behavior can change. Kimi, Cursor, and generic OpenAI API-key routing are intentionally out of scope.
+No manual `ANTHROPIC_*` setup is required for the app flow. Download the DMG, sign in, click **Start**, then open a fresh Claude Code session.
 
-## Why use it?
-
-Claude Code speaks Anthropic's Messages API. ChatGPT Codex sessions use a different upstream protocol. CC Codex Proxy bridges that gap locally so Claude Code can keep its normal terminal workflow while requests are translated to the Codex backend.
-
-It helps you:
-
-- Use Claude Code through a ChatGPT subscription Codex session.
-- Avoid manual `ANTHROPIC_*` environment setup.
-- Start, stop, and monitor the local proxy from the macOS menu bar.
-- Sign in with ChatGPT OAuth from the app.
-- Keep routing temporary: when the app quits, the managed Claude shim is restored or falls back safely.
-
-## Install
-
-1. Download the latest DMG: [CCCodexProxy-macOS.dmg](https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/CCCodexProxy-macOS.dmg).
-2. Open the DMG and drag `CCCodexProxy.app` into Applications.
-3. Launch `CCCodexProxy.app`.
-4. If macOS blocks the first launch, right-click the app and choose **Open**.
-
-If the direct DMG link ever fails, use the [GitHub Releases page](https://github.com/soulforger0/cc-codex-proxy/releases) and download the newest `CCCodexProxy-<version>-macOS.dmg` asset. Each release also includes checksums, a release manifest, and GitHub artifact attestations for the uploaded files.
-
-> [!NOTE]
-> Releases are currently ad-hoc signed but not Developer ID signed or notarized. macOS may show a Gatekeeper warning on first launch.
+> [!IMPORTANT]
+> This project targets the ChatGPT subscription Codex backend, which is not a public OpenAI API contract. Upstream behavior can change. Generic OpenAI API-key routing, Cursor, Kimi, and unrelated provider adapters are intentionally out of scope.
 
 ## Quick Start
 
-1. Launch **CC Codex Proxy** from Applications.
-2. Click **Login** and complete ChatGPT OAuth in your browser.
-3. Close any running Claude Code sessions.
-4. Click **Start** in the menu bar app.
-5. Open a new Claude Code session normally with `claude`.
+1. Download [CCCodexProxy-macOS.dmg](https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/CCCodexProxy-macOS.dmg).
+2. Open the DMG and drag `CCCodexProxy.app` into Applications.
+3. Launch **CC Codex Proxy**.
+4. Click **Login** and complete ChatGPT OAuth in your browser.
+5. Close any currently running Claude Code sessions.
+6. Click **Start** in the menu bar app.
+7. Open a new Claude Code session normally:
 
-The app automatically manages the temporary `claude` command shim. New Claude Code sessions route through `127.0.0.1` only while the app is open and the proxy health check passes.
+```sh
+claude
+```
 
-## How the app connects Claude Code
+The app manages a temporary `claude` shim. New Claude Code sessions route through CC Codex Proxy only while the menu bar app is running and the proxy health check passes.
 
-No manual Claude Code setup is required.
+## Why This Exists
 
-When the app launches, it discovers your existing `claude` command and installs a managed shim in its place. The shim preserves the original Claude Code executable and only changes the environment for new launches when CC Codex Proxy is running and healthy.
+Claude Code speaks Anthropic's Messages API. ChatGPT subscription Codex uses a different upstream protocol. CC Codex Proxy translates the Claude Code-facing Anthropic request/stream shape into the Codex backend shape, then streams the response back to Claude Code.
 
-When you start Claude Code while the proxy is running, the shim injects the managed environment that points Claude Code at the local proxy, including the base URL, model names, small-model fallback, compaction window, and proxy auth token placeholder. When the app quits, it restores the original `claude` command. If the proxy is stopped while the app is still open, new Claude Code launches show an error instead of silently using the wrong backend.
-
-The app also refuses to start the proxy while Claude Code is already running. Close existing Claude Code sessions first, then start the proxy and open a new session so routing is consistent from the beginning.
-
-Advanced users can preview or repair managed Claude Code settings from the app's **Advanced settings.json** section, but this is not part of the normal install flow.
+```mermaid
+flowchart LR
+  Claude["Claude Code"] --> Shim["managed claude shim"]
+  Shim --> Proxy["127.0.0.1 Anthropic-compatible proxy"]
+  Proxy --> Codex["ChatGPT Codex Responses backend"]
+```
 
 ## Features
 
-- **DMG install** — drag `CCCodexProxy.app` into Applications like a normal Mac app.
-- **Menu bar controls** — start, stop, refresh status, and open logs without touching the terminal.
-- **ChatGPT OAuth** — sign in from the app and store tokens locally under Application Support.
-- **Temporary Claude routing** — managed shim routes new `claude` launches only while the app is alive and healthy.
-- **Local-only proxy** — binds to `127.0.0.1` and does not expose a remote service.
-- **Anthropic-compatible surface** — implements `/v1/messages` and `/v1/messages/count_tokens` for Claude Code.
-- **Codex transport fallback** — tries WebSocket first in `auto` mode, then falls back to HTTP SSE if needed.
-- **Embedded helper** — the SwiftUI app bundles the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`.
+| Capability | What it does |
+| --- | --- |
+| Menu bar control | Start, stop, refresh status, and open logs from a native macOS app. |
+| ChatGPT OAuth | Sign in from the app; tokens are stored locally under Application Support. |
+| Temporary Claude routing | A managed shim injects proxy environment variables only when the app is alive and healthy. |
+| Local-only server | The proxy binds to `127.0.0.1` and does not expose a remote service. |
+| Anthropic-compatible endpoints | Implements `/v1/messages` and `/v1/messages/count_tokens` for Claude Code. |
+| Streaming translation | Streams Anthropic SSE back to Claude Code without buffering the full upstream response. |
+| Transport fallback | In `auto` mode, tries Codex WebSocket first and falls back to HTTP SSE when needed. |
+| Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
-## Verify a download
+## Compatibility
 
-Download `SHA256SUMS` from the release page, then verify the DMG checksum from the same directory:
+| Item | Status |
+| --- | --- |
+| macOS app | Supported. Releases ship as a drag-and-drop DMG. |
+| Claude Code | Supported for new sessions launched after the proxy starts. Existing sessions must be closed first. |
+| ChatGPT OAuth | Supported through the app or CLI. |
+| Generic OpenAI API keys | Not supported. |
+| Non-macOS desktop app | Not currently supported. |
+| Developer ID signing / notarization | Not yet. Releases are currently ad-hoc signed. |
+
+> [!NOTE]
+> Because releases are not yet Developer ID signed or notarized, macOS may show a Gatekeeper warning on first launch. If that happens, right-click `CCCodexProxy.app` and choose **Open**.
+
+## Install
+
+Download the latest release asset:
+
+- [CCCodexProxy-macOS.dmg](https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/CCCodexProxy-macOS.dmg)
+- [SHA256SUMS](https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/SHA256SUMS)
+- [All releases](https://github.com/soulforger0/cc-codex-proxy/releases)
+
+Then:
+
+1. Open the DMG.
+2. Drag `CCCodexProxy.app` into Applications.
+3. Launch the app.
+4. Log in, start the proxy, and open a fresh Claude Code session.
+
+Each release includes checksums, a release manifest, and GitHub artifact attestations for uploaded files.
+
+## Verify A Download
+
+From the directory that contains the downloaded DMG and `SHA256SUMS`:
 
 ```sh
 shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
-If you have the GitHub CLI installed, you can also verify the GitHub artifact attestation:
+With the GitHub CLI, you can also verify the release attestation:
 
 ```sh
 gh attestation verify CCCodexProxy-macOS.dmg --repo soulforger0/cc-codex-proxy
 ```
 
+## How Routing Works
+
+When the app launches, it discovers your existing `claude` command and installs a managed shim in its place. The shim records the original Claude Code executable and only injects CC Codex Proxy settings when:
+
+- the menu bar app process is alive;
+- the local proxy health check succeeds;
+- Claude Code is launched after the proxy has started.
+
+If the app quits, the shim restores or falls back to the original Claude command. If the app is open but the proxy is stopped, new Claude Code launches fail fast instead of silently using the wrong backend.
+
+The app also refuses to start the proxy while Claude Code is already running. Close existing sessions first, then start the proxy and open a new session so routing is consistent from the beginning.
+
+Advanced users can preview or repair managed Claude Code settings from the app's **Advanced settings.json** section, but this is not part of the normal install flow.
+
+## CLI Usage
+
+The packaged app is the recommended path. The helper binary also supports direct CLI workflows for development and diagnostics:
+
+```sh
+cc-codex-proxy auth login
+cc-codex-proxy auth status
+cc-codex-proxy serve
+cc-codex-proxy doctor
+cc-codex-proxy admin status
+```
+
+When `serve` starts, it prints the local proxy URL, health URL, log path, and Claude Code environment variables for manual sessions.
+
 ## Runtime Files
 
-- Config/auth/model profiles: `~/Library/Application Support/CCCodexProxy/`
-- Logs: `~/Library/Logs/CCCodexProxy/proxy.log`
-- Claude shim state: `~/Library/Application Support/CCCodexProxy/claude-shim.json`
+| Data | Location |
+| --- | --- |
+| Config, auth, model profiles, admin token | `~/Library/Application Support/CCCodexProxy/` |
+| Logs | `~/Library/Logs/CCCodexProxy/proxy.log` |
+| Claude shim state | `~/Library/Application Support/CCCodexProxy/claude-shim.json` |
+
+Treat auth files, logs, account identifiers, and Claude Code session details as sensitive when sharing diagnostics.
 
 ## Build From Source
 
-Rust is required to build the proxy helper. Swift is required to build the menu bar app.
+Requirements:
+
+- Rust 1.78 or newer
+- Swift toolchain on macOS
+- Xcode command line tools
+
+Build the app bundle and release artifacts:
 
 ```sh
 scripts/build-app.sh
 ```
 
-The output is:
+The script writes:
 
 - `dist/CCCodexProxy.app`
 - `dist/CCCodexProxy-<version>-macOS.dmg`
@@ -120,31 +181,28 @@ The output is:
 
 ## Development
 
+Run the main checks:
+
 ```sh
 cargo test --all
 swift build --package-path macos/CCCodexProxy
-cargo run -p cc-codex-proxy -- serve
+```
+
+Run the helper locally:
+
+```sh
 cargo run -p cc-codex-proxy -- auth login
+cargo run -p cc-codex-proxy -- serve
 cargo run -p cc-codex-proxy -- doctor
 ```
 
-Run the explicit 250-agent mock streaming stress test with:
+Run the explicit 250-agent mock streaming stress test:
 
 ```sh
 cargo test -p proxy-core --test server_mock -- streaming_stress_250_agents --ignored --nocapture
 ```
 
-See [docs/RELEASING.md](docs/RELEASING.md) for the tag-based release process, artifact checks, attestations, and signing/notarization roadmap.
-
-## Architecture
-
-The supported path is:
-
-```text
-Claude Code -> 127.0.0.1 Anthropic-compatible proxy -> ChatGPT subscription Codex Responses backend
-```
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the runtime model, transport fallback strategy, request/response mapping, and robustness targets.
+Release details live in [docs/RELEASING.md](docs/RELEASING.md). Architecture details live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Contributing
 
@@ -155,7 +213,13 @@ cargo test --all
 swift build --package-path macos/CCCodexProxy
 ```
 
-For security-sensitive reports, please avoid posting secrets, OAuth tokens, or private session details in public issues.
+For app bundle changes, also run:
+
+```sh
+scripts/build-app.sh
+```
+
+Keep reports sanitized. Do not post OAuth tokens, account identifiers, private prompts, or complete logs in public issues. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) for the project guidelines.
 
 ## License
 
