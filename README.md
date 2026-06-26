@@ -1,7 +1,7 @@
 # CC Codex Proxy
 
 <p align="center">
-  <strong>Run Claude Code through a ChatGPT subscription Codex session from a local macOS menu bar app.</strong>
+  <strong>Run Claude Code through ChatGPT Codex or DeepSeek from a local macOS menu bar app.</strong>
 </p>
 
 <p align="center">
@@ -25,19 +25,21 @@
   <img alt="Built with Rust and Swift" src="https://img.shields.io/badge/built%20with-Rust%20%2B%20Swift-orange">
 </p>
 
-CC Codex Proxy is a local-only bridge for developers who prefer Claude Code's terminal workflow but want requests served by a ChatGPT subscription Codex session. The app runs in the macOS menu bar, handles ChatGPT OAuth, starts an Anthropic-compatible proxy on `127.0.0.1`, and temporarily routes new `claude` launches while the app is alive and healthy.
+CC Codex Proxy is a local-only bridge for developers who prefer Claude Code's terminal workflow but want requests served by ChatGPT subscription Codex or DeepSeek. The app runs in the macOS menu bar, handles provider credentials, starts an Anthropic-compatible proxy on `127.0.0.1`, and temporarily routes new `claude` launches while the app is alive and healthy.
 
 No manual `ANTHROPIC_*` setup is required for the app flow. Download the DMG, sign in, click **Start**, then open a fresh Claude Code session.
 
 > [!IMPORTANT]
-> This project targets the ChatGPT subscription Codex backend, which is not a public OpenAI API contract. Upstream behavior can change. Generic OpenAI API-key routing, Cursor, Kimi, and unrelated provider adapters are intentionally out of scope.
+> ChatGPT Codex uses a subscription backend that is not a public OpenAI API contract. Upstream behavior can change. DeepSeek support uses DeepSeek's Anthropic-compatible API. Generic OpenAI API-key routing and unrelated provider adapters are not supported.
 
 ## Quick Start
 
 1. Download [CCCodexProxy-macOS.dmg](https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/CCCodexProxy-macOS.dmg).
 2. Open the DMG and drag `CCCodexProxy.app` into Applications.
 3. Launch **CC Codex Proxy**.
-4. Click **Login** and complete ChatGPT OAuth in your browser.
+4. Choose a provider:
+   - **Codex**: click **Login** and complete ChatGPT OAuth in your browser.
+   - **DeepSeek**: choose **DeepSeek**, paste your API key, and click **Save Key**.
 5. Close any currently running Claude Code sessions.
 6. Click **Start** in the menu bar app.
 7. Open a new Claude Code session normally:
@@ -50,13 +52,14 @@ The app manages a temporary `claude` shim. New Claude Code sessions route throug
 
 ## Why This Exists
 
-Claude Code speaks Anthropic's Messages API. ChatGPT subscription Codex uses a different upstream protocol. CC Codex Proxy translates the Claude Code-facing Anthropic request/stream shape into the Codex backend shape, then streams the response back to Claude Code.
+Claude Code speaks Anthropic's Messages API. For ChatGPT Codex, CC Codex Proxy translates that Anthropic request/stream shape into the Codex Responses backend shape. For DeepSeek, it forwards Anthropic-shaped requests to DeepSeek's Anthropic-compatible API after local model and request validation.
 
 ```mermaid
 flowchart LR
   Claude["Claude Code"] --> Shim["managed claude shim"]
   Shim --> Proxy["127.0.0.1 Anthropic-compatible proxy"]
   Proxy --> Codex["ChatGPT Codex Responses backend"]
+  Proxy --> DeepSeek["DeepSeek Anthropic API"]
 ```
 
 ## Features
@@ -65,6 +68,7 @@ flowchart LR
 | --- | --- |
 | Menu bar control | Start, stop, refresh status, and open logs from a native macOS app. |
 | ChatGPT OAuth | Sign in from the app; tokens are stored locally under Application Support. |
+| DeepSeek API keys | Store a DeepSeek API key locally or provide `DEEPSEEK_API_KEY`. |
 | Temporary Claude routing | A managed shim injects proxy environment variables only when the app is alive and healthy. |
 | Local-only server | The proxy binds to `127.0.0.1` and does not expose a remote service. |
 | Anthropic-compatible endpoints | Implements `/v1/messages` and `/v1/messages/count_tokens` for Claude Code. |
@@ -79,6 +83,7 @@ flowchart LR
 | macOS app | Supported. Releases ship as a drag-and-drop DMG. |
 | Claude Code | Supported for new sessions launched after the proxy starts. Existing sessions must be closed first. |
 | ChatGPT OAuth | Supported through the app or CLI. |
+| DeepSeek API | Supported through app key storage, `DEEPSEEK_API_KEY`, or CLI key setup. |
 | Generic OpenAI API keys | Not supported. |
 | Non-macOS desktop app | Not currently supported. |
 | Developer ID signing / notarization | Not yet. Releases are currently ad-hoc signed. |
@@ -138,6 +143,8 @@ The packaged app is the recommended path. The helper binary also supports direct
 ```sh
 cc-codex-proxy auth login
 cc-codex-proxy auth status
+printf '%s' "$DEEPSEEK_API_KEY" | cc-codex-proxy auth set-api-key --provider deepseek --stdin
+cc-codex-proxy serve --provider deepseek
 cc-codex-proxy serve
 cc-codex-proxy doctor
 cc-codex-proxy admin status
@@ -150,10 +157,11 @@ When `serve` starts, it prints the local proxy URL, health URL, log path, and Cl
 | Data | Location |
 | --- | --- |
 | Config, auth, model profiles, admin token | `~/Library/Application Support/CCCodexProxy/` |
+| DeepSeek API key | `~/Library/Application Support/CCCodexProxy/deepseek-api-key` |
 | Logs | `~/Library/Logs/CCCodexProxy/proxy.log` |
 | Claude shim state | `~/Library/Application Support/CCCodexProxy/claude-shim.json` |
 
-Treat auth files, logs, account identifiers, and Claude Code session details as sensitive when sharing diagnostics.
+Treat auth files, DeepSeek API keys, logs, account identifiers, and Claude Code session details as sensitive when sharing diagnostics.
 
 ## Build From Source
 

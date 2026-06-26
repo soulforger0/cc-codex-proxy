@@ -7,7 +7,8 @@ use crate::{
         stream::{accumulate_response, translate_stream, ToolCatalog},
         translate::{translate_request, ResponsesRequest},
     },
-    config::{AppConfig, AppPaths, CodexTransport},
+    config::{AppConfig, AppPaths, CodexTransport, Provider},
+    deepseek::DeepSeekClient,
     error::{ProxyError, Result},
     model::ModelRegistry,
 };
@@ -38,6 +39,7 @@ struct AppState {
     paths: AppPaths,
     auth: AuthManager,
     codex: CodexClient,
+    deepseek: DeepSeekClient,
     registry: ModelRegistry,
 }
 
@@ -59,11 +61,14 @@ impl ServerHandle {
 pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Result<ServerHandle> {
     let registry = ModelRegistry::load_or_create(&paths.model_profiles_file)?;
     let codex = CodexClient::new(config.codex.clone(), auth.clone())?;
+    let deepseek =
+        DeepSeekClient::new(config.deepseek.clone(), paths.deepseek_api_key_file.clone())?;
     let state = Arc::new(AppState {
         config: config.clone(),
         paths,
         auth,
         codex,
+        deepseek,
         registry,
     });
 
@@ -104,10 +109,15 @@ async fn admin_status(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>> {
     require_admin(&state, &headers)?;
-    let auth = state.auth.status().await?;
+    let auth = if state.config.provider == Provider::Codex {
+        state.auth.status().await?
+    } else {
+        None
+    };
     let transport = state.codex.transport_status();
     Ok(Json(json!({
         "ok": true,
+        "provider": state.config.provider.as_str(),
         "port": state.config.port,
         "configDir": state.paths.config_dir,
         "logsDir": state.paths.logs_dir,
@@ -116,7 +126,10 @@ async fn admin_status(
             "currentMethod": transport.current_method.map(transport_method_name),
             "websocketCooldownMs": transport.websocket_cooldown_remaining.map(duration_millis_u64),
         },
-        "models": state.registry.supported_models(),
+        "models": state.registry.supported_models(state.config.provider),
+        "deepseek": {
+            "apiKey": state.deepseek.api_key_status(),
+        },
         "auth": auth.map(|auth| json!({
             "accountId": auth.account_id,
             "expiresAtMs": auth.expires_at_ms,
@@ -129,7 +142,9 @@ async fn count_tokens(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AnthropicRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    let _ = state.registry.resolve(&request.model)?;
+    let _ = state
+        .registry
+        .resolve(state.config.provider, &request.model)?;
     Ok(Json(
         json!({ "input_tokens": estimate_input_tokens(&request) }),
     ))
@@ -147,6 +162,7 @@ async fn messages(
         .map(ToOwned::to_owned);
     info!(
         %request_id,
+        provider = state.config.provider.as_str(),
         model = %request.model,
         stream = request.wants_stream(),
         message_count = request.messages.len(),
@@ -156,13 +172,31 @@ async fn messages(
         tools = %summarize_anthropic_tools(request.tools.as_deref()),
         "received Anthropic messages request"
     );
-    let resolved = match state.registry.resolve(&request.model) {
+    let resolved = match state
+        .registry
+        .resolve(state.config.provider, &request.model)
+    {
         Ok(resolved) => resolved,
         Err(err) => {
             warn!(%request_id, error = %err, "failed to resolve requested model");
             return Err(err);
         }
     };
+    match state.config.provider {
+        Provider::Codex => {
+            handle_codex_messages(state, request_id, session_id, request, resolved).await
+        }
+        Provider::DeepSeek => handle_deepseek_messages(state, request_id, request, resolved).await,
+    }
+}
+
+async fn handle_codex_messages(
+    state: Arc<AppState>,
+    request_id: String,
+    session_id: Option<String>,
+    request: AnthropicRequest,
+    resolved: crate::model::ResolvedModel,
+) -> Result<Response<Body>> {
     let tool_catalog = ToolCatalog::from_anthropic_tools(request.tools.as_deref());
     let translated = translate_request(&request, &resolved, session_id.as_deref())?;
     info!(
@@ -215,6 +249,49 @@ async fn messages(
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(response_json(response).to_string()))
             .map_err(|err| ProxyError::Transport(format!("failed to build response: {err}")))
+    }
+}
+
+async fn handle_deepseek_messages(
+    state: Arc<AppState>,
+    request_id: String,
+    request: AnthropicRequest,
+    resolved: crate::model::ResolvedModel,
+) -> Result<Response<Body>> {
+    let upstream = match state.deepseek.post(&request, &resolved).await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            warn!(%request_id, error = %err, "DeepSeek upstream request failed");
+            return Err(err);
+        }
+    };
+    info!(
+        %request_id,
+        status = %upstream.status,
+        upstream_model = %resolved.upstream_model,
+        "DeepSeek upstream response opened"
+    );
+
+    if request.wants_stream() {
+        let body = Body::from_stream(with_sse_heartbeats(upstream.body, SSE_HEARTBEAT_INTERVAL));
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(body)
+            .map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to build DeepSeek streaming response: {err}"
+                ))
+            })
+    } else {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from_stream(upstream.body))
+            .map_err(|err| {
+                ProxyError::Transport(format!("failed to build DeepSeek response: {err}"))
+            })
     }
 }
 

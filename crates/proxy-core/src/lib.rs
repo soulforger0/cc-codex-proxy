@@ -3,6 +3,7 @@ pub mod auth;
 pub mod claude;
 pub mod codex;
 pub mod config;
+pub mod deepseek;
 pub mod error;
 pub mod logging;
 pub mod model;

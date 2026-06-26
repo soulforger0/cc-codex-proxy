@@ -12,6 +12,7 @@ final class ProxyAppModel: ObservableObject {
     @Published var isInstallingClaudeSettings = false
     @Published var isRestoringClaudeSettings = false
     @Published var isInstallingClaudeShim = false
+    @Published var isSavingDeepSeekAPIKey = false
     @Published var statusText = "Not checked"
     @Published var transportDetailText = "Start the proxy to see the active upstream method."
     @Published var transportBadgeText = "Waiting"
@@ -23,6 +24,8 @@ final class ProxyAppModel: ObservableObject {
     @Published var claudeSettingsPreview: ClaudeSettingsPreview?
     @Published var claudeSettingsPreviewError: String?
     @Published var lastMessage = ""
+    @Published var provider = "codex"
+    @Published var deepSeekAPIKey = ""
     @Published var model = "gpt-5.5[1m]"
     @Published var smallModel = "gpt-5.4-mini[1m]"
     @Published var port = 18765
@@ -71,7 +74,7 @@ final class ProxyAppModel: ObservableObject {
         defer { isCheckingAuthStatus = false }
 
         do {
-            let output = try await runCLI(["auth", "status"], allowFailure: true)
+            let output = try await runCLI(["auth", "status", "--provider", provider], allowFailure: true)
             applyAuthStatus(from: output, authenticated: output.contains("Authenticated: yes"))
         } catch {
             isAuthenticated = false
@@ -92,7 +95,7 @@ final class ProxyAppModel: ObservableObject {
         }
 
         let process = Process()
-        process.arguments = ["serve", "--port", "\(port)"]
+        process.arguments = ["serve", "--provider", provider, "--port", "\(port)"]
         do {
             process.executableURL = try helperURL()
             try process.run()
@@ -121,6 +124,10 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func login() async {
+        guard provider == "codex" else {
+            await saveDeepSeekAPIKey()
+            return
+        }
         isLoggingIn = true
         defer { isLoggingIn = false }
 
@@ -135,6 +142,37 @@ final class ProxyAppModel: ObservableObject {
             authStatusText = "OAuth not verified"
             authDetailText = "Login did not complete. The local auth file was not updated."
         }
+    }
+
+    func saveDeepSeekAPIKey() async {
+        let trimmed = deepSeekAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            lastMessage = "Enter a DeepSeek API key before saving."
+            return
+        }
+        isSavingDeepSeekAPIKey = true
+        defer { isSavingDeepSeekAPIKey = false }
+
+        do {
+            _ = try await runCLI(
+                ["auth", "set-api-key", "--provider", "deepseek", "--stdin"],
+                stdin: trimmed
+            )
+            deepSeekAPIKey = ""
+            lastMessage = "DeepSeek API key saved."
+            await checkAuthStatus()
+        } catch {
+            lastMessage = "DeepSeek key save failed: \(error.localizedDescription)"
+            await checkAuthStatus()
+        }
+    }
+
+    func applyProviderChange() async {
+        applyProviderDefaults()
+        await checkAuthStatus()
+        await refreshClaudeSettingsPreview()
+        await installClaudeShim(updateLastMessage: false)
+        await refreshRuntimeStatus()
     }
 
     func installClaudeSettings() async {
@@ -239,20 +277,30 @@ final class ProxyAppModel: ObservableObject {
         alert.runModal()
     }
 
-    private func runCLI(_ arguments: [String], allowFailure: Bool = false) async throws -> String {
+    private func runCLI(_ arguments: [String], allowFailure: Bool = false, stdin: String? = nil) async throws -> String {
         try await Task.detached(priority: .userInitiated) {
-            try self.runCLISync(arguments, allowFailure: allowFailure)
+            try self.runCLISync(arguments, allowFailure: allowFailure, stdin: stdin)
         }.value
     }
 
-    nonisolated private func runCLISync(_ arguments: [String], allowFailure: Bool = false) throws -> String {
+    nonisolated private func runCLISync(_ arguments: [String], allowFailure: Bool = false, stdin: String? = nil) throws -> String {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = try helperURL()
         process.arguments = arguments
         process.standardOutput = pipe
         process.standardError = pipe
-        try process.run()
+        if let stdin {
+            let input = Pipe()
+            process.standardInput = input
+            try process.run()
+            if let data = stdin.data(using: .utf8) {
+                input.fileHandleForWriting.write(data)
+            }
+            input.fileHandleForWriting.closeFile()
+        } else {
+            try process.run()
+        }
         process.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let output = String(data: data, encoding: .utf8) ?? ""
@@ -264,6 +312,8 @@ final class ProxyAppModel: ObservableObject {
 
     private var claudeSettingsArguments: [String] {
         [
+            "--provider",
+            provider,
             "--model",
             model,
             "--small-model",
@@ -279,19 +329,23 @@ final class ProxyAppModel: ObservableObject {
         guard authenticated else {
             isAuthenticated = false
             authStatusText = "Not signed in"
-            authDetailText = "Login to complete ChatGPT OAuth."
+            authDetailText = provider == "deepseek"
+                ? "Save a DeepSeek API key before starting the proxy."
+                : "Login to complete ChatGPT OAuth."
             return
         }
 
         isAuthenticated = true
-        authStatusText = "Signed in"
+        authStatusText = provider == "deepseek" ? "API key saved" : "Signed in"
 
         if let account = value(for: "Account", in: output), !account.isEmpty {
             authDetailText = "Account \(account)"
         } else if let storage = value(for: "Storage", in: output), !storage.isEmpty {
             authDetailText = "Stored in \(storage)."
         } else {
-            authDetailText = "OAuth tokens are stored in the local auth file."
+            authDetailText = provider == "deepseek"
+                ? "DeepSeek API key is configured."
+                : "OAuth tokens are stored in the local auth file."
         }
     }
 
@@ -300,7 +354,11 @@ final class ProxyAppModel: ObservableObject {
             let output = try await runCLI(["admin", "status", "--port", "\(port)"])
             let data = Data(output.utf8)
             let status = try JSONDecoder().decode(ProxyAdminStatus.self, from: data)
-            applyTransportStatus(status.transport)
+            if status.provider == "deepseek" {
+                applyDeepSeekTransportStatus()
+            } else {
+                applyTransportStatus(status.transport)
+            }
         } catch {
             transportDetailText = error.localizedDescription
             transportBadgeText = "Unknown"
@@ -350,6 +408,8 @@ final class ProxyAppModel: ObservableObject {
 
     private func displayName(forTransport value: String) -> String {
         switch value {
+        case "deepseek":
+            return "DeepSeek"
         case "auto":
             return "Auto"
         case "http-sse":
@@ -366,6 +426,25 @@ final class ProxyAppModel: ObservableObject {
             return "\(max(1, value / 1_000))s"
         }
         return "\(value)ms"
+    }
+
+    private func applyProviderDefaults() {
+        if provider == "deepseek" {
+            model = "deepseek-v4-pro[1m]"
+            smallModel = "deepseek-v4-flash"
+            autoCompactWindow = 1_000_000
+        } else {
+            model = "gpt-5.5[1m]"
+            smallModel = "gpt-5.4-mini[1m]"
+            autoCompactWindow = 272_000
+        }
+    }
+
+    private func applyDeepSeekTransportStatus() {
+        transportConfiguredMode = "deepseek"
+        transportCurrentMethod = "deepseek"
+        transportBadgeText = "DeepSeek"
+        transportDetailText = "Using DeepSeek Anthropic API."
     }
 
     private func successMessage(from output: String) -> String {
@@ -395,6 +474,7 @@ final class ProxyAppModel: ObservableObject {
 }
 
 struct ProxyAdminStatus: Decodable {
+    let provider: String?
     let transport: ProxyTransportStatus?
 }
 

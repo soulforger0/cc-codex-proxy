@@ -1,5 +1,5 @@
 use crate::{
-    config::DEFAULT_PORT,
+    config::{Provider, DEFAULT_PORT},
     error::{ProxyError, Result},
 };
 use chrono::Utc;
@@ -16,9 +16,13 @@ pub const MANAGED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_EFFORT_LEVEL",
     "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK",
@@ -29,6 +33,7 @@ const SHIM_STATE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct ClaudeSettingsOptions {
+    pub provider: Provider,
     pub port: u16,
     pub model: String,
     pub small_fast_model: String,
@@ -38,6 +43,7 @@ pub struct ClaudeSettingsOptions {
 impl Default for ClaudeSettingsOptions {
     fn default() -> Self {
         Self {
+            provider: Provider::Codex,
             port: DEFAULT_PORT,
             model: "gpt-5.4[1m]".into(),
             small_fast_model: "gpt-5.4-mini[1m]".into(),
@@ -64,6 +70,8 @@ pub struct ClaudeShimInstallOptions {
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeShimState {
     pub version: u32,
+    #[serde(default)]
+    pub provider: Provider,
     pub shim_path: PathBuf,
     pub real_claude_path: PathBuf,
     pub helper_path: PathBuf,
@@ -332,6 +340,7 @@ fn install_one_shim(
         real_claude_path,
         helper_path: options.helper_path.clone(),
         app_pid: options.app_pid,
+        provider: options.settings.provider,
         port: options.settings.port,
         model: options.settings.model.clone(),
         small_fast_model: options.settings.small_fast_model.clone(),
@@ -436,6 +445,24 @@ pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
         "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
         Value::String(options.small_fast_model.clone()),
     );
+    if options.provider == Provider::DeepSeek {
+        env.insert(
+            "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
+            Value::String(options.model.clone()),
+        );
+        env.insert(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
+            Value::String(options.model.clone()),
+        );
+        env.insert(
+            "CLAUDE_CODE_SUBAGENT_MODEL".into(),
+            Value::String(options.small_fast_model.clone()),
+        );
+        env.insert(
+            "CLAUDE_CODE_EFFORT_LEVEL".into(),
+            Value::String("max".into()),
+        );
+    }
     env.insert(
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
         Value::Number(options.auto_compact_window.into()),
@@ -702,6 +729,7 @@ fn shim_script(state: &ClaudeShimState) -> String {
         "#!/usr/bin/env bash\n\
          # {marker}\n\
          exec {helper} claude launch \\\n\
+           --provider {provider} \\\n\
            --app-pid {app_pid} \\\n\
            --real-claude {real_claude} \\\n\
            --model {model} \\\n\
@@ -711,6 +739,7 @@ fn shim_script(state: &ClaudeShimState) -> String {
            -- \"$@\"\n",
         marker = SHIM_MARKER,
         helper = shell_quote(&state.helper_path.display().to_string()),
+        provider = state.provider.as_str(),
         app_pid = state.app_pid,
         real_claude = shell_quote(&state.real_claude_path.display().to_string()),
         model = shell_quote(&state.model),
@@ -920,6 +949,34 @@ mod tests {
         assert_eq!(values["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "272000");
         assert_eq!(values["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
         assert_eq!(values["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"], "1");
+    }
+
+    #[test]
+    fn deepseek_managed_env_sets_provider_specific_model_aliases() {
+        let options = ClaudeSettingsOptions {
+            provider: Provider::DeepSeek,
+            port: DEFAULT_PORT,
+            model: "deepseek-v4-pro[1m]".into(),
+            small_fast_model: "deepseek-v4-flash".into(),
+            auto_compact_window: 1_000_000,
+        };
+        let values = managed_env_strings(&options)
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(values["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
+        assert_eq!(
+            values["ANTHROPIC_DEFAULT_OPUS_MODEL"],
+            "deepseek-v4-pro[1m]"
+        );
+        assert_eq!(
+            values["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+            "deepseek-v4-pro[1m]"
+        );
+        assert_eq!(values["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-v4-flash");
+        assert_eq!(values["CLAUDE_CODE_SUBAGENT_MODEL"], "deepseek-v4-flash");
+        assert_eq!(values["CLAUDE_CODE_EFFORT_LEVEL"], "max");
+        assert_eq!(values["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "1000000");
     }
 
     #[test]

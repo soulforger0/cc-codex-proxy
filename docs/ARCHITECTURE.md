@@ -1,10 +1,11 @@
 # Architecture
 
-CC Codex Proxy has one supported path:
+CC Codex Proxy has two supported upstream paths:
 
-Claude Code -> `127.0.0.1` Anthropic-compatible proxy -> ChatGPT subscription Codex Responses backend.
+- Claude Code -> `127.0.0.1` Anthropic-compatible proxy -> ChatGPT subscription Codex Responses backend.
+- Claude Code -> `127.0.0.1` Anthropic-compatible proxy -> DeepSeek Anthropic-compatible API.
 
-The proxy does not implement a generic provider abstraction. It keeps small internal module boundaries for auth, request translation, upstream transport, stream reduction, and Claude settings so each part can be tested in isolation.
+Provider selection is explicit through app/CLI config as `codex` or `deepseek`. The proxy keeps small internal module boundaries for auth, request translation, upstream transport, stream handling, and Claude settings so each part can be tested in isolation.
 
 ## Runtime
 
@@ -14,7 +15,7 @@ The proxy does not implement a generic provider abstraction. It keeps small inte
 - Proxy startup is blocked while existing Claude Code processes are running, so active sessions do not silently switch backend assumptions mid-session.
 - `cc-codex-proxy serve` binds only to `127.0.0.1`.
 - `/v1/messages` streams Anthropic SSE back to Claude Code without buffering the full upstream response.
-- Non-streaming requests are accumulated only after the upstream stream completes.
+- Codex non-streaming requests are accumulated only after the upstream stream completes; DeepSeek non-streaming responses are passed through as JSON.
 - Dropping the downstream response body drops the upstream request stream, so client disconnects cancel in-flight work promptly.
 - Upstream 429/403/400 responses are returned to Claude Code as failures. The proxy does not queue or retry 429s.
 
@@ -32,10 +33,13 @@ The Codex upstream side supports three modes through `codex.transport` or `CCP_C
 
 Both upstream modes are reduced into the same internal byte stream and then translated into Anthropic-compatible events. The proxy only falls back before an upstream response stream is committed. Once streaming has started, it surfaces stream errors instead of replaying the request, because replaying a partially served agent turn can duplicate tool calls or chargeable work.
 
+DeepSeek uses HTTPS only. It forwards Anthropic-shaped requests to `deepseek.base_url` plus `/v1/messages`; there is no WebSocket mode or transport fallback for DeepSeek.
+
 ## Fallback Strategy
 
 - Transport fallback: `auto` demotes WebSocket to HTTP SSE for a short cooldown after setup failure or a silent first-event timeout. This avoids a per-request WebSocket timeout tax when a network, proxy, or upstream deployment rejects upgrades or accepts the socket without producing response events.
 - Auth fallback: a Codex 401 forces one token refresh and one retry.
+- DeepSeek auth and capacity errors are not retried. The proxy surfaces upstream `401`, `402`, `422`, `429`, `500`, `503`, and `Retry-After` directly to Claude Code.
 - Launch fallback: the managed `claude` shim only injects proxy environment variables while the app PID is alive and `/healthz` succeeds. If the app is gone, it launches the original Claude command without proxy variables. If the app is alive but the helper is unhealthy, it fails fast so new sessions do not start with inconsistent routing.
 - Capacity fallback: 429, 403, 400, and `Retry-After` are passed through to Claude Code. The proxy does not queue, fan out, or retry rate-limited work because that would hide subscription limits and can amplify load.
 
@@ -47,6 +51,8 @@ Recommended setup: leave app users on `http`; use `auto` only for controlled rel
 - Tokens are stored in `~/Library/Application Support/CCCodexProxy/auth.json` with user-only file permissions.
 - Access-token refresh is single-flight inside `AuthManager`.
 - A 401 response from Codex forces one refresh and one retry.
+- DeepSeek uses an API key from `DEEPSEEK_API_KEY` or `~/Library/Application Support/CCCodexProxy/deepseek-api-key`.
+- DeepSeek API keys are stored with user-only file permissions and are never written to Claude Code environment variables, shim state, admin JSON, or logs.
 
 ## Translation
 
@@ -54,6 +60,7 @@ Recommended setup: leave app users on `http`; use `auto` only for controlled rel
 - Hosted web search maps to Codex `web_search`.
 - Unsupported reasoning stream events are dropped.
 - Image blocks inside tool results become text placeholders because this proxy serializes function outputs as text for Codex compatibility.
+- DeepSeek does not use the Codex translator. It receives the Anthropic request body directly after model resolution and local rejection of unsupported image/document blocks.
 
 ### Claude Code To Responses Mapping
 
@@ -80,6 +87,15 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting with `strict: true`; object schemas are normalized so all properties are required. |
 | `x-claude-code-session-id` | upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. The proxy does not send `prompt_cache_key` in the body on the ChatGPT Codex path. |
 
+### DeepSeek Mapping
+
+| Claude Code / Anthropic field | DeepSeek field | Notes |
+| --- | --- | --- |
+| `model` | `model` | Resolved through provider-scoped `model-profiles.json`; defaults are `deepseek-v4-pro` and `deepseek-v4-flash`. |
+| messages, system, tools, tool choice, output config | same Anthropic field | Forwarded directly to DeepSeek's Anthropic-compatible API. |
+| image/document blocks | rejected locally | DeepSeek's Anthropic-compatible API does not support those content blocks. |
+| `stream` | `stream` | Streaming SSE and non-streaming JSON are passed through. |
+
 ### Context Compaction
 
 Claude Code owns conversation compaction when it talks to a gateway. The proxy supports that path by exposing `/v1/messages/count_tokens` and by installing `CLAUDE_CODE_AUTO_COMPACT_WINDOW` so Claude Code compacts near the Codex context window rather than relying on a model-name heuristic.
@@ -103,9 +119,10 @@ ChatGPT Codex subscription cost and rate-limit state are not exposed through a s
 - Admin token: `~/Library/Application Support/CCCodexProxy/admin-token`
 - Claude shim state: `~/Library/Application Support/CCCodexProxy/claude-shim.json`
 - Auth: `~/Library/Application Support/CCCodexProxy/auth.json`
+- DeepSeek API key: `~/Library/Application Support/CCCodexProxy/deepseek-api-key`
 - Logs: `~/Library/Logs/CCCodexProxy/proxy.log`
 
-Model names are intentionally data-driven. If ChatGPT Codex model identifiers change, update `model-profiles.json` instead of rebuilding.
+Model names are intentionally data-driven and provider-scoped. If ChatGPT Codex or DeepSeek model identifiers change, update `model-profiles.json` instead of rebuilding.
 
 ## Robustness Targets
 

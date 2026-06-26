@@ -1,10 +1,14 @@
-use crate::error::{ProxyError, Result};
+use crate::{
+    config::Provider,
+    error::{ProxyError, Result},
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fs, io::ErrorKind, path::Path};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ModelProfile {
+    pub provider: Provider,
     pub id: String,
     pub upstream_model: String,
     pub context_window: u32,
@@ -15,6 +19,7 @@ pub struct ModelProfile {
 impl Default for ModelProfile {
     fn default() -> Self {
         Self {
+            provider: Provider::Codex,
             id: String::new(),
             upstream_model: String::new(),
             context_window: 272_000,
@@ -26,6 +31,7 @@ impl Default for ModelProfile {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
+    pub provider: Provider,
     pub requested: String,
     pub public_id: String,
     pub upstream_model: String,
@@ -42,7 +48,10 @@ impl ModelRegistry {
     pub fn load_or_create(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
             Ok(raw) => {
-                let profiles = serde_json::from_str::<Vec<ModelProfile>>(&raw)?;
+                let mut profiles = serde_json::from_str::<Vec<ModelProfile>>(&raw)?;
+                if merge_missing_default_profiles(&mut profiles) {
+                    fs::write(path, serde_json::to_string_pretty(&profiles)?)?;
+                }
                 Ok(Self { profiles })
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -61,7 +70,7 @@ impl ModelRegistry {
         Self { profiles }
     }
 
-    pub fn resolve(&self, incoming: &str) -> Result<ResolvedModel> {
+    pub fn resolve(&self, provider: Provider, incoming: &str) -> Result<ResolvedModel> {
         let stripped = strip_context_hint(incoming);
         let (base, service_tier) = if let Some(base) = stripped.strip_suffix("-fast") {
             (base.to_string(), Some("priority".to_string()))
@@ -71,11 +80,15 @@ impl ModelRegistry {
         let profile = self
             .profiles
             .iter()
-            .find(|profile| profile.id == base || profile.upstream_model == base)
+            .find(|profile| {
+                profile.provider == provider
+                    && (profile.id == base || profile.upstream_model == base)
+            })
             .ok_or_else(|| {
                 ProxyError::InvalidRequest(format!(
-                    "Unknown model \"{incoming}\". Supported: {}.",
-                    self.supported_models().join(", ")
+                    "Unknown {} model \"{incoming}\". Supported: {}.",
+                    provider.as_str(),
+                    self.supported_models(provider).join(", ")
                 ))
             })?;
         if service_tier.is_some() && !profile.supports_fast {
@@ -85,6 +98,7 @@ impl ModelRegistry {
             )));
         }
         Ok(ResolvedModel {
+            provider,
             requested: incoming.to_string(),
             public_id: profile.id.clone(),
             upstream_model: profile.upstream_model.clone(),
@@ -93,9 +107,13 @@ impl ModelRegistry {
         })
     }
 
-    pub fn supported_models(&self) -> Vec<String> {
+    pub fn supported_models(&self, provider: Provider) -> Vec<String> {
         let mut out = BTreeSet::new();
-        for profile in &self.profiles {
+        for profile in self
+            .profiles
+            .iter()
+            .filter(|profile| profile.provider == provider)
+        {
             out.insert(profile.id.clone());
             if profile.supports_fast {
                 out.insert(format!("{}-fast", profile.id));
@@ -104,10 +122,10 @@ impl ModelRegistry {
         out.into_iter().collect()
     }
 
-    pub fn default_small_fast(&self) -> Option<&ModelProfile> {
+    pub fn default_small_fast(&self, provider: Provider) -> Option<&ModelProfile> {
         self.profiles
             .iter()
-            .find(|profile| profile.default_small_fast)
+            .find(|profile| profile.provider == provider && profile.default_small_fast)
     }
 }
 
@@ -118,6 +136,7 @@ pub fn strip_context_hint(model: &str) -> String {
 pub fn default_profiles() -> Vec<ModelProfile> {
     vec![
         ModelProfile {
+            provider: Provider::Codex,
             id: "gpt-5.5".into(),
             upstream_model: "gpt-5.5".into(),
             context_window: 272_000,
@@ -125,6 +144,7 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             default_small_fast: false,
         },
         ModelProfile {
+            provider: Provider::Codex,
             id: "gpt-5.4".into(),
             upstream_model: "gpt-5.4".into(),
             context_window: 272_000,
@@ -132,6 +152,7 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             default_small_fast: false,
         },
         ModelProfile {
+            provider: Provider::Codex,
             id: "gpt-5.4-mini".into(),
             upstream_model: "gpt-5.4-mini".into(),
             context_window: 272_000,
@@ -139,6 +160,7 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             default_small_fast: true,
         },
         ModelProfile {
+            provider: Provider::Codex,
             id: "gpt-5.3-codex".into(),
             upstream_model: "gpt-5.3-codex".into(),
             context_window: 272_000,
@@ -146,6 +168,7 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             default_small_fast: false,
         },
         ModelProfile {
+            provider: Provider::Codex,
             id: "gpt-5.3-codex-spark".into(),
             upstream_model: "gpt-5.3-codex-spark".into(),
             context_window: 272_000,
@@ -153,13 +176,44 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             default_small_fast: false,
         },
         ModelProfile {
+            provider: Provider::Codex,
             id: "gpt-5.2".into(),
             upstream_model: "gpt-5.2".into(),
             context_window: 272_000,
             supports_fast: true,
             default_small_fast: false,
         },
+        ModelProfile {
+            provider: Provider::DeepSeek,
+            id: "deepseek-v4-pro".into(),
+            upstream_model: "deepseek-v4-pro".into(),
+            context_window: 1_000_000,
+            supports_fast: false,
+            default_small_fast: false,
+        },
+        ModelProfile {
+            provider: Provider::DeepSeek,
+            id: "deepseek-v4-flash".into(),
+            upstream_model: "deepseek-v4-flash".into(),
+            context_window: 1_000_000,
+            supports_fast: false,
+            default_small_fast: true,
+        },
     ]
+}
+
+fn merge_missing_default_profiles(profiles: &mut Vec<ModelProfile>) -> bool {
+    let mut changed = false;
+    for default in default_profiles() {
+        let exists = profiles
+            .iter()
+            .any(|profile| profile.provider == default.provider && profile.id == default.id);
+        if !exists {
+            profiles.push(default);
+            changed = true;
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -169,7 +223,9 @@ mod tests {
     #[test]
     fn resolves_context_hint_and_fast_suffix() {
         let registry = ModelRegistry::from_profiles(default_profiles());
-        let resolved = registry.resolve("gpt-5.4-fast[1m]").unwrap();
+        let resolved = registry
+            .resolve(Provider::Codex, "gpt-5.4-fast[1m]")
+            .unwrap();
         assert_eq!(resolved.upstream_model, "gpt-5.4");
         assert_eq!(resolved.service_tier.as_deref(), Some("priority"));
     }
@@ -177,5 +233,38 @@ mod tests {
     #[test]
     fn strips_context_hint() {
         assert_eq!(strip_context_hint("gpt-5.4[1m]"), "gpt-5.4");
+    }
+
+    #[test]
+    fn resolves_deepseek_defaults_by_provider() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+        let resolved = registry
+            .resolve(Provider::DeepSeek, "deepseek-v4-pro[1m]")
+            .unwrap();
+        assert_eq!(resolved.upstream_model, "deepseek-v4-pro");
+        assert_eq!(resolved.context_window, 1_000_000);
+        assert_eq!(
+            registry.default_small_fast(Provider::DeepSeek).unwrap().id,
+            "deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn migrates_missing_deepseek_profiles() {
+        let mut profiles = vec![ModelProfile {
+            provider: Provider::Codex,
+            id: "custom".into(),
+            upstream_model: "custom".into(),
+            context_window: 123,
+            supports_fast: false,
+            default_small_fast: false,
+        }];
+        assert!(merge_missing_default_profiles(&mut profiles));
+        assert!(profiles.iter().any(
+            |profile| profile.provider == Provider::DeepSeek && profile.id == "deepseek-v4-pro"
+        ));
+        assert!(profiles
+            .iter()
+            .any(|profile| profile.provider == Provider::Codex && profile.id == "custom"));
     }
 }

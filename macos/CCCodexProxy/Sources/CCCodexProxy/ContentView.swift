@@ -27,6 +27,8 @@ struct ContentView: View {
         .animation(AppTheme.motion, value: model.isLoggingIn)
         .animation(AppTheme.motion, value: model.isCheckingAuthStatus)
         .animation(AppTheme.motion, value: model.isInstallingClaudeShim)
+        .animation(AppTheme.motion, value: model.isSavingDeepSeekAPIKey)
+        .animation(AppTheme.motion, value: model.provider)
         .animation(AppTheme.motion, value: settingsPreviewTab)
         .animation(AppTheme.motion, value: showAdvancedClaudeSettings)
     }
@@ -172,6 +174,17 @@ struct ContentView: View {
             sectionTitle("Claude models", systemImage: "cpu")
 
             VStack(alignment: .leading, spacing: 8) {
+                settingsInputRow(title: "Provider", detail: "Upstream API") {
+                    Picker("Provider", selection: $model.provider) {
+                        Text("Codex").tag("codex")
+                        Text("DeepSeek").tag("deepseek")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 210)
+                    .onChange(of: model.provider) { _ in
+                        Task { await model.applyProviderChange() }
+                    }
+                }
                 settingsInputRow(title: "Model", detail: "Primary model name passed to Claude Code") {
                     modelTextField("Model", text: $model.model)
                 }
@@ -211,37 +224,79 @@ struct ContentView: View {
     }
 
     private var authStatus: some View {
-        statusCard(
-            title: authStatusTitle,
-            detail: authStatusDetail,
-            systemImage: model.isAuthenticated ? "checkmark.seal.fill" : "person.crop.circle.badge.exclamationmark",
-            tint: authStatusColor,
-            accessibilityLabel: model.isAuthenticated ? "OAuth signed in" : "OAuth not signed in"
-        ) {
-            if model.isLoggingIn || model.isCheckingAuthStatus {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel(model.isLoggingIn ? "OAuth login in progress" : "Checking OAuth status")
-            } else if !model.isAuthenticated {
-                Button {
-                    Task { await model.login() }
-                } label: {
-                    Label("Login", systemImage: "person.crop.circle.badge.checkmark")
-                }
-                .buttonStyle(AppPressButtonStyle(tint: authStatusColor, compact: true))
-                .accessibilityHint("Start ChatGPT OAuth login")
-            } else {
-                Text("OAuth OK")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(AppTheme.subtleFill))
-                    .overlay(
-                        Capsule().stroke(authStatusColor.opacity(0.24), lineWidth: 1)
-                    )
-                    .foregroundStyle(authStatusColor)
+        VStack(alignment: .leading, spacing: 8) {
+            statusCard(
+                title: authStatusTitle,
+                detail: authStatusDetail,
+                systemImage: model.isAuthenticated ? "checkmark.seal.fill" : "person.crop.circle.badge.exclamationmark",
+                tint: authStatusColor,
+                accessibilityLabel: model.provider == "deepseek"
+                    ? (model.isAuthenticated ? "DeepSeek API key saved" : "DeepSeek API key not saved")
+                    : (model.isAuthenticated ? "OAuth signed in" : "OAuth not signed in")
+            ) {
+                authAccessory
+            }
+
+            if model.provider == "deepseek" {
+                deepSeekKeyInput
             }
         }
+    }
+
+    @ViewBuilder
+    private var authAccessory: some View {
+        if model.isLoggingIn || model.isCheckingAuthStatus || model.isSavingDeepSeekAPIKey {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel(model.provider == "deepseek" ? "Checking DeepSeek API key" : "Checking OAuth status")
+        } else if !model.isAuthenticated && model.provider == "codex" {
+            Button {
+                Task { await model.login() }
+            } label: {
+                Label("Login", systemImage: "person.crop.circle.badge.checkmark")
+            }
+            .buttonStyle(AppPressButtonStyle(tint: authStatusColor, compact: true))
+            .accessibilityHint("Start ChatGPT OAuth login")
+        } else {
+            Text(model.provider == "deepseek"
+                ? (model.isAuthenticated ? "Key OK" : "Key needed")
+                : "OAuth OK")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(AppTheme.subtleFill))
+                .overlay(
+                    Capsule().stroke(authStatusColor.opacity(0.24), lineWidth: 1)
+                )
+                .foregroundStyle(authStatusColor)
+        }
+    }
+
+    private var deepSeekKeyInput: some View {
+        HStack(alignment: .center, spacing: 10) {
+            SecureField("DeepSeek API key", text: $model.deepSeekAPIKey)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .onSubmit {
+                    Task { await model.saveDeepSeekAPIKey() }
+                }
+            Button {
+                Task { await model.saveDeepSeekAPIKey() }
+            } label: {
+                Label("Save Key", systemImage: "key.fill")
+            }
+            .buttonStyle(AppPressButtonStyle(tint: AppTheme.accent, compact: true))
+            .disabled(model.deepSeekAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isSavingDeepSeekAPIKey)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+                .fill(AppTheme.insetSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+                .stroke(AppTheme.hairline, lineWidth: 1)
+        )
     }
 
     private var authStatusColor: Color {
@@ -249,6 +304,9 @@ struct ContentView: View {
     }
 
     private var authStatusTitle: String {
+        if model.isSavingDeepSeekAPIKey {
+            return "Saving DeepSeek key"
+        }
         if model.isLoggingIn {
             return "OAuth in progress"
         }
@@ -259,11 +317,14 @@ struct ContentView: View {
     }
 
     private var authStatusDetail: String {
+        if model.isSavingDeepSeekAPIKey {
+            return "Writing the local API key file."
+        }
         if model.isLoggingIn {
             return "Complete the browser sign-in to finish."
         }
         if model.isCheckingAuthStatus {
-            return "Reading the local auth file."
+            return model.provider == "deepseek" ? "Checking DeepSeek API key status." : "Reading the local auth file."
         }
         return model.authDetailText
     }
@@ -273,6 +334,8 @@ struct ContentView: View {
             return AppTheme.muted
         }
         switch model.transportCurrentMethod {
+        case "deepseek":
+            return AppTheme.accent
         case "websocket":
             return AppTheme.success
         case "http-sse":

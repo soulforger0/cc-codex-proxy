@@ -7,12 +7,13 @@ use proxy_core::{
         live_claude_sessions_message, managed_env_strings, preview_settings, restore_latest_backup,
         restore_shim, ClaudeSettingsOptions, ClaudeShimInstallOptions, MANAGED_ENV_KEYS,
     },
-    config::{AppConfig, DEFAULT_PORT},
+    config::{AppConfig, Provider, DEFAULT_PORT},
+    deepseek::{api_key_status, clear_api_key, store_api_key},
     logging,
     model::ModelRegistry,
     serve,
 };
-use std::{path::PathBuf, process::Command as StdCommand, sync::Arc, time::Duration};
+use std::{io::Read, path::PathBuf, process::Command as StdCommand, sync::Arc, time::Duration};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -39,25 +40,44 @@ enum Command {
 struct ServeArgs {
     #[arg(long, env = "PORT")]
     port: Option<u16>,
+    #[arg(long)]
+    provider: Option<Provider>,
 }
 
 #[derive(Debug, Args)]
 struct DoctorArgs {
-    #[arg(long, default_value = "gpt-5.4")]
-    model: String,
+    #[arg(long)]
+    provider: Option<Provider>,
+    #[arg(long)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
 enum AuthSubcommand {
-    Login,
-    Status,
-    Logout,
+    Login(AuthProviderArgs),
+    Status(AuthProviderArgs),
+    Logout(AuthProviderArgs),
+    SetApiKey(SetApiKeyArgs),
 }
 
 #[derive(Debug, Args)]
 struct AuthCommand {
     #[command(subcommand)]
     command: AuthSubcommand,
+}
+
+#[derive(Debug, Args)]
+struct AuthProviderArgs {
+    #[arg(long, default_value = "codex")]
+    provider: Provider,
+}
+
+#[derive(Debug, Args)]
+struct SetApiKeyArgs {
+    #[arg(long, default_value = "deepseek")]
+    provider: Provider,
+    #[arg(long)]
+    stdin: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -79,10 +99,12 @@ struct ClaudeCommand {
 
 #[derive(Debug, Args)]
 struct InstallSettingsArgs {
-    #[arg(long, default_value = "gpt-5.4[1m]")]
-    model: String,
-    #[arg(long = "small-model", default_value = "gpt-5.4-mini[1m]")]
-    small_model: String,
+    #[arg(long, default_value = "codex")]
+    provider: Provider,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long = "small-model")]
+    small_model: Option<String>,
     #[arg(long, default_value_t = DEFAULT_PORT)]
     port: u16,
     #[arg(long, default_value_t = 272_000)]
@@ -139,10 +161,10 @@ struct BenchArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli
-        .command
-        .unwrap_or(Command::Serve(ServeArgs { port: None }))
-    {
+    match cli.command.unwrap_or(Command::Serve(ServeArgs {
+        port: None,
+        provider: None,
+    })) {
         Command::Serve(args) => cmd_serve(args).await,
         Command::Auth(args) => cmd_auth(args).await,
         Command::Doctor(args) => cmd_doctor(args).await,
@@ -158,9 +180,13 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     if let Some(port) = args.port {
         config.port = port;
     }
+    if let Some(provider) = args.provider {
+        config.provider = provider;
+    }
     let _guards = logging::init(&paths, config.log.stderr, config.log.verbose)?;
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
+        provider = config.provider.as_str(),
         port = config.port,
         transport = ?config.codex.transport,
         base_url = %config.codex.base_url,
@@ -173,12 +199,16 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     println!("Health: http://{}/healthz", handle.addr);
     println!("Logs: {}", paths.logs_dir.join("proxy.log").display());
     println!("Claude Code:");
-    println!("  export ANTHROPIC_BASE_URL=\"http://{}\"", handle.addr);
-    println!("  export ANTHROPIC_AUTH_TOKEN=\"unused\"");
-    println!("  export ANTHROPIC_MODEL=\"gpt-5.4[1m]\"");
-    println!("  export ANTHROPIC_DEFAULT_HAIKU_MODEL=\"gpt-5.4-mini[1m]\"");
-    println!("  export ANTHROPIC_SMALL_FAST_MODEL=\"gpt-5.4-mini[1m]\"");
-    println!("  export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=\"1\"");
+    let settings = ClaudeSettingsOptions {
+        provider: config.provider,
+        port: config.port,
+        model: default_model(config.provider).into(),
+        small_fast_model: default_small_model(config.provider).into(),
+        auto_compact_window: default_auto_compact_window(config.provider),
+    };
+    for (key, value) in managed_env_strings(&settings) {
+        println!("  export {key}=\"{value}\"");
+    }
     tokio::signal::ctrl_c().await?;
     handle.stop().await;
     Ok(())
@@ -188,7 +218,8 @@ async fn cmd_auth(args: AuthCommand) -> Result<()> {
     let (config, paths) = AppConfig::load_default()?;
     let manager = auth_manager(&config, &paths);
     match args.command {
-        AuthSubcommand::Login => {
+        AuthSubcommand::Login(args) => {
+            ensure_codex_provider(args.provider, "login")?;
             let opts =
                 default_oauth_options(config.codex.oauth_issuer, config.codex.oauth_client_id);
             let tokens = browser_login(opts).await?;
@@ -200,23 +231,59 @@ async fn cmd_auth(args: AuthCommand) -> Result<()> {
             println!("Expires: {}", stored.expires_at_ms);
             println!("Storage: {}", manager.storage_label());
         }
-        AuthSubcommand::Status => match manager.status().await? {
-            Some(auth) => {
-                println!("Authenticated: yes");
-                println!("Storage: {}", manager.storage_label());
-                if let Some(account_id) = auth.account_id {
-                    println!("Account: {account_id}");
+        AuthSubcommand::Status(args) => match args.provider {
+            Provider::Codex => match manager.status().await? {
+                Some(auth) => {
+                    println!("Provider: codex");
+                    println!("Authenticated: yes");
+                    println!("Storage: {}", manager.storage_label());
+                    if let Some(account_id) = auth.account_id {
+                        println!("Account: {account_id}");
+                    }
+                    println!("ExpiresAtMs: {}", auth.expires_at_ms);
                 }
-                println!("ExpiresAtMs: {}", auth.expires_at_ms);
-            }
-            None => {
-                println!("Authenticated: no");
-                std::process::exit(1);
+                None => {
+                    println!("Provider: codex");
+                    println!("Authenticated: no");
+                    std::process::exit(1);
+                }
+            },
+            Provider::DeepSeek => {
+                let status = api_key_status(&paths.deepseek_api_key_file);
+                println!("Provider: deepseek");
+                println!(
+                    "Authenticated: {}",
+                    if status.configured { "yes" } else { "no" }
+                );
+                if let Some(source) = status.source {
+                    println!("Storage: {source}");
+                }
+                if !status.configured {
+                    std::process::exit(1);
+                }
             }
         },
-        AuthSubcommand::Logout => {
-            manager.logout().await?;
-            println!("Logged out.");
+        AuthSubcommand::Logout(args) => match args.provider {
+            Provider::Codex => {
+                manager.logout().await?;
+                println!("Logged out.");
+            }
+            Provider::DeepSeek => {
+                clear_api_key(&paths.deepseek_api_key_file)?;
+                println!("DeepSeek API key removed.");
+            }
+        },
+        AuthSubcommand::SetApiKey(args) => {
+            if args.provider != Provider::DeepSeek {
+                anyhow::bail!("set-api-key currently supports --provider deepseek only");
+            }
+            if !args.stdin {
+                anyhow::bail!("pass --stdin and provide the DeepSeek API key on stdin");
+            }
+            let mut api_key = String::new();
+            std::io::stdin().read_to_string(&mut api_key)?;
+            store_api_key(&paths.deepseek_api_key_file, &api_key)?;
+            println!("DeepSeek API key saved.");
         }
     }
     Ok(())
@@ -224,24 +291,45 @@ async fn cmd_auth(args: AuthCommand) -> Result<()> {
 
 async fn cmd_doctor(args: DoctorArgs) -> Result<()> {
     let (config, paths) = AppConfig::load_default()?;
+    let provider = args.provider.unwrap_or(config.provider);
+    let model = args
+        .model
+        .unwrap_or_else(|| default_model(provider).to_string());
     let registry = ModelRegistry::load_or_create(&paths.model_profiles_file)?;
-    let resolved = registry.resolve(&args.model)?;
+    let resolved = registry.resolve(provider, &model)?;
     println!("Config: {}", paths.config_file.display());
     println!("Model profiles: {}", paths.model_profiles_file.display());
-    println!("Model: {} -> {}", args.model, resolved.upstream_model);
-    println!("Transport: {:?}", config.codex.transport);
+    println!("Provider: {}", provider.as_str());
+    println!("Model: {} -> {}", model, resolved.upstream_model);
+    if provider == Provider::Codex {
+        println!("Transport: {:?}", config.codex.transport);
+    }
     let manager = auth_manager(&config, &paths);
-    match manager.get_auth().await {
-        Ok(auth) => {
-            println!("Auth: ok");
-            if let Some(account_id) = auth.account_id {
-                println!("Account: {account_id}");
+    match provider {
+        Provider::Codex => match manager.get_auth().await {
+            Ok(auth) => {
+                println!("Auth: ok");
+                if let Some(account_id) = auth.account_id {
+                    println!("Account: {account_id}");
+                }
+                println!("Storage: {}", manager.storage_label());
             }
-            println!("Storage: {}", manager.storage_label());
-        }
-        Err(err) => {
-            println!("Auth: failed ({err})");
-            std::process::exit(1);
+            Err(err) => {
+                println!("Auth: failed ({err})");
+                std::process::exit(1);
+            }
+        },
+        Provider::DeepSeek => {
+            let status = api_key_status(&paths.deepseek_api_key_file);
+            if status.configured {
+                println!("Auth: ok");
+                if let Some(source) = status.source {
+                    println!("Storage: {source}");
+                }
+            } else {
+                println!("Auth: failed (DeepSeek API key is not configured)");
+                std::process::exit(1);
+            }
         }
     }
     Ok(())
@@ -330,10 +418,16 @@ async fn cmd_claude(args: ClaudeCommand) -> Result<()> {
 }
 
 fn claude_settings_options(args: InstallSettingsArgs) -> ClaudeSettingsOptions {
+    let provider = args.provider;
     ClaudeSettingsOptions {
+        provider,
         port: args.port,
-        model: args.model,
-        small_fast_model: args.small_model,
+        model: args
+            .model
+            .unwrap_or_else(|| default_model(provider).to_string()),
+        small_fast_model: args
+            .small_model
+            .unwrap_or_else(|| default_small_model(provider).to_string()),
         auto_compact_window: args.auto_compact_window,
     }
 }
@@ -490,4 +584,33 @@ fn auth_manager(config: &AppConfig, paths: &proxy_core::AppPaths) -> AuthManager
             config.codex.oauth_client_id.clone(),
         )),
     )
+}
+
+fn ensure_codex_provider(provider: Provider, action: &str) -> Result<()> {
+    if provider == Provider::Codex {
+        Ok(())
+    } else {
+        anyhow::bail!("auth {action} uses ChatGPT OAuth and only supports --provider codex")
+    }
+}
+
+fn default_model(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "gpt-5.4[1m]",
+        Provider::DeepSeek => "deepseek-v4-pro[1m]",
+    }
+}
+
+fn default_small_model(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "gpt-5.4-mini[1m]",
+        Provider::DeepSeek => "deepseek-v4-flash",
+    }
+}
+
+fn default_auto_compact_window(provider: Provider) -> u32 {
+    match provider {
+        Provider::Codex => 272_000,
+        Provider::DeepSeek => 1_000_000,
+    }
 }

@@ -2,22 +2,23 @@ use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::State,
-    http::{header, Response, StatusCode},
+    http::{header, HeaderMap, Response, StatusCode},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use bytes::Bytes;
 use futures_util::{future::join_all, StreamExt};
 use proxy_core::{
     auth::{AuthManager, MemoryTokenStore, StoredAuth, TokenRefreshClient, TokenResponse},
-    config::{AppConfig, AppPaths, CodexTransport},
+    config::{AppConfig, AppPaths, CodexTransport, Provider},
+    deepseek::store_api_key,
     serve,
 };
 use std::{
     convert::Infallible,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Instant,
 };
@@ -109,6 +110,119 @@ async fn upstream_429_is_preserved() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "5");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn deepseek_non_streaming_request_is_forwarded_to_anthropic_messages() {
+    let state = Arc::new(DeepSeekMockState::default());
+    let upstream = start_mock_upstream(mock_deepseek_json_app(state.clone())).await;
+    let (config, paths) = test_deepseek_config(upstream).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "deepseek-v4-pro[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["content"][0]["text"], "hello from deepseek");
+    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        state.last_model.lock().unwrap().as_deref(),
+        Some("deepseek-v4-pro")
+    );
+    assert_eq!(
+        state.last_key.lock().unwrap().as_deref(),
+        Some("deepseek-secret")
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn deepseek_streaming_response_is_passed_through() {
+    let state = Arc::new(DeepSeekMockState::default());
+    let upstream = start_mock_upstream(mock_deepseek_streaming_app(state)).await;
+    let (config, paths) = test_deepseek_config(upstream).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("event: message_start"), "{body}");
+    assert!(body.contains("hello from deepseek stream"), "{body}");
+    assert!(body.contains("event: message_stop"), "{body}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn deepseek_upstream_errors_are_preserved() {
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::PAYMENT_REQUIRED,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        let upstream = start_mock_upstream(mock_deepseek_error_app(status)).await;
+        let (config, paths) = test_deepseek_config(upstream).await;
+        let server = serve(config, paths, test_auth()).await.unwrap();
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("http://{}/v1/messages", server.addr))
+            .json(&serde_json::json!({
+                "model": "deepseek-v4-pro",
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hello"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "7");
+        }
+        server.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn deepseek_missing_api_key_is_local_unauthorized() {
+    let upstream = start_mock_upstream(mock_deepseek_json_app(Arc::default())).await;
+    let (mut config, paths) = test_config(upstream, "/unused").await;
+    config.provider = Provider::DeepSeek;
+    config.deepseek.base_url = format!("http://{upstream}/anthropic");
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "deepseek-v4-pro",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     server.stop().await;
 }
 
@@ -248,6 +362,95 @@ fn mock_success_app() -> Router {
                      data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":3}}\n\n",
                 ))
                 .unwrap()
+        }),
+    )
+}
+
+#[derive(Default)]
+struct DeepSeekMockState {
+    calls: AtomicUsize,
+    last_model: Mutex<Option<String>>,
+    last_key: Mutex<Option<String>>,
+}
+
+fn mock_deepseek_json_app(state: Arc<DeepSeekMockState>) -> Router {
+    Router::new()
+        .route("/anthropic/v1/messages", post(mock_deepseek_json_response))
+        .with_state(state)
+}
+
+async fn mock_deepseek_json_response(
+    State(state): State<Arc<DeepSeekMockState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response<Body> {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    *state.last_model.lock().unwrap() = body
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    *state.last_key.lock().unwrap() = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "id": "msg_deepseek",
+                "type": "message",
+                "role": "assistant",
+                "model": "deepseek-v4-pro",
+                "content": [{"type": "text", "text": "hello from deepseek"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 3,
+                    "output_tokens": 3,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+fn mock_deepseek_streaming_app(state: Arc<DeepSeekMockState>) -> Router {
+    Router::new()
+        .route(
+            "/anthropic/v1/messages",
+            post(move || {
+                let state = state.clone();
+                async move {
+                    state.calls.fetch_add(1, Ordering::SeqCst);
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from(
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_deepseek\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}}\n\n\
+                         event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                         event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello from deepseek stream\"}}\n\n\
+                         event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+                         event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":3,\"output_tokens\":4,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}\n\n\
+                         event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                    ))
+                    .unwrap()
+                }
+            }),
+        )
+}
+
+fn mock_deepseek_error_app(status: StatusCode) -> Router {
+    Router::new().route(
+        "/anthropic/v1/messages",
+        post(move || async move {
+            let mut builder = Response::builder().status(status);
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                builder = builder.header(header::RETRY_AFTER, "7");
+            }
+            builder.body(Body::from("deepseek error")).unwrap()
         }),
     )
 }
@@ -508,12 +711,21 @@ async fn test_config(upstream: std::net::SocketAddr, path: &str) -> (AppConfig, 
         admin_token_file: dir.join("config/admin-token"),
         claude_shim_file: dir.join("config/claude-shim.json"),
         auth_file: dir.join("config/auth.json"),
+        deepseek_api_key_file: dir.join("config/deepseek-api-key"),
     };
     let mut config = AppConfig::default();
     config.port = 0;
     config.admin_token = "test-admin-token".into();
     config.codex.transport = CodexTransport::Http;
     config.codex.base_url = format!("http://{upstream}{path}");
+    (config, paths)
+}
+
+async fn test_deepseek_config(upstream: std::net::SocketAddr) -> (AppConfig, AppPaths) {
+    let (mut config, paths) = test_config(upstream, "/unused").await;
+    config.provider = Provider::DeepSeek;
+    config.deepseek.base_url = format!("http://{upstream}/anthropic");
+    store_api_key(&paths.deepseek_api_key_file, "deepseek-secret").unwrap();
     (config, paths)
 }
 

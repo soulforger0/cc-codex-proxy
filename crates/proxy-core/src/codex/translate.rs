@@ -417,10 +417,11 @@ fn normalize_strict_json_schema(schema: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ResolvedModel;
+    use crate::{config::Provider, model::ResolvedModel};
 
     fn resolved() -> ResolvedModel {
         ResolvedModel {
+            provider: Provider::Codex,
             requested: "gpt-5.4".into(),
             public_id: "gpt-5.4".into(),
             upstream_model: "gpt-5.4".into(),
