@@ -85,6 +85,7 @@ final class ProxyAppModel: ObservableObject {
 
     func startProxy() async {
         guard proxyProcess == nil else { return }
+        replaceCrossProviderModelDefaults()
         do {
             _ = try await runCLI(["claude", "check-live-sessions"])
         } catch {
@@ -176,6 +177,7 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func installClaudeSettings() async {
+        replaceCrossProviderModelDefaults()
         isInstallingClaudeSettings = true
         defer { isInstallingClaudeSettings = false }
 
@@ -192,6 +194,7 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func installClaudeShim(updateLastMessage: Bool = true) async {
+        replaceCrossProviderModelDefaults()
         isInstallingClaudeShim = true
         defer { isInstallingClaudeShim = false }
 
@@ -239,6 +242,7 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func refreshClaudeSettingsPreview() async {
+        replaceCrossProviderModelDefaults()
         isRefreshingClaudeSettings = true
         defer { isRefreshingClaudeSettings = false }
 
@@ -437,6 +441,33 @@ final class ProxyAppModel: ObservableObject {
             model = "gpt-5.5[1m]"
             smallModel = "gpt-5.4-mini[1m]"
             autoCompactWindow = 272_000
+        }
+    }
+
+    private func replaceCrossProviderModelDefaults() {
+        let primary = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let small = smallModel.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if provider == "deepseek" {
+            if primary.hasPrefix("gpt-") {
+                model = "deepseek-v4-pro[1m]"
+            }
+            if small.hasPrefix("gpt-") {
+                smallModel = "deepseek-v4-flash"
+            }
+            if autoCompactWindow == 272_000 {
+                autoCompactWindow = 1_000_000
+            }
+        } else {
+            if primary.hasPrefix("deepseek-") {
+                model = "gpt-5.5[1m]"
+            }
+            if small.hasPrefix("deepseek-") {
+                smallModel = "gpt-5.4-mini[1m]"
+            }
+            if autoCompactWindow == 1_000_000 {
+                autoCompactWindow = 272_000
+            }
         }
     }
 

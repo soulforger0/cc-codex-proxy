@@ -107,8 +107,8 @@ struct InstallSettingsArgs {
     small_model: Option<String>,
     #[arg(long, default_value_t = DEFAULT_PORT)]
     port: u16,
-    #[arg(long, default_value_t = 272_000)]
-    auto_compact_window: u32,
+    #[arg(long)]
+    auto_compact_window: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -428,7 +428,9 @@ fn claude_settings_options(args: InstallSettingsArgs) -> ClaudeSettingsOptions {
         small_fast_model: args
             .small_model
             .unwrap_or_else(|| default_small_model(provider).to_string()),
-        auto_compact_window: args.auto_compact_window,
+        auto_compact_window: args
+            .auto_compact_window
+            .unwrap_or_else(|| default_auto_compact_window(provider)),
     }
 }
 
@@ -612,5 +614,53 @@ fn default_auto_compact_window(provider: Provider) -> u32 {
     match provider {
         Provider::Codex => 272_000,
         Provider::DeepSeek => 1_000_000,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_settings_options_use_codex_defaults() {
+        let options = claude_settings_options(InstallSettingsArgs {
+            provider: Provider::Codex,
+            model: None,
+            small_model: None,
+            port: DEFAULT_PORT,
+            auto_compact_window: None,
+        });
+
+        assert_eq!(options.model, "gpt-5.4[1m]");
+        assert_eq!(options.small_fast_model, "gpt-5.4-mini[1m]");
+        assert_eq!(options.auto_compact_window, 272_000);
+    }
+
+    #[test]
+    fn claude_settings_options_use_deepseek_defaults() {
+        let options = claude_settings_options(InstallSettingsArgs {
+            provider: Provider::DeepSeek,
+            model: None,
+            small_model: None,
+            port: DEFAULT_PORT,
+            auto_compact_window: None,
+        });
+
+        assert_eq!(options.model, "deepseek-v4-pro[1m]");
+        assert_eq!(options.small_fast_model, "deepseek-v4-flash");
+        assert_eq!(options.auto_compact_window, 1_000_000);
+    }
+
+    #[test]
+    fn claude_settings_options_keep_explicit_auto_compact_window() {
+        let options = claude_settings_options(InstallSettingsArgs {
+            provider: Provider::DeepSeek,
+            model: None,
+            small_model: None,
+            port: DEFAULT_PORT,
+            auto_compact_window: Some(123_456),
+        });
+
+        assert_eq!(options.auto_compact_window, 123_456);
     }
 }

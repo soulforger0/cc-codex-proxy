@@ -147,6 +147,33 @@ async fn deepseek_non_streaming_request_is_forwarded_to_anthropic_messages() {
 }
 
 #[tokio::test]
+async fn deepseek_stale_codex_model_is_rewritten_before_forwarding() {
+    let state = Arc::new(DeepSeekMockState::default());
+    let upstream = start_mock_upstream(mock_deepseek_json_app(state.clone())).await;
+    let (config, paths) = test_deepseek_config(upstream).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "gpt-5.5[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        state.last_model.lock().unwrap().as_deref(),
+        Some("deepseek-v4-pro")
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn deepseek_streaming_response_is_passed_through() {
     let state = Arc::new(DeepSeekMockState::default());
     let upstream = start_mock_upstream(mock_deepseek_streaming_app(state)).await;

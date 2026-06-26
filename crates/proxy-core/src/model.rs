@@ -78,12 +78,8 @@ impl ModelRegistry {
             (stripped, None)
         };
         let profile = self
-            .profiles
-            .iter()
-            .find(|profile| {
-                profile.provider == provider
-                    && (profile.id == base || profile.upstream_model == base)
-            })
+            .find_profile(provider, &base)
+            .or_else(|| self.compatibility_profile(provider, &base))
             .ok_or_else(|| {
                 ProxyError::InvalidRequest(format!(
                     "Unknown {} model \"{incoming}\". Supported: {}.",
@@ -105,6 +101,25 @@ impl ModelRegistry {
             service_tier,
             context_window: profile.context_window,
         })
+    }
+
+    fn find_profile(&self, provider: Provider, model: &str) -> Option<&ModelProfile> {
+        self.profiles.iter().find(|profile| {
+            profile.provider == provider && (profile.id == model || profile.upstream_model == model)
+        })
+    }
+
+    fn compatibility_profile(&self, provider: Provider, model: &str) -> Option<&ModelProfile> {
+        if provider != Provider::DeepSeek || !model.starts_with("gpt-") {
+            return None;
+        }
+
+        let target = if model.contains("mini") {
+            "deepseek-v4-flash"
+        } else {
+            "deepseek-v4-pro"
+        };
+        self.find_profile(provider, target)
     }
 
     pub fn supported_models(&self, provider: Provider) -> Vec<String> {
@@ -247,6 +262,21 @@ mod tests {
             registry.default_small_fast(Provider::DeepSeek).unwrap().id,
             "deepseek-v4-flash"
         );
+    }
+
+    #[test]
+    fn deepseek_accepts_stale_codex_model_defaults() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+
+        let primary = registry.resolve(Provider::DeepSeek, "gpt-5.5[1m]").unwrap();
+        assert_eq!(primary.upstream_model, "deepseek-v4-pro");
+        assert_eq!(primary.public_id, "deepseek-v4-pro");
+
+        let small = registry
+            .resolve(Provider::DeepSeek, "gpt-5.4-mini[1m]")
+            .unwrap();
+        assert_eq!(small.upstream_model, "deepseek-v4-flash");
+        assert_eq!(small.public_id, "deepseek-v4-flash");
     }
 
     #[test]
