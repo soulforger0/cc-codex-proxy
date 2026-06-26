@@ -1,4 +1,5 @@
 .DS_Store
+.env.local
 /target/
 /.swiftpm/
 /macos/CCCodexProxy/.build/
