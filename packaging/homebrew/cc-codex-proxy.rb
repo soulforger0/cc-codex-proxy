@@ -1,7 +1,7 @@
 class CcCodexProxy < Formula
-  desc "Local Claude Code to ChatGPT Codex proxy"
+  desc "Local Claude Code proxy for ChatGPT Codex and DeepSeek"
   homepage "https://github.com/soulforger0/cc-codex-proxy"
-  url "https://github.com/soulforger0/cc-codex-proxy/archive/refs/tags/v0.1.2.tar.gz"
+  url "https://github.com/soulforger0/cc-codex-proxy/archive/refs/tags/v0.2.0.tar.gz"
   sha256 "PLACEHOLDER"
   license "MIT"
 
@@ -22,4 +22,3 @@ class CcCodexProxy < Formula
     assert_match "cc-codex-proxy", shell_output("#{bin}/cc-codex-proxy --help")
   end
 end
-

@@ -76,6 +76,13 @@ flowchart LR
 | Transport fallback | In `auto` mode, tries Codex WebSocket first and falls back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
+## What's New In 0.2.0
+
+- DeepSeek is now a first-class provider alongside ChatGPT Codex.
+- The app can store a DeepSeek API key locally, or the helper can read `DEEPSEEK_API_KEY`.
+- Provider-scoped model profiles add `deepseek-v4-pro` and `deepseek-v4-flash` defaults.
+- DeepSeek requests use the Anthropic-compatible API directly, while Codex keeps the existing Responses translation path.
+
 ## Compatibility
 
 | Item | Status |
