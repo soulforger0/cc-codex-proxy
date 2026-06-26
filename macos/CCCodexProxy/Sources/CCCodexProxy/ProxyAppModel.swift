@@ -13,6 +13,7 @@ final class ProxyAppModel: ObservableObject {
     @Published var isRestoringClaudeSettings = false
     @Published var isInstallingClaudeShim = false
     @Published var isSavingDeepSeekAPIKey = false
+    @Published var isDeepSeekKeyInputExpanded = false
     @Published var statusText = "Not checked"
     @Published var transportDetailText = "Start the proxy to see the active upstream method."
     @Published var transportBadgeText = "Waiting"
@@ -336,11 +337,17 @@ final class ProxyAppModel: ObservableObject {
             authDetailText = provider == "deepseek"
                 ? "Save a DeepSeek API key before starting the proxy."
                 : "Login to complete ChatGPT OAuth."
+            if provider == "deepseek" {
+                isDeepSeekKeyInputExpanded = true
+            }
             return
         }
 
         isAuthenticated = true
         authStatusText = provider == "deepseek" ? "API key saved" : "Signed in"
+        if provider == "deepseek" && deepSeekAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            isDeepSeekKeyInputExpanded = false
+        }
 
         if let account = value(for: "Account", in: output), !account.isEmpty {
             authDetailText = "Account \(account)"
@@ -358,11 +365,7 @@ final class ProxyAppModel: ObservableObject {
             let output = try await runCLI(["admin", "status", "--port", "\(port)"])
             let data = Data(output.utf8)
             let status = try JSONDecoder().decode(ProxyAdminStatus.self, from: data)
-            if status.provider == "deepseek" {
-                applyDeepSeekTransportStatus()
-            } else {
-                applyTransportStatus(status.transport)
-            }
+            applyTransportStatus(status.transport)
         } catch {
             transportDetailText = error.localizedDescription
             transportBadgeText = "Unknown"
@@ -469,13 +472,6 @@ final class ProxyAppModel: ObservableObject {
                 autoCompactWindow = 272_000
             }
         }
-    }
-
-    private func applyDeepSeekTransportStatus() {
-        transportConfiguredMode = "deepseek"
-        transportCurrentMethod = "deepseek"
-        transportBadgeText = "DeepSeek"
-        transportDetailText = "Using DeepSeek Anthropic API."
     }
 
     private func successMessage(from output: String) -> String {

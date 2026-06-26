@@ -114,18 +114,13 @@ async fn admin_status(
     } else {
         None
     };
-    let transport = state.codex.transport_status();
     Ok(Json(json!({
         "ok": true,
         "provider": state.config.provider.as_str(),
         "port": state.config.port,
         "configDir": state.paths.config_dir,
         "logsDir": state.paths.logs_dir,
-        "transport": {
-            "configured": configured_transport_name(&state.config.codex.transport),
-            "currentMethod": transport.current_method.map(transport_method_name),
-            "websocketCooldownMs": transport.websocket_cooldown_remaining.map(duration_millis_u64),
-        },
+        "transport": transport_status_json(&state),
         "models": state.registry.supported_models(state.config.provider),
         "deepseek": {
             "apiKey": state.deepseek.api_key_status(),
@@ -405,6 +400,24 @@ fn configured_transport_name(transport: &CodexTransport) -> &'static str {
         CodexTransport::Auto => "auto",
         CodexTransport::Http => "http-sse",
         CodexTransport::WebSocket => "websocket",
+    }
+}
+
+fn transport_status_json(state: &AppState) -> serde_json::Value {
+    match state.config.provider {
+        Provider::Codex => {
+            let transport = state.codex.transport_status();
+            json!({
+                "configured": configured_transport_name(&state.config.codex.transport),
+                "currentMethod": transport.current_method.map(transport_method_name),
+                "websocketCooldownMs": transport.websocket_cooldown_remaining.map(duration_millis_u64),
+            })
+        }
+        Provider::DeepSeek => json!({
+            "configured": "http-sse",
+            "currentMethod": "http-sse",
+            "websocketCooldownMs": null,
+        }),
     }
 }
 

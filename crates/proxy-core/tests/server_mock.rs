@@ -254,6 +254,20 @@ async fn deepseek_missing_api_key_is_local_unauthorized() {
 }
 
 #[tokio::test]
+async fn deepseek_admin_status_reports_http_sse_transport() {
+    let upstream = start_mock_upstream(mock_deepseek_json_app(Arc::default())).await;
+    let (config, paths) = test_deepseek_config(upstream).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+
+    let status = admin_status(server.addr).await;
+    assert_eq!(status["provider"], "deepseek");
+    assert_eq!(status["transport"]["configured"], "http-sse");
+    assert_eq!(status["transport"]["currentMethod"], "http-sse");
+    assert!(status["transport"]["websocketCooldownMs"].is_null());
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn auto_transport_falls_back_to_http_and_cools_down_websocket() {
     let state = Arc::new(HttpOnlyState::default());
     let upstream = start_mock_upstream(mock_http_only_app(state.clone())).await;

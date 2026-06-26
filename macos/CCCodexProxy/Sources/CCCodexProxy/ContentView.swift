@@ -28,6 +28,7 @@ struct ContentView: View {
         .animation(AppTheme.motion, value: model.isCheckingAuthStatus)
         .animation(AppTheme.motion, value: model.isInstallingClaudeShim)
         .animation(AppTheme.motion, value: model.isSavingDeepSeekAPIKey)
+        .animation(AppTheme.motion, value: model.isDeepSeekKeyInputExpanded)
         .animation(AppTheme.motion, value: model.provider)
         .animation(AppTheme.motion, value: settingsPreviewTab)
         .animation(AppTheme.motion, value: showAdvancedClaudeSettings)
@@ -237,8 +238,9 @@ struct ContentView: View {
                 authAccessory
             }
 
-            if model.provider == "deepseek" {
+            if model.provider == "deepseek", model.isDeepSeekKeyInputExpanded || !model.isAuthenticated {
                 deepSeekKeyInput
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
     }
@@ -249,6 +251,14 @@ struct ContentView: View {
             ProgressView()
                 .controlSize(.small)
                 .accessibilityLabel(model.provider == "deepseek" ? "Checking DeepSeek API key" : "Checking OAuth status")
+        } else if model.provider == "deepseek", model.isAuthenticated {
+            Button {
+                model.isDeepSeekKeyInputExpanded.toggle()
+            } label: {
+                Label(model.isDeepSeekKeyInputExpanded ? "Hide Key" : "Change Key", systemImage: model.isDeepSeekKeyInputExpanded ? "chevron.up" : "key.fill")
+            }
+            .buttonStyle(AppPressButtonStyle(tint: authStatusColor, compact: true))
+            .accessibilityHint(model.isDeepSeekKeyInputExpanded ? "Collapse the DeepSeek API key editor" : "Open the DeepSeek API key editor")
         } else if !model.isAuthenticated && model.provider == "codex" {
             Button {
                 Task { await model.login() }
