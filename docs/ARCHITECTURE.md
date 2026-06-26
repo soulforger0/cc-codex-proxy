@@ -60,7 +60,7 @@ Recommended setup: leave app users on `http`; use `auto` only for controlled rel
 - Hosted web search maps to Codex `web_search`.
 - Unsupported reasoning stream events are dropped.
 - Image blocks inside tool results become text placeholders because this proxy serializes function outputs as text for Codex compatibility.
-- DeepSeek does not use the Codex translator. It receives the Anthropic request body directly after model resolution and local rejection of unsupported image/document blocks.
+- DeepSeek does not use the Codex translator. It receives the Anthropic request body directly after model resolution, local rejection of unsupported image/document blocks, and normalization of `output_config.effort` to DeepSeek's effective effort scale.
 
 ### Claude Code To Responses Mapping
 
@@ -92,7 +92,8 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | Claude Code / Anthropic field | DeepSeek field | Notes |
 | --- | --- | --- |
 | `model` | `model` | Resolved through provider-scoped `model-profiles.json`; defaults are `deepseek-v4-pro` and `deepseek-v4-flash`. |
-| messages, system, tools, tool choice, output config | same Anthropic field | Forwarded directly to DeepSeek's Anthropic-compatible API. |
+| messages, system, tools, tool choice, output config | same Anthropic field | Forwarded directly to DeepSeek's Anthropic-compatible API, except `output_config.effort` is normalized. |
+| `output_config.effort` | `output_config.effort` | `auto` remains `auto`; `max` and `ultracode` become `max`; all other string effort values become `high`; absent or non-string values are left unchanged. |
 | image/document blocks | rejected locally | DeepSeek's Anthropic-compatible API does not support those content blocks. |
 | `stream` | `stream` | Streaming SSE and non-streaming JSON are passed through. |
 

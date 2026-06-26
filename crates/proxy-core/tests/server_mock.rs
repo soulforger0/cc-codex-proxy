@@ -147,6 +147,39 @@ async fn deepseek_non_streaming_request_is_forwarded_to_anthropic_messages() {
 }
 
 #[tokio::test]
+async fn deepseek_effort_is_normalized_before_forwarding() {
+    let state = Arc::new(DeepSeekMockState::default());
+    let upstream = start_mock_upstream(mock_deepseek_json_app(state.clone())).await;
+    let (config, paths) = test_deepseek_config(upstream).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "deepseek-v4-pro",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}],
+            "output_config": {
+                "effort": "xhigh",
+                "format": { "type": "json_schema" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let output_config = state.last_output_config.lock().unwrap().clone().unwrap();
+    assert_eq!(output_config["effort"], serde_json::json!("high"));
+    assert_eq!(
+        output_config["format"],
+        serde_json::json!({ "type": "json_schema" })
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn deepseek_stale_codex_model_is_rewritten_before_forwarding() {
     let state = Arc::new(DeepSeekMockState::default());
     let upstream = start_mock_upstream(mock_deepseek_json_app(state.clone())).await;
@@ -412,6 +445,7 @@ struct DeepSeekMockState {
     calls: AtomicUsize,
     last_model: Mutex<Option<String>>,
     last_key: Mutex<Option<String>>,
+    last_output_config: Mutex<Option<serde_json::Value>>,
 }
 
 fn mock_deepseek_json_app(state: Arc<DeepSeekMockState>) -> Router {
@@ -434,6 +468,7 @@ async fn mock_deepseek_json_response(
         .get("x-api-key")
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
+    *state.last_output_config.lock().unwrap() = body.get("output_config").cloned();
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")

@@ -57,6 +57,7 @@ impl DeepSeekClient {
         let api_key = resolve_api_key(&self.api_key_file)?;
         let mut body = request.clone();
         body.model = resolved.upstream_model.clone();
+        normalize_deepseek_effort(&mut body);
         let url = messages_url(&self.config.base_url);
         info!(
             model = %body.model,
@@ -219,6 +220,28 @@ fn validate_deepseek_request(request: &AnthropicRequest) -> Result<()> {
     Ok(())
 }
 
+fn normalize_deepseek_effort(request: &mut AnthropicRequest) {
+    let Some(Value::Object(output_config)) = request.output_config.as_mut() else {
+        return;
+    };
+    let Some(effort) = output_config
+        .get("effort")
+        .and_then(Value::as_str)
+        .map(normalize_deepseek_effort_value)
+    else {
+        return;
+    };
+    output_config.insert("effort".into(), Value::String(effort.into()));
+}
+
+fn normalize_deepseek_effort_value(effort: &str) -> &'static str {
+    match effort {
+        "auto" => "auto",
+        "max" | "ultracode" => "max",
+        _ => "high",
+    }
+}
+
 fn reject_unsupported_content(value: &Value) -> Result<()> {
     match value {
         Value::Array(items) => {
@@ -272,11 +295,79 @@ mod tests {
     use crate::config::Provider;
     use crate::model::ModelRegistry;
 
+    fn request_with_output_config(output_config: Option<Value>) -> AnthropicRequest {
+        AnthropicRequest {
+            model: "deepseek-v4-pro".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: None,
+            system: None,
+            messages: vec![],
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            output_config,
+            thinking: None,
+            extra: Default::default(),
+        }
+    }
+
     #[test]
     fn messages_url_appends_anthropic_messages_path() {
         assert_eq!(
             messages_url("https://api.deepseek.com/anthropic/"),
             "https://api.deepseek.com/anthropic/v1/messages"
+        );
+    }
+
+    #[test]
+    fn normalizes_deepseek_effort_to_supported_values() {
+        for (input, expected) in [
+            ("max", "max"),
+            ("ultracode", "max"),
+            ("auto", "auto"),
+            ("low", "high"),
+            ("medium", "high"),
+            ("high", "high"),
+            ("xhigh", "high"),
+            ("minimal", "high"),
+            ("none", "high"),
+            ("other", "high"),
+        ] {
+            let mut request =
+                request_with_output_config(Some(serde_json::json!({ "effort": input })));
+
+            normalize_deepseek_effort(&mut request);
+
+            assert_eq!(
+                request.output_config.unwrap()["effort"],
+                serde_json::json!(expected),
+                "input effort {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_deepseek_output_config_without_string_effort() {
+        let mut no_output_config = request_with_output_config(None);
+        normalize_deepseek_effort(&mut no_output_config);
+        assert!(no_output_config.output_config.is_none());
+
+        let mut missing_effort =
+            request_with_output_config(Some(serde_json::json!({ "format": { "type": "json" } })));
+        normalize_deepseek_effort(&mut missing_effort);
+        assert_eq!(
+            missing_effort.output_config.unwrap(),
+            serde_json::json!({ "format": { "type": "json" } })
+        );
+
+        let mut non_string_effort =
+            request_with_output_config(Some(serde_json::json!({ "effort": 3 })));
+        normalize_deepseek_effort(&mut non_string_effort);
+        assert_eq!(
+            non_string_effort.output_config.unwrap(),
+            serde_json::json!({ "effort": 3 })
         );
     }
 

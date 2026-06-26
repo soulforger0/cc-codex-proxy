@@ -458,10 +458,6 @@ pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
             "CLAUDE_CODE_SUBAGENT_MODEL".into(),
             Value::String(options.small_fast_model.clone()),
         );
-        env.insert(
-            "CLAUDE_CODE_EFFORT_LEVEL".into(),
-            Value::String("max".into()),
-        );
     }
     env.insert(
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
@@ -975,7 +971,7 @@ mod tests {
         );
         assert_eq!(values["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-v4-flash");
         assert_eq!(values["CLAUDE_CODE_SUBAGENT_MODEL"], "deepseek-v4-flash");
-        assert_eq!(values["CLAUDE_CODE_EFFORT_LEVEL"], "max");
+        assert!(!values.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
         assert_eq!(values["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "1000000");
     }
 
