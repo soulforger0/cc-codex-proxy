@@ -12,12 +12,14 @@ pub const APP_NAME: &str = "CCCodexProxy";
 pub const DEFAULT_PORT: u16 = 18765;
 pub const DEFAULT_CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const DEFAULT_DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com/anthropic";
+pub const DEFAULT_CUSTOM_OPENAI_ENDPOINT: &str = "";
 pub const DEFAULT_OAUTH_ISSUER: &str = "https://auth.openai.com";
 pub const DEFAULT_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const DEFAULT_ORIGINATOR: &str = "cc-codex-proxy";
 pub const OAUTH_CALLBACK_PORT: u16 = 1455;
 pub const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 pub const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+pub const CUSTOM_OPENAI_API_KEY_ENV: &str = "CUSTOM_OPENAI_API_KEY";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -29,6 +31,7 @@ pub struct AppPaths {
     pub claude_shim_file: PathBuf,
     pub auth_file: PathBuf,
     pub deepseek_api_key_file: PathBuf,
+    pub custom_openai_api_key_file: PathBuf,
 }
 
 impl AppPaths {
@@ -50,6 +53,7 @@ impl AppPaths {
             claude_shim_file: app_support.join("claude-shim.json"),
             auth_file: app_support.join("auth.json"),
             deepseek_api_key_file: app_support.join("deepseek-api-key"),
+            custom_openai_api_key_file: app_support.join("custom-openai-api-key"),
             config_dir: app_support,
             logs_dir,
         })
@@ -67,6 +71,8 @@ impl AppPaths {
 pub enum Provider {
     Codex,
     DeepSeek,
+    #[serde(rename = "custom-openai", alias = "custom-open-ai")]
+    CustomOpenAI,
 }
 
 impl Default for Provider {
@@ -80,6 +86,7 @@ impl Provider {
         match self {
             Provider::Codex => "codex",
             Provider::DeepSeek => "deepseek",
+            Provider::CustomOpenAI => "custom-openai",
         }
     }
 }
@@ -91,8 +98,11 @@ impl FromStr for Provider {
         match value.to_ascii_lowercase().as_str() {
             "codex" => Ok(Self::Codex),
             "deepseek" | "deep-seek" => Ok(Self::DeepSeek),
+            "custom-openai" | "custom_openai" | "openai-compatible" | "openai" | "custom" => {
+                Ok(Self::CustomOpenAI)
+            }
             other => Err(ProxyError::Config(format!(
-                "unsupported provider \"{other}\"; expected codex or deepseek"
+                "unsupported provider \"{other}\"; expected codex, deepseek, or custom-openai"
             ))),
         }
     }
@@ -158,6 +168,64 @@ impl Default for DeepSeekConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CustomOpenAIProtocol {
+    Responses,
+    ChatCompletions,
+}
+
+impl Default for CustomOpenAIProtocol {
+    fn default() -> Self {
+        Self::Responses
+    }
+}
+
+impl CustomOpenAIProtocol {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CustomOpenAIProtocol::Responses => "responses",
+            CustomOpenAIProtocol::ChatCompletions => "chat-completions",
+        }
+    }
+}
+
+impl FromStr for CustomOpenAIProtocol {
+    type Err = ProxyError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "responses" | "response" => Ok(Self::Responses),
+            "chat" | "chat-completions" | "chat_completions" | "completions" => {
+                Ok(Self::ChatCompletions)
+            }
+            other => Err(ProxyError::Config(format!(
+                "unsupported custom OpenAI protocol \"{other}\"; expected responses or chat-completions"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomOpenAIConfig {
+    pub base_url: String,
+    pub user_agent: String,
+    pub header_timeout_ms: u64,
+    pub protocol: CustomOpenAIProtocol,
+}
+
+impl Default for CustomOpenAIConfig {
+    fn default() -> Self {
+        Self {
+            base_url: DEFAULT_CUSTOM_OPENAI_ENDPOINT.to_string(),
+            user_agent: format!("{DEFAULT_ORIGINATOR}/{}", env!("CARGO_PKG_VERSION")),
+            header_timeout_ms: 60_000,
+            protocol: CustomOpenAIProtocol::Responses,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
@@ -182,6 +250,7 @@ pub struct AppConfig {
     pub provider: Provider,
     pub codex: CodexConfig,
     pub deepseek: DeepSeekConfig,
+    pub custom_openai: CustomOpenAIConfig,
     pub log: LogConfig,
 }
 
@@ -193,6 +262,7 @@ impl Default for AppConfig {
             provider: Provider::Codex,
             codex: CodexConfig::default(),
             deepseek: DeepSeekConfig::default(),
+            custom_openai: CustomOpenAIConfig::default(),
             log: LogConfig::default(),
         }
     }
@@ -233,6 +303,14 @@ impl AppConfig {
         }
         if let Ok(url) = env::var("CCP_DEEPSEEK_BASE_URL") {
             self.deepseek.base_url = url;
+        }
+        if let Ok(url) = env::var("CCP_CUSTOM_OPENAI_BASE_URL") {
+            self.custom_openai.base_url = url;
+        }
+        if let Ok(protocol) = env::var("CCP_CUSTOM_OPENAI_PROTOCOL") {
+            if let Ok(protocol) = protocol.parse::<CustomOpenAIProtocol>() {
+                self.custom_openai.protocol = protocol;
+            }
         }
         if let Ok(value) = env::var("CCP_LOG_STDERR") {
             self.log.stderr = truthy(&value);
@@ -312,6 +390,14 @@ mod tests {
     fn provider_parses_config_values() {
         assert_eq!("codex".parse::<Provider>().unwrap(), Provider::Codex);
         assert_eq!("deepseek".parse::<Provider>().unwrap(), Provider::DeepSeek);
+        assert_eq!(
+            "custom-openai".parse::<Provider>().unwrap(),
+            Provider::CustomOpenAI
+        );
+        assert_eq!(
+            "openai".parse::<Provider>().unwrap(),
+            Provider::CustomOpenAI
+        );
         assert!("other".parse::<Provider>().is_err());
     }
 }

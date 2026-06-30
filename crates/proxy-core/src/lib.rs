@@ -3,6 +3,7 @@ pub mod auth;
 pub mod claude;
 pub mod codex;
 pub mod config;
+pub mod custom_openai;
 pub mod deepseek;
 pub mod error;
 pub mod logging;

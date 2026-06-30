@@ -75,32 +75,44 @@ impl ModelRegistry {
         let (base, service_tier) = if let Some(base) = stripped.strip_suffix("-fast") {
             (base.to_string(), Some("priority".to_string()))
         } else {
-            (stripped, None)
+            (stripped.clone(), None)
         };
-        let profile = self
+        if let Some(profile) = self
             .find_profile(provider, &base)
             .or_else(|| self.compatibility_profile(provider, &base))
-            .ok_or_else(|| {
-                ProxyError::InvalidRequest(format!(
-                    "Unknown {} model \"{incoming}\". Supported: {}.",
-                    provider.as_str(),
-                    self.supported_models(provider).join(", ")
-                ))
-            })?;
-        if service_tier.is_some() && !profile.supports_fast {
-            return Err(ProxyError::InvalidRequest(format!(
-                "Model \"{}\" does not support -fast routing",
-                profile.id
-            )));
+        {
+            if service_tier.is_some() && !profile.supports_fast {
+                return Err(ProxyError::InvalidRequest(format!(
+                    "Model \"{}\" does not support -fast routing",
+                    profile.id
+                )));
+            }
+            return Ok(ResolvedModel {
+                provider,
+                requested: incoming.to_string(),
+                public_id: profile.id.clone(),
+                upstream_model: profile.upstream_model.clone(),
+                service_tier,
+                context_window: profile.context_window,
+            });
         }
-        Ok(ResolvedModel {
-            provider,
-            requested: incoming.to_string(),
-            public_id: profile.id.clone(),
-            upstream_model: profile.upstream_model.clone(),
-            service_tier,
-            context_window: profile.context_window,
-        })
+
+        if provider == Provider::CustomOpenAI {
+            return Ok(ResolvedModel {
+                provider,
+                requested: incoming.to_string(),
+                public_id: stripped.clone(),
+                upstream_model: stripped,
+                service_tier: None,
+                context_window: 128_000,
+            });
+        }
+
+        Err(ProxyError::InvalidRequest(format!(
+            "Unknown {} model \"{incoming}\". Supported: {}.",
+            provider.as_str(),
+            self.supported_models(provider).join(", ")
+        )))
     }
 
     fn find_profile(&self, provider: Provider, model: &str) -> Option<&ModelProfile> {
@@ -214,6 +226,22 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             supports_fast: false,
             default_small_fast: true,
         },
+        ModelProfile {
+            provider: Provider::CustomOpenAI,
+            id: "gpt-5.4".into(),
+            upstream_model: "gpt-5.4".into(),
+            context_window: 128_000,
+            supports_fast: false,
+            default_small_fast: false,
+        },
+        ModelProfile {
+            provider: Provider::CustomOpenAI,
+            id: "gpt-5.4-mini".into(),
+            upstream_model: "gpt-5.4-mini".into(),
+            context_window: 128_000,
+            supports_fast: false,
+            default_small_fast: true,
+        },
     ]
 }
 
@@ -295,6 +323,22 @@ mod tests {
         ));
         assert!(profiles
             .iter()
+            .any(|profile| profile.provider == Provider::CustomOpenAI && profile.id == "gpt-5.4"));
+        assert!(profiles
+            .iter()
             .any(|profile| profile.provider == Provider::Codex && profile.id == "custom"));
+    }
+
+    #[test]
+    fn custom_openai_accepts_arbitrary_model_names() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+
+        let resolved = registry
+            .resolve(Provider::CustomOpenAI, "llama-3.3-70b[1m]")
+            .unwrap();
+
+        assert_eq!(resolved.upstream_model, "llama-3.3-70b");
+        assert_eq!(resolved.public_id, "llama-3.3-70b");
+        assert_eq!(resolved.context_window, 128_000);
     }
 }

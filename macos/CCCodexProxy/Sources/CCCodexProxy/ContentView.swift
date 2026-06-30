@@ -28,7 +28,9 @@ struct ContentView: View {
         .animation(AppTheme.motion, value: model.isCheckingAuthStatus)
         .animation(AppTheme.motion, value: model.isInstallingClaudeShim)
         .animation(AppTheme.motion, value: model.isSavingDeepSeekAPIKey)
+        .animation(AppTheme.motion, value: model.isSavingCustomOpenAIAPIKey)
         .animation(AppTheme.motion, value: model.isDeepSeekKeyInputExpanded)
+        .animation(AppTheme.motion, value: model.isCustomOpenAIKeyInputExpanded)
         .animation(AppTheme.motion, value: model.provider)
         .animation(AppTheme.motion, value: settingsPreviewTab)
         .animation(AppTheme.motion, value: showAdvancedClaudeSettings)
@@ -179,9 +181,10 @@ struct ContentView: View {
                     Picker("Provider", selection: $model.provider) {
                         Text("Codex").tag("codex")
                         Text("DeepSeek").tag("deepseek")
+                        Text("Custom").tag("custom-openai")
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 210)
+                    .frame(width: 300)
                     .onChange(of: model.provider) { _ in
                         Task { await model.applyProviderChange() }
                     }
@@ -191,6 +194,22 @@ struct ContentView: View {
                 }
                 settingsInputRow(title: "Small Model", detail: "Fast/compact model fallback") {
                     modelTextField("Small Model", text: $model.smallModel)
+                }
+                if model.provider == "custom-openai" {
+                    settingsInputRow(title: "Endpoint", detail: "OpenAI-compatible base URL") {
+                        modelTextField("https://host.example", text: $model.customOpenAIBaseURL)
+                    }
+                    settingsInputRow(title: "API shape", detail: "Upstream OpenAI endpoint type") {
+                        Picker("API shape", selection: $model.customOpenAIProtocol) {
+                            Text("Responses").tag("responses")
+                            Text("Chat").tag("chat-completions")
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 210)
+                        .onChange(of: model.customOpenAIProtocol) { _ in
+                            Task { await model.refreshRuntimeStatus() }
+                        }
+                    }
                 }
             }
         }
@@ -231,9 +250,7 @@ struct ContentView: View {
                 detail: authStatusDetail,
                 systemImage: model.isAuthenticated ? "checkmark.seal.fill" : "person.crop.circle.badge.exclamationmark",
                 tint: authStatusColor,
-                accessibilityLabel: model.provider == "deepseek"
-                    ? (model.isAuthenticated ? "DeepSeek API key saved" : "DeepSeek API key not saved")
-                    : (model.isAuthenticated ? "OAuth signed in" : "OAuth not signed in")
+                accessibilityLabel: accessibilityAuthLabel
             ) {
                 authAccessory
             }
@@ -242,15 +259,19 @@ struct ContentView: View {
                 deepSeekKeyInput
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
+            if model.provider == "custom-openai", model.isCustomOpenAIKeyInputExpanded || !model.isAuthenticated {
+                customOpenAIKeyInput
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
     }
 
     @ViewBuilder
     private var authAccessory: some View {
-        if model.isLoggingIn || model.isCheckingAuthStatus || model.isSavingDeepSeekAPIKey {
+        if model.isLoggingIn || model.isCheckingAuthStatus || model.isSavingDeepSeekAPIKey || model.isSavingCustomOpenAIAPIKey {
             ProgressView()
                 .controlSize(.small)
-                .accessibilityLabel(model.provider == "deepseek" ? "Checking DeepSeek API key" : "Checking OAuth status")
+                .accessibilityLabel(authProgressLabel)
         } else if model.provider == "deepseek", model.isAuthenticated {
             Button {
                 model.isDeepSeekKeyInputExpanded.toggle()
@@ -259,6 +280,14 @@ struct ContentView: View {
             }
             .buttonStyle(AppPressButtonStyle(tint: authStatusColor, compact: true))
             .accessibilityHint(model.isDeepSeekKeyInputExpanded ? "Collapse the DeepSeek API key editor" : "Open the DeepSeek API key editor")
+        } else if model.provider == "custom-openai", model.isAuthenticated {
+            Button {
+                model.isCustomOpenAIKeyInputExpanded.toggle()
+            } label: {
+                Label(model.isCustomOpenAIKeyInputExpanded ? "Hide Key" : "Set Key", systemImage: model.isCustomOpenAIKeyInputExpanded ? "chevron.up" : "key.fill")
+            }
+            .buttonStyle(AppPressButtonStyle(tint: authStatusColor, compact: true))
+            .accessibilityHint(model.isCustomOpenAIKeyInputExpanded ? "Collapse the custom OpenAI API key editor" : "Open the custom OpenAI API key editor")
         } else if !model.isAuthenticated && model.provider == "codex" {
             Button {
                 Task { await model.login() }
@@ -268,9 +297,7 @@ struct ContentView: View {
             .buttonStyle(AppPressButtonStyle(tint: authStatusColor, compact: true))
             .accessibilityHint("Start ChatGPT OAuth login")
         } else {
-            Text(model.provider == "deepseek"
-                ? (model.isAuthenticated ? "Key OK" : "Key needed")
-                : "OAuth OK")
+            Text(authBadgeText)
                 .font(.caption.weight(.semibold))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
@@ -309,6 +336,33 @@ struct ContentView: View {
         )
     }
 
+    private var customOpenAIKeyInput: some View {
+        HStack(alignment: .center, spacing: 10) {
+            SecureField("Optional API key", text: $model.customOpenAIAPIKey)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .onSubmit {
+                    Task { await model.saveCustomOpenAIAPIKey() }
+                }
+            Button {
+                Task { await model.saveCustomOpenAIAPIKey() }
+            } label: {
+                Label("Save Key", systemImage: "key.fill")
+            }
+            .buttonStyle(AppPressButtonStyle(tint: AppTheme.accent, compact: true))
+            .disabled(model.customOpenAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isSavingCustomOpenAIAPIKey)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+                .fill(AppTheme.insetSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+                .stroke(AppTheme.hairline, lineWidth: 1)
+        )
+    }
+
     private var authStatusColor: Color {
         model.isAuthenticated ? AppTheme.success : AppTheme.warning
     }
@@ -317,11 +371,14 @@ struct ContentView: View {
         if model.isSavingDeepSeekAPIKey {
             return "Saving DeepSeek key"
         }
+        if model.isSavingCustomOpenAIAPIKey {
+            return "Saving custom key"
+        }
         if model.isLoggingIn {
             return "OAuth in progress"
         }
         if model.isCheckingAuthStatus {
-            return "Checking OAuth"
+            return model.provider == "codex" ? "Checking OAuth" : "Checking API key"
         }
         return model.authStatusText
     }
@@ -330,13 +387,52 @@ struct ContentView: View {
         if model.isSavingDeepSeekAPIKey {
             return "Writing the local API key file."
         }
+        if model.isSavingCustomOpenAIAPIKey {
+            return "Writing the optional local API key file."
+        }
         if model.isLoggingIn {
             return "Complete the browser sign-in to finish."
         }
         if model.isCheckingAuthStatus {
-            return model.provider == "deepseek" ? "Checking DeepSeek API key status." : "Reading the local auth file."
+            if model.provider == "deepseek" {
+                return "Checking DeepSeek API key status."
+            }
+            if model.provider == "custom-openai" {
+                return "Checking optional custom OpenAI API key status."
+            }
+            return "Reading the local auth file."
         }
         return model.authDetailText
+    }
+
+    private var authProgressLabel: String {
+        if model.provider == "deepseek" {
+            return "Checking DeepSeek API key"
+        }
+        if model.provider == "custom-openai" {
+            return "Checking custom OpenAI API key"
+        }
+        return "Checking OAuth status"
+    }
+
+    private var authBadgeText: String {
+        if model.provider == "deepseek" {
+            return model.isAuthenticated ? "Key OK" : "Key needed"
+        }
+        if model.provider == "custom-openai" {
+            return model.isAuthenticated ? "Ready" : "URL needed"
+        }
+        return "OAuth OK"
+    }
+
+    private var accessibilityAuthLabel: String {
+        if model.provider == "deepseek" {
+            return model.isAuthenticated ? "DeepSeek API key saved" : "DeepSeek API key not saved"
+        }
+        if model.provider == "custom-openai" {
+            return model.isAuthenticated ? "Custom OpenAI endpoint ready" : "Custom OpenAI endpoint not ready"
+        }
+        return model.isAuthenticated ? "OAuth signed in" : "OAuth not signed in"
     }
 
     private var transportStatusColor: Color {
@@ -344,7 +440,7 @@ struct ContentView: View {
             return AppTheme.muted
         }
         switch model.transportCurrentMethod {
-        case "deepseek":
+        case "deepseek", "responses", "chat-completions":
             return AppTheme.accent
         case "websocket":
             return AppTheme.success
@@ -461,7 +557,7 @@ struct ContentView: View {
         TextField(title, text: text)
             .textFieldStyle(.roundedBorder)
             .font(.system(.body, design: .monospaced))
-            .frame(width: 210)
+            .frame(width: title == "https://host.example" ? 300 : 210)
             .onSubmit {
                 Task {
                     await model.refreshClaudeSettingsPreview()

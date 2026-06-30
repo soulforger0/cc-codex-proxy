@@ -7,7 +7,11 @@ use crate::{
         stream::{accumulate_response, translate_stream, ToolCatalog},
         translate::{translate_request, ResponsesRequest},
     },
-    config::{AppConfig, AppPaths, CodexTransport, Provider},
+    config::{AppConfig, AppPaths, CodexTransport, CustomOpenAIProtocol, Provider},
+    custom_openai::{
+        accumulate_chat_response, translate_chat_request, translate_chat_stream,
+        translate_responses_request, CustomOpenAIClient,
+    },
     deepseek::DeepSeekClient,
     error::{ProxyError, Result},
     model::ModelRegistry,
@@ -40,6 +44,7 @@ struct AppState {
     auth: AuthManager,
     codex: CodexClient,
     deepseek: DeepSeekClient,
+    custom_openai: CustomOpenAIClient,
     registry: ModelRegistry,
 }
 
@@ -63,12 +68,17 @@ pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Res
     let codex = CodexClient::new(config.codex.clone(), auth.clone())?;
     let deepseek =
         DeepSeekClient::new(config.deepseek.clone(), paths.deepseek_api_key_file.clone())?;
+    let custom_openai = CustomOpenAIClient::new(
+        config.custom_openai.clone(),
+        paths.custom_openai_api_key_file.clone(),
+    )?;
     let state = Arc::new(AppState {
         config: config.clone(),
         paths,
         auth,
         codex,
         deepseek,
+        custom_openai,
         registry,
     });
 
@@ -124,6 +134,11 @@ async fn admin_status(
         "models": state.registry.supported_models(state.config.provider),
         "deepseek": {
             "apiKey": state.deepseek.api_key_status(),
+        },
+        "customOpenAI": {
+            "apiKey": state.custom_openai.api_key_status(),
+            "baseUrlConfigured": state.custom_openai.base_url_configured(),
+            "protocol": custom_openai_protocol_name(&state.custom_openai.protocol()),
         },
         "auth": auth.map(|auth| json!({
             "accountId": auth.account_id,
@@ -182,6 +197,9 @@ async fn messages(
             handle_codex_messages(state, request_id, session_id, request, resolved).await
         }
         Provider::DeepSeek => handle_deepseek_messages(state, request_id, request, resolved).await,
+        Provider::CustomOpenAI => {
+            handle_custom_openai_messages(state, request_id, session_id, request, resolved).await
+        }
     }
 }
 
@@ -286,6 +304,134 @@ async fn handle_deepseek_messages(
             .body(Body::from_stream(upstream.body))
             .map_err(|err| {
                 ProxyError::Transport(format!("failed to build DeepSeek response: {err}"))
+            })
+    }
+}
+
+async fn handle_custom_openai_messages(
+    state: Arc<AppState>,
+    request_id: String,
+    session_id: Option<String>,
+    request: AnthropicRequest,
+    resolved: crate::model::ResolvedModel,
+) -> Result<Response<Body>> {
+    match state.custom_openai.protocol() {
+        CustomOpenAIProtocol::Responses => {
+            handle_custom_openai_responses(state, request_id, session_id, request, resolved).await
+        }
+        CustomOpenAIProtocol::ChatCompletions => {
+            handle_custom_openai_chat(state, request_id, request, resolved).await
+        }
+    }
+}
+
+async fn handle_custom_openai_responses(
+    state: Arc<AppState>,
+    request_id: String,
+    session_id: Option<String>,
+    request: AnthropicRequest,
+    resolved: crate::model::ResolvedModel,
+) -> Result<Response<Body>> {
+    let tool_catalog = ToolCatalog::from_anthropic_tools(request.tools.as_deref());
+    let translated = translate_responses_request(&request, &resolved, session_id.as_deref())?;
+    info!(
+        %request_id,
+        upstream_model = %resolved.upstream_model,
+        input_items = translated.input.len(),
+        custom_openai_tool_count = translated.tools.as_ref().map_or(0, Vec::len),
+        custom_openai_body_keys = %codex_request_keys(&translated),
+        "translated request for custom OpenAI Responses"
+    );
+    let upstream = match state.custom_openai.post_responses(&translated).await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            warn!(%request_id, error = %err, "custom OpenAI Responses upstream request failed");
+            return Err(err);
+        }
+    };
+
+    if request.wants_stream() {
+        let stream = translate_stream(
+            upstream.body,
+            request.model.clone(),
+            tool_catalog,
+            Some(request_id),
+        );
+        let body = Body::from_stream(with_sse_heartbeats(stream, SSE_HEARTBEAT_INTERVAL));
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(body)
+            .map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to build custom OpenAI Responses streaming response: {err}"
+                ))
+            })
+    } else {
+        let response = accumulate_response(
+            upstream.body,
+            request.model.clone(),
+            tool_catalog,
+            Some(request_id),
+        )
+        .await?;
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(response_json(response).to_string()))
+            .map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to build custom OpenAI Responses response: {err}"
+                ))
+            })
+    }
+}
+
+async fn handle_custom_openai_chat(
+    state: Arc<AppState>,
+    request_id: String,
+    request: AnthropicRequest,
+    resolved: crate::model::ResolvedModel,
+) -> Result<Response<Body>> {
+    let translated = translate_chat_request(&request, &resolved)?;
+    let upstream = match state.custom_openai.post_chat(&translated).await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            warn!(%request_id, error = %err, "custom OpenAI Chat Completions upstream request failed");
+            return Err(err);
+        }
+    };
+    info!(
+        %request_id,
+        status = %upstream.status,
+        upstream_model = %resolved.upstream_model,
+        "custom OpenAI Chat Completions upstream response opened"
+    );
+
+    if request.wants_stream() {
+        let stream = translate_chat_stream(upstream.body, request.model.clone(), Some(request_id));
+        let body = Body::from_stream(with_sse_heartbeats(stream, SSE_HEARTBEAT_INTERVAL));
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(body)
+            .map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to build custom OpenAI chat streaming response: {err}"
+                ))
+            })
+    } else {
+        let response = accumulate_chat_response(upstream.body, request.model.clone()).await?;
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(response_json(response).to_string()))
+            .map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to build custom OpenAI chat response: {err}"
+                ))
             })
     }
 }
@@ -418,6 +564,18 @@ fn transport_status_json(state: &AppState) -> serde_json::Value {
             "currentMethod": "http-sse",
             "websocketCooldownMs": null,
         }),
+        Provider::CustomOpenAI => json!({
+            "configured": custom_openai_protocol_name(&state.custom_openai.protocol()),
+            "currentMethod": "http-sse",
+            "websocketCooldownMs": null,
+        }),
+    }
+}
+
+fn custom_openai_protocol_name(protocol: &CustomOpenAIProtocol) -> &'static str {
+    match protocol {
+        CustomOpenAIProtocol::Responses => "responses",
+        CustomOpenAIProtocol::ChatCompletions => "chat-completions",
     }
 }
 

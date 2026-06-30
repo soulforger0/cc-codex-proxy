@@ -7,7 +7,11 @@ use proxy_core::{
         live_claude_sessions_message, managed_env_strings, preview_settings, restore_latest_backup,
         restore_shim, ClaudeSettingsOptions, ClaudeShimInstallOptions, MANAGED_ENV_KEYS,
     },
-    config::{AppConfig, Provider, DEFAULT_PORT},
+    config::{AppConfig, CustomOpenAIProtocol, Provider, DEFAULT_PORT},
+    custom_openai::{
+        api_key_status as custom_openai_api_key_status,
+        clear_api_key as clear_custom_openai_api_key, store_api_key as store_custom_openai_api_key,
+    },
     deepseek::{api_key_status, clear_api_key, store_api_key},
     logging,
     model::ModelRegistry,
@@ -42,6 +46,10 @@ struct ServeArgs {
     port: Option<u16>,
     #[arg(long)]
     provider: Option<Provider>,
+    #[arg(long, env = "CCP_CUSTOM_OPENAI_BASE_URL")]
+    custom_openai_base_url: Option<String>,
+    #[arg(long, env = "CCP_CUSTOM_OPENAI_PROTOCOL")]
+    custom_openai_protocol: Option<CustomOpenAIProtocol>,
 }
 
 #[derive(Debug, Args)]
@@ -50,6 +58,10 @@ struct DoctorArgs {
     provider: Option<Provider>,
     #[arg(long)]
     model: Option<String>,
+    #[arg(long, env = "CCP_CUSTOM_OPENAI_BASE_URL")]
+    custom_openai_base_url: Option<String>,
+    #[arg(long, env = "CCP_CUSTOM_OPENAI_PROTOCOL")]
+    custom_openai_protocol: Option<CustomOpenAIProtocol>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -164,6 +176,8 @@ async fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Serve(ServeArgs {
         port: None,
         provider: None,
+        custom_openai_base_url: None,
+        custom_openai_protocol: None,
     })) {
         Command::Serve(args) => cmd_serve(args).await,
         Command::Auth(args) => cmd_auth(args).await,
@@ -183,13 +197,21 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     if let Some(provider) = args.provider {
         config.provider = provider;
     }
+    apply_custom_openai_args(
+        &mut config,
+        args.custom_openai_base_url,
+        args.custom_openai_protocol,
+    );
     let _guards = logging::init(&paths, config.log.stderr, config.log.verbose)?;
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         provider = config.provider.as_str(),
         port = config.port,
         transport = ?config.codex.transport,
-        base_url = %config.codex.base_url,
+        codex_base_url = %config.codex.base_url,
+        deepseek_base_url = %config.deepseek.base_url,
+        custom_openai_base_url = %config.custom_openai.base_url,
+        custom_openai_protocol = %config.custom_openai.protocol.as_str(),
         log_path = %paths.logs_dir.join("proxy.log").display(),
         "starting cc-codex-proxy server"
     );
@@ -262,6 +284,19 @@ async fn cmd_auth(args: AuthCommand) -> Result<()> {
                     std::process::exit(1);
                 }
             }
+            Provider::CustomOpenAI => {
+                let status = custom_openai_api_key_status(&paths.custom_openai_api_key_file);
+                println!("Provider: custom-openai");
+                println!(
+                    "Authenticated: {}",
+                    if status.configured { "yes" } else { "optional" }
+                );
+                if let Some(source) = status.source {
+                    println!("Storage: {source}");
+                } else {
+                    println!("Storage: none (API key optional)");
+                }
+            }
         },
         AuthSubcommand::Logout(args) => match args.provider {
             Provider::Codex => {
@@ -272,25 +307,42 @@ async fn cmd_auth(args: AuthCommand) -> Result<()> {
                 clear_api_key(&paths.deepseek_api_key_file)?;
                 println!("DeepSeek API key removed.");
             }
+            Provider::CustomOpenAI => {
+                clear_custom_openai_api_key(&paths.custom_openai_api_key_file)?;
+                println!("Custom OpenAI API key removed.");
+            }
         },
         AuthSubcommand::SetApiKey(args) => {
-            if args.provider != Provider::DeepSeek {
-                anyhow::bail!("set-api-key currently supports --provider deepseek only");
-            }
             if !args.stdin {
-                anyhow::bail!("pass --stdin and provide the DeepSeek API key on stdin");
+                anyhow::bail!("pass --stdin and provide the API key on stdin");
             }
             let mut api_key = String::new();
             std::io::stdin().read_to_string(&mut api_key)?;
-            store_api_key(&paths.deepseek_api_key_file, &api_key)?;
-            println!("DeepSeek API key saved.");
+            match args.provider {
+                Provider::DeepSeek => {
+                    store_api_key(&paths.deepseek_api_key_file, &api_key)?;
+                    println!("DeepSeek API key saved.");
+                }
+                Provider::CustomOpenAI => {
+                    store_custom_openai_api_key(&paths.custom_openai_api_key_file, &api_key)?;
+                    println!("Custom OpenAI API key saved.");
+                }
+                Provider::Codex => {
+                    anyhow::bail!("set-api-key supports --provider deepseek or custom-openai only");
+                }
+            }
         }
     }
     Ok(())
 }
 
 async fn cmd_doctor(args: DoctorArgs) -> Result<()> {
-    let (config, paths) = AppConfig::load_default()?;
+    let (mut config, paths) = AppConfig::load_default()?;
+    apply_custom_openai_args(
+        &mut config,
+        args.custom_openai_base_url,
+        args.custom_openai_protocol,
+    );
     let provider = args.provider.unwrap_or(config.provider);
     let model = args
         .model
@@ -301,8 +353,13 @@ async fn cmd_doctor(args: DoctorArgs) -> Result<()> {
     println!("Model profiles: {}", paths.model_profiles_file.display());
     println!("Provider: {}", provider.as_str());
     println!("Model: {} -> {}", model, resolved.upstream_model);
-    if provider == Provider::Codex {
-        println!("Transport: {:?}", config.codex.transport);
+    match provider {
+        Provider::Codex => println!("Transport: {:?}", config.codex.transport),
+        Provider::DeepSeek => println!("Base URL: {}", config.deepseek.base_url),
+        Provider::CustomOpenAI => {
+            println!("Base URL: {}", config.custom_openai.base_url);
+            println!("Protocol: {}", config.custom_openai.protocol.as_str());
+        }
     }
     let manager = auth_manager(&config, &paths);
     match provider {
@@ -329,6 +386,17 @@ async fn cmd_doctor(args: DoctorArgs) -> Result<()> {
             } else {
                 println!("Auth: failed (DeepSeek API key is not configured)");
                 std::process::exit(1);
+            }
+        }
+        Provider::CustomOpenAI => {
+            if config.custom_openai.base_url.trim().is_empty() {
+                println!("Config: failed (custom OpenAI base URL is not configured)");
+                std::process::exit(1);
+            }
+            let status = custom_openai_api_key_status(&paths.custom_openai_api_key_file);
+            println!("Auth: ok (API key optional)");
+            if let Some(source) = status.source {
+                println!("Storage: {source}");
             }
         }
     }
@@ -588,6 +656,19 @@ fn auth_manager(config: &AppConfig, paths: &proxy_core::AppPaths) -> AuthManager
     )
 }
 
+fn apply_custom_openai_args(
+    config: &mut AppConfig,
+    base_url: Option<String>,
+    protocol: Option<CustomOpenAIProtocol>,
+) {
+    if let Some(base_url) = base_url {
+        config.custom_openai.base_url = base_url;
+    }
+    if let Some(protocol) = protocol {
+        config.custom_openai.protocol = protocol;
+    }
+}
+
 fn ensure_codex_provider(provider: Provider, action: &str) -> Result<()> {
     if provider == Provider::Codex {
         Ok(())
@@ -600,6 +681,7 @@ fn default_model(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "gpt-5.4[1m]",
         Provider::DeepSeek => "deepseek-v4-pro[1m]",
+        Provider::CustomOpenAI => "gpt-5.4[1m]",
     }
 }
 
@@ -607,6 +689,7 @@ fn default_small_model(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "gpt-5.4-mini[1m]",
         Provider::DeepSeek => "deepseek-v4-flash",
+        Provider::CustomOpenAI => "gpt-5.4-mini[1m]",
     }
 }
 
@@ -614,6 +697,7 @@ fn default_auto_compact_window(provider: Provider) -> u32 {
     match provider {
         Provider::Codex => 272_000,
         Provider::DeepSeek => 1_000_000,
+        Provider::CustomOpenAI => 128_000,
     }
 }
 
@@ -649,6 +733,21 @@ mod tests {
         assert_eq!(options.model, "deepseek-v4-pro[1m]");
         assert_eq!(options.small_fast_model, "deepseek-v4-flash");
         assert_eq!(options.auto_compact_window, 1_000_000);
+    }
+
+    #[test]
+    fn claude_settings_options_use_custom_openai_defaults() {
+        let options = claude_settings_options(InstallSettingsArgs {
+            provider: Provider::CustomOpenAI,
+            model: None,
+            small_model: None,
+            port: DEFAULT_PORT,
+            auto_compact_window: None,
+        });
+
+        assert_eq!(options.model, "gpt-5.4[1m]");
+        assert_eq!(options.small_fast_model, "gpt-5.4-mini[1m]");
+        assert_eq!(options.auto_compact_window, 128_000);
     }
 
     #[test]

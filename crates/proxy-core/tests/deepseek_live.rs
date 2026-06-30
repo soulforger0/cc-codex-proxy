@@ -37,6 +37,7 @@ async fn live_deepseek_proxy_reaches_deepseek_api() {
         claude_shim_file: dir.path().join("config/claude-shim.json"),
         auth_file: dir.path().join("config/auth.json"),
         deepseek_api_key_file: dir.path().join("config/deepseek-api-key"),
+        custom_openai_api_key_file: dir.path().join("config/custom-openai-api-key"),
     };
     let mut config = AppConfig::default();
     config.port = 0;

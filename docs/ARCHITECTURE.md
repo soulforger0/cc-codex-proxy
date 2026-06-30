@@ -1,11 +1,12 @@
 # Architecture
 
-CC Codex Proxy has two supported upstream paths:
+CC Codex Proxy has three supported upstream paths:
 
 - Claude Code -> `127.0.0.1` Anthropic-compatible proxy -> ChatGPT subscription Codex Responses backend.
 - Claude Code -> `127.0.0.1` Anthropic-compatible proxy -> DeepSeek Anthropic-compatible API.
+- Claude Code -> `127.0.0.1` Anthropic-compatible proxy -> Custom OpenAI-compatible Responses or Chat Completions API.
 
-Provider selection is explicit through app/CLI config as `codex` or `deepseek`. The proxy keeps small internal module boundaries for auth, request translation, upstream transport, stream handling, and Claude settings so each part can be tested in isolation.
+Provider selection is explicit through app/CLI config as `codex`, `deepseek`, or `custom-openai`. The proxy keeps small internal module boundaries for auth, request translation, upstream transport, stream handling, and Claude settings so each part can be tested in isolation.
 
 ## Runtime
 
@@ -15,7 +16,7 @@ Provider selection is explicit through app/CLI config as `codex` or `deepseek`. 
 - Proxy startup is blocked while existing Claude Code processes are running, so active sessions do not silently switch backend assumptions mid-session.
 - `cc-codex-proxy serve` binds only to `127.0.0.1`.
 - `/v1/messages` streams Anthropic SSE back to Claude Code without buffering the full upstream response.
-- Codex non-streaming requests are accumulated only after the upstream stream completes; DeepSeek non-streaming responses are passed through as JSON.
+- Codex non-streaming requests are accumulated only after the upstream stream completes; DeepSeek non-streaming responses are passed through as JSON. Custom OpenAI non-streaming responses are translated back into Anthropic JSON.
 - Dropping the downstream response body drops the upstream request stream, so client disconnects cancel in-flight work promptly.
 - Upstream 429/403/400 responses are returned to Claude Code as failures. The proxy does not queue or retry 429s.
 
@@ -35,11 +36,14 @@ Both upstream modes are reduced into the same internal byte stream and then tran
 
 DeepSeek uses HTTPS only. It forwards Anthropic-shaped requests to `deepseek.base_url` plus `/v1/messages`; there is no WebSocket mode or transport fallback for DeepSeek.
 
+Custom OpenAI-compatible endpoints use HTTPS or HTTP only. `custom_openai.base_url` may point at either a server root (for example `http://127.0.0.1:8000`), a `/v1` base, or the full endpoint path. `custom_openai.protocol` selects either `/v1/responses` (`responses`) or `/v1/chat/completions` (`chat-completions`). There is no WebSocket mode or transport fallback for custom endpoints.
+
 ## Fallback Strategy
 
 - Transport fallback: `auto` demotes WebSocket to HTTP SSE for a short cooldown after setup failure or a silent first-event timeout. This avoids a per-request WebSocket timeout tax when a network, proxy, or upstream deployment rejects upgrades or accepts the socket without producing response events.
 - Auth fallback: a Codex 401 forces one token refresh and one retry.
 - DeepSeek auth and capacity errors are not retried. The proxy surfaces upstream `401`, `402`, `422`, `429`, `500`, `503`, and `Retry-After` directly to Claude Code.
+- Custom OpenAI auth is optional. When configured, the proxy sends `Authorization: Bearer <key>`; when absent, requests are sent without an authorization header for local or unauthenticated gateways. Custom endpoint upstream errors and `Retry-After` are surfaced directly.
 - Launch fallback: the managed `claude` shim only injects proxy environment variables while the app PID is alive and `/healthz` succeeds. If the app is gone, it launches the original Claude command without proxy variables. If the app is alive but the helper is unhealthy, it fails fast so new sessions do not start with inconsistent routing.
 - Capacity fallback: 429, 403, 400, and `Retry-After` are passed through to Claude Code. The proxy does not queue, fan out, or retry rate-limited work because that would hide subscription limits and can amplify load.
 
@@ -52,11 +56,14 @@ Recommended setup: leave app users on `http`; use `auto` only for controlled rel
 - Access-token refresh is single-flight inside `AuthManager`.
 - A 401 response from Codex forces one refresh and one retry.
 - DeepSeek uses an API key from `DEEPSEEK_API_KEY` or `~/Library/Application Support/CCCodexProxy/deepseek-api-key`.
-- DeepSeek API keys are stored with user-only file permissions and are never written to Claude Code environment variables, shim state, admin JSON, or logs.
+- Custom OpenAI uses an optional API key from `CUSTOM_OPENAI_API_KEY` or `~/Library/Application Support/CCCodexProxy/custom-openai-api-key`.
+- Provider API keys are stored with user-only file permissions and are never written to Claude Code environment variables, shim state, admin JSON, or logs.
 
 ## Translation
 
 - Claude Code messages, system prompts, tools, tool calls, tool results, images, JSON output formats, and reasoning effort are translated into the Codex Responses request shape.
+- Custom OpenAI Responses mode reuses the same Responses request translation and stream reducer as Codex, but uses static bearer-token-or-no-auth HTTP instead of ChatGPT OAuth/WebSocket transport.
+- Custom OpenAI Chat Completions mode maps Anthropic messages into `chat/completions` messages, translates tools into OpenAI function tools, maps tool calls/results, and converts OpenAI chat responses or stream deltas back into Anthropic content blocks.
 - Hosted web search maps to Codex `web_search`.
 - Unsupported reasoning stream events are dropped.
 - Image blocks inside tool results become text placeholders because this proxy serializes function outputs as text for Codex compatibility.
@@ -121,9 +128,10 @@ ChatGPT Codex subscription cost and rate-limit state are not exposed through a s
 - Claude shim state: `~/Library/Application Support/CCCodexProxy/claude-shim.json`
 - Auth: `~/Library/Application Support/CCCodexProxy/auth.json`
 - DeepSeek API key: `~/Library/Application Support/CCCodexProxy/deepseek-api-key`
+- Custom OpenAI API key: `~/Library/Application Support/CCCodexProxy/custom-openai-api-key`
 - Logs: `~/Library/Logs/CCCodexProxy/proxy.log`
 
-Model names are intentionally data-driven and provider-scoped. If ChatGPT Codex or DeepSeek model identifiers change, update `model-profiles.json` instead of rebuilding.
+Model names are intentionally data-driven and provider-scoped. If ChatGPT Codex, DeepSeek, or commonly used custom endpoint model identifiers change, update `model-profiles.json` instead of rebuilding. Custom OpenAI also accepts arbitrary model names after stripping Claude Code's `[1m]` context hint, so local gateways can be used before adding explicit profiles.
 
 ## Robustness Targets
 

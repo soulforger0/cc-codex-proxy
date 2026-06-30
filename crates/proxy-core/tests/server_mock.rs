@@ -10,7 +10,8 @@ use bytes::Bytes;
 use futures_util::{future::join_all, StreamExt};
 use proxy_core::{
     auth::{AuthManager, MemoryTokenStore, StoredAuth, TokenRefreshClient, TokenResponse},
-    config::{AppConfig, AppPaths, CodexTransport, Provider},
+    config::{AppConfig, AppPaths, CodexTransport, CustomOpenAIProtocol, Provider},
+    custom_openai::store_api_key as store_custom_openai_api_key,
     deepseek::store_api_key,
     serve,
 };
@@ -265,6 +266,111 @@ async fn deepseek_upstream_errors_are_preserved() {
 }
 
 #[tokio::test]
+async fn custom_openai_responses_request_uses_configured_url_and_optional_key() {
+    let state = Arc::new(CustomOpenAIMockState::default());
+    let upstream = start_mock_upstream(mock_custom_openai_responses_app(state.clone())).await;
+    let (config, paths) =
+        test_custom_openai_config(upstream, CustomOpenAIProtocol::Responses, false).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "llama-3.3-70b[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["content"][0]["text"], "hello from custom responses");
+    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        state.last_model.lock().unwrap().as_deref(),
+        Some("llama-3.3-70b")
+    );
+    assert!(state.last_authorization.lock().unwrap().is_none());
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn custom_openai_responses_request_sends_authorization_when_key_saved() {
+    let state = Arc::new(CustomOpenAIMockState::default());
+    let upstream = start_mock_upstream(mock_custom_openai_responses_app(state.clone())).await;
+    let (config, paths) =
+        test_custom_openai_config(upstream, CustomOpenAIProtocol::Responses, true).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "gpt-5.4",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        state.last_authorization.lock().unwrap().as_deref(),
+        Some("Bearer custom-secret")
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn custom_openai_chat_completions_non_streaming_is_translated() {
+    let state = Arc::new(CustomOpenAIMockState::default());
+    let upstream = start_mock_upstream(mock_custom_openai_chat_app(state.clone())).await;
+    let (config, paths) =
+        test_custom_openai_config(upstream, CustomOpenAIProtocol::ChatCompletions, false).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "local-model[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["content"][0]["text"], "hello from custom chat");
+    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        state.last_model.lock().unwrap().as_deref(),
+        Some("local-model")
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn custom_openai_admin_status_reports_protocol() {
+    let state = Arc::new(CustomOpenAIMockState::default());
+    let upstream = start_mock_upstream(mock_custom_openai_chat_app(state)).await;
+    let (config, paths) =
+        test_custom_openai_config(upstream, CustomOpenAIProtocol::ChatCompletions, false).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+
+    let status = admin_status(server.addr).await;
+    assert_eq!(status["provider"], "custom-openai");
+    assert_eq!(status["transport"]["configured"], "chat-completions");
+    assert_eq!(status["transport"]["currentMethod"], "http-sse");
+    assert_eq!(status["customOpenAI"]["protocol"], "chat-completions");
+    assert_eq!(status["customOpenAI"]["apiKey"]["configured"], false);
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn deepseek_missing_api_key_is_local_unauthorized() {
     let upstream = start_mock_upstream(mock_deepseek_json_app(Arc::default())).await;
     let (mut config, paths) = test_config(upstream, "/unused").await;
@@ -446,6 +552,88 @@ struct DeepSeekMockState {
     last_model: Mutex<Option<String>>,
     last_key: Mutex<Option<String>>,
     last_output_config: Mutex<Option<serde_json::Value>>,
+}
+
+#[derive(Default)]
+struct CustomOpenAIMockState {
+    calls: AtomicUsize,
+    last_model: Mutex<Option<String>>,
+    last_authorization: Mutex<Option<String>>,
+}
+
+fn mock_custom_openai_responses_app(state: Arc<CustomOpenAIMockState>) -> Router {
+    Router::new()
+        .route(
+            "/openai/v1/responses",
+            post(mock_custom_openai_responses_response),
+        )
+        .with_state(state)
+}
+
+async fn mock_custom_openai_responses_response(
+    State(state): State<Arc<CustomOpenAIMockState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response<Body> {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    *state.last_model.lock().unwrap() = body
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    *state.last_authorization.lock().unwrap() = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello from custom responses\"}\n\n\
+             data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":3}}\n\n",
+        ))
+        .unwrap()
+}
+
+fn mock_custom_openai_chat_app(state: Arc<CustomOpenAIMockState>) -> Router {
+    Router::new()
+        .route(
+            "/openai/v1/chat/completions",
+            post(mock_custom_openai_chat_response),
+        )
+        .with_state(state)
+}
+
+async fn mock_custom_openai_chat_response(
+    State(state): State<Arc<CustomOpenAIMockState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response<Body> {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    *state.last_model.lock().unwrap() = body
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    *state.last_authorization.lock().unwrap() = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "id": "chatcmpl_custom",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello from custom chat"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 4}
+            })
+            .to_string(),
+        ))
+        .unwrap()
 }
 
 fn mock_deepseek_json_app(state: Arc<DeepSeekMockState>) -> Router {
@@ -788,6 +976,7 @@ async fn test_config(upstream: std::net::SocketAddr, path: &str) -> (AppConfig, 
         claude_shim_file: dir.join("config/claude-shim.json"),
         auth_file: dir.join("config/auth.json"),
         deepseek_api_key_file: dir.join("config/deepseek-api-key"),
+        custom_openai_api_key_file: dir.join("config/custom-openai-api-key"),
     };
     let mut config = AppConfig::default();
     config.port = 0;
@@ -802,6 +991,21 @@ async fn test_deepseek_config(upstream: std::net::SocketAddr) -> (AppConfig, App
     config.provider = Provider::DeepSeek;
     config.deepseek.base_url = format!("http://{upstream}/anthropic");
     store_api_key(&paths.deepseek_api_key_file, "deepseek-secret").unwrap();
+    (config, paths)
+}
+
+async fn test_custom_openai_config(
+    upstream: std::net::SocketAddr,
+    protocol: CustomOpenAIProtocol,
+    with_key: bool,
+) -> (AppConfig, AppPaths) {
+    let (mut config, paths) = test_config(upstream, "/unused").await;
+    config.provider = Provider::CustomOpenAI;
+    config.custom_openai.base_url = format!("http://{upstream}/openai");
+    config.custom_openai.protocol = protocol;
+    if with_key {
+        store_custom_openai_api_key(&paths.custom_openai_api_key_file, "custom-secret").unwrap();
+    }
     (config, paths)
 }
 

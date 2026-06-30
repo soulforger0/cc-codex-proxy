@@ -445,7 +445,10 @@ pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
         "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
         Value::String(options.small_fast_model.clone()),
     );
-    if options.provider == Provider::DeepSeek {
+    if matches!(
+        options.provider,
+        Provider::DeepSeek | Provider::CustomOpenAI
+    ) {
         env.insert(
             "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
             Value::String(options.model.clone()),
@@ -973,6 +976,30 @@ mod tests {
         assert_eq!(values["CLAUDE_CODE_SUBAGENT_MODEL"], "deepseek-v4-flash");
         assert!(!values.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
         assert_eq!(values["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "1000000");
+    }
+
+    #[test]
+    fn custom_openai_managed_env_sets_provider_specific_model_aliases() {
+        let options = ClaudeSettingsOptions {
+            provider: Provider::CustomOpenAI,
+            port: DEFAULT_PORT,
+            model: "llama-3.3-70b[1m]".into(),
+            small_fast_model: "llama-3.2-3b".into(),
+            auto_compact_window: 128_000,
+        };
+        let values = managed_env_strings(&options)
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(values["ANTHROPIC_MODEL"], "llama-3.3-70b[1m]");
+        assert_eq!(values["ANTHROPIC_DEFAULT_OPUS_MODEL"], "llama-3.3-70b[1m]");
+        assert_eq!(
+            values["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+            "llama-3.3-70b[1m]"
+        );
+        assert_eq!(values["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "llama-3.2-3b");
+        assert_eq!(values["CLAUDE_CODE_SUBAGENT_MODEL"], "llama-3.2-3b");
+        assert_eq!(values["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "128000");
     }
 
     #[test]

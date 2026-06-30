@@ -13,7 +13,9 @@ final class ProxyAppModel: ObservableObject {
     @Published var isRestoringClaudeSettings = false
     @Published var isInstallingClaudeShim = false
     @Published var isSavingDeepSeekAPIKey = false
+    @Published var isSavingCustomOpenAIAPIKey = false
     @Published var isDeepSeekKeyInputExpanded = false
+    @Published var isCustomOpenAIKeyInputExpanded = false
     @Published var statusText = "Not checked"
     @Published var transportDetailText = "Start the proxy to see the active upstream method."
     @Published var transportBadgeText = "Waiting"
@@ -27,6 +29,9 @@ final class ProxyAppModel: ObservableObject {
     @Published var lastMessage = ""
     @Published var provider = "codex"
     @Published var deepSeekAPIKey = ""
+    @Published var customOpenAIBaseURL = ""
+    @Published var customOpenAIAPIKey = ""
+    @Published var customOpenAIProtocol = "responses"
     @Published var model = "gpt-5.5[1m]"
     @Published var smallModel = "gpt-5.4-mini[1m]"
     @Published var port = 18765
@@ -76,7 +81,10 @@ final class ProxyAppModel: ObservableObject {
 
         do {
             let output = try await runCLI(["auth", "status", "--provider", provider], allowFailure: true)
-            applyAuthStatus(from: output, authenticated: output.contains("Authenticated: yes"))
+            let authenticated = provider == "custom-openai"
+                ? !customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                : output.contains("Authenticated: yes")
+            applyAuthStatus(from: output, authenticated: authenticated)
         } catch {
             isAuthenticated = false
             authStatusText = "Authentication unavailable"
@@ -87,6 +95,10 @@ final class ProxyAppModel: ObservableObject {
     func startProxy() async {
         guard proxyProcess == nil else { return }
         replaceCrossProviderModelDefaults()
+        if provider == "custom-openai", customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lastMessage = "Enter a custom OpenAI endpoint URL before starting."
+            return
+        }
         do {
             _ = try await runCLI(["claude", "check-live-sessions"])
         } catch {
@@ -97,7 +109,7 @@ final class ProxyAppModel: ObservableObject {
         }
 
         let process = Process()
-        process.arguments = ["serve", "--provider", provider, "--port", "\(port)"]
+        process.arguments = serveArguments
         do {
             process.executableURL = try helperURL()
             try process.run()
@@ -126,8 +138,12 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func login() async {
-        guard provider == "codex" else {
+        if provider == "deepseek" {
             await saveDeepSeekAPIKey()
+            return
+        }
+        guard provider == "codex" else {
+            await saveCustomOpenAIAPIKey()
             return
         }
         isLoggingIn = true
@@ -165,6 +181,29 @@ final class ProxyAppModel: ObservableObject {
             await checkAuthStatus()
         } catch {
             lastMessage = "DeepSeek key save failed: \(error.localizedDescription)"
+            await checkAuthStatus()
+        }
+    }
+
+    func saveCustomOpenAIAPIKey() async {
+        let trimmed = customOpenAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            lastMessage = "Custom OpenAI API key is optional; enter one before saving."
+            return
+        }
+        isSavingCustomOpenAIAPIKey = true
+        defer { isSavingCustomOpenAIAPIKey = false }
+
+        do {
+            _ = try await runCLI(
+                ["auth", "set-api-key", "--provider", "custom-openai", "--stdin"],
+                stdin: trimmed
+            )
+            customOpenAIAPIKey = ""
+            lastMessage = "Custom OpenAI API key saved."
+            await checkAuthStatus()
+        } catch {
+            lastMessage = "Custom OpenAI key save failed: \(error.localizedDescription)"
             await checkAuthStatus()
         }
     }
@@ -330,23 +369,41 @@ final class ProxyAppModel: ObservableObject {
         ]
     }
 
+    private var serveArguments: [String] {
+        var arguments = ["serve", "--provider", provider, "--port", "\(port)"]
+        if provider == "custom-openai" {
+            let trimmedBaseURL = customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedBaseURL.isEmpty {
+                arguments += ["--custom-openai-base-url", trimmedBaseURL]
+            }
+            arguments += ["--custom-openai-protocol", customOpenAIProtocol]
+        }
+        return arguments
+    }
+
     private func applyAuthStatus(from output: String, authenticated: Bool) {
         guard authenticated else {
             isAuthenticated = false
             authStatusText = "Not signed in"
-            authDetailText = provider == "deepseek"
-                ? "Save a DeepSeek API key before starting the proxy."
-                : "Login to complete ChatGPT OAuth."
             if provider == "deepseek" {
+                authDetailText = "Save a DeepSeek API key before starting the proxy."
                 isDeepSeekKeyInputExpanded = true
+            } else if provider == "custom-openai" {
+                authDetailText = "Configure a base URL. API key is optional."
+                isCustomOpenAIKeyInputExpanded = true
+            } else {
+                authDetailText = "Login to complete ChatGPT OAuth."
             }
             return
         }
 
         isAuthenticated = true
-        authStatusText = provider == "deepseek" ? "API key saved" : "Signed in"
+        authStatusText = provider == "deepseek" ? "API key saved" : (provider == "custom-openai" ? "Custom endpoint ready" : "Signed in")
         if provider == "deepseek" && deepSeekAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             isDeepSeekKeyInputExpanded = false
+        }
+        if provider == "custom-openai" && customOpenAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            isCustomOpenAIKeyInputExpanded = false
         }
 
         if let account = value(for: "Account", in: output), !account.isEmpty {
@@ -354,9 +411,13 @@ final class ProxyAppModel: ObservableObject {
         } else if let storage = value(for: "Storage", in: output), !storage.isEmpty {
             authDetailText = "Stored in \(storage)."
         } else {
-            authDetailText = provider == "deepseek"
-                ? "DeepSeek API key is configured."
-                : "OAuth tokens are stored in the local auth file."
+            if provider == "deepseek" {
+                authDetailText = "DeepSeek API key is configured."
+            } else if provider == "custom-openai" {
+                authDetailText = "API key is optional; requests use the configured endpoint."
+            } else {
+                authDetailText = "OAuth tokens are stored in the local auth file."
+            }
         }
     }
 
@@ -415,8 +476,8 @@ final class ProxyAppModel: ObservableObject {
 
     private func displayName(forTransport value: String) -> String {
         switch value {
-        case "deepseek":
-            return "DeepSeek"
+        case "deepseek", "custom-openai":
+            return "HTTP SSE"
         case "auto":
             return "Auto"
         case "http-sse":
@@ -440,6 +501,10 @@ final class ProxyAppModel: ObservableObject {
             model = "deepseek-v4-pro[1m]"
             smallModel = "deepseek-v4-flash"
             autoCompactWindow = 1_000_000
+        } else if provider == "custom-openai" {
+            model = "gpt-5.4[1m]"
+            smallModel = "gpt-5.4-mini[1m]"
+            autoCompactWindow = 128_000
         } else {
             model = "gpt-5.5[1m]"
             smallModel = "gpt-5.4-mini[1m]"
@@ -458,8 +523,18 @@ final class ProxyAppModel: ObservableObject {
             if small.hasPrefix("gpt-") {
                 smallModel = "deepseek-v4-flash"
             }
-            if autoCompactWindow == 272_000 {
+            if autoCompactWindow == 272_000 || autoCompactWindow == 128_000 {
                 autoCompactWindow = 1_000_000
+            }
+        } else if provider == "custom-openai" {
+            if primary.hasPrefix("deepseek-") {
+                model = "gpt-5.4[1m]"
+            }
+            if small.hasPrefix("deepseek-") {
+                smallModel = "gpt-5.4-mini[1m]"
+            }
+            if autoCompactWindow == 272_000 || autoCompactWindow == 1_000_000 {
+                autoCompactWindow = 128_000
             }
         } else {
             if primary.hasPrefix("deepseek-") {
@@ -468,7 +543,7 @@ final class ProxyAppModel: ObservableObject {
             if small.hasPrefix("deepseek-") {
                 smallModel = "gpt-5.4-mini[1m]"
             }
-            if autoCompactWindow == 1_000_000 {
+            if autoCompactWindow == 1_000_000 || autoCompactWindow == 128_000 {
                 autoCompactWindow = 272_000
             }
         }
