@@ -208,6 +208,78 @@ async fn session_pinning_keeps_existing_session_on_original_route() {
 }
 
 #[tokio::test]
+async fn persisted_session_pin_survives_server_restart() {
+    let codex_upstream = start_mock_upstream(mock_success_app()).await;
+    let deepseek_state = Arc::new(DeepSeekMockState::default());
+    let deepseek_upstream =
+        start_mock_upstream(mock_deepseek_json_app(deepseek_state.clone())).await;
+    let (mut config, paths) = test_config(codex_upstream, "/codex").await;
+    config.deepseek.base_url = format!("http://{deepseek_upstream}/anthropic");
+    store_api_key(&paths.deepseek_api_key_file, "deepseek-secret").unwrap();
+
+    let server = serve(config.clone(), paths.clone(), test_auth())
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-a")
+        .json(&serde_json::json!({
+            "model": "gpt-5.5[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    admin_set_route(server.addr, "deepseek").await;
+    server.stop().await;
+
+    let mut restarted_config = config;
+    restarted_config.routing.active_profile = "deepseek".into();
+    let restarted = serve(restarted_config, paths, test_auth()).await.unwrap();
+    let pinned = client
+        .post(format!("http://{}/v1/messages", restarted.addr))
+        .header("x-claude-code-session-id", "session-a")
+        .json(&serde_json::json!({
+            "model": "gpt-5.5[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "still pinned"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pinned.status(), StatusCode::OK);
+    assert_eq!(
+        pinned.json::<serde_json::Value>().await.unwrap()["content"][0]["text"],
+        "hello from codex"
+    );
+
+    let fresh = client
+        .post(format!("http://{}/v1/messages", restarted.addr))
+        .header("x-claude-code-session-id", "session-b")
+        .json(&serde_json::json!({
+            "model": "gpt-5.5[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "new route"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::OK);
+    assert_eq!(
+        fresh.json::<serde_json::Value>().await.unwrap()["content"][0]["text"],
+        "hello from deepseek"
+    );
+    assert_eq!(deepseek_state.calls.load(Ordering::SeqCst), 1);
+    restarted.stop().await;
+}
+
+#[tokio::test]
 async fn upstream_429_is_preserved() {
     let upstream = start_mock_upstream(Router::new().route(
         "/rate-limit",
@@ -563,6 +635,54 @@ async fn auto_transport_falls_back_to_http_and_cools_down_websocket() {
     assert_eq!(status["transport"]["configured"], "auto");
     assert_eq!(status["transport"]["currentMethod"], "http-sse");
     assert!(status["transport"]["websocketCooldownMs"].as_u64().unwrap() > 0);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn streaming_response_sets_sse_headers() {
+    let upstream = start_mock_upstream(mock_success_app()).await;
+    let (config, paths) = test_config(upstream, "/codex").await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "gpt-5.4",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache, no-transform"
+    );
+    assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn messages_body_limit_returns_payload_too_large() {
+    let upstream = start_mock_upstream(mock_success_app()).await;
+    let (mut config, paths) = test_config(upstream, "/codex").await;
+    config.messages_body_limit_bytes = 128;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "gpt-5.4",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "x".repeat(512)}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     server.stop().await;
 }
 
@@ -1112,6 +1232,7 @@ async fn test_config(upstream: std::net::SocketAddr, path: &str) -> (AppConfig, 
         admin_token_file: dir.join("config/admin-token"),
         claude_shim_file: dir.join("config/claude-shim.json"),
         auth_file: dir.join("config/auth.json"),
+        route_pins_file: dir.join("config/route-pins.json"),
         deepseek_api_key_file: dir.join("config/deepseek-api-key"),
         custom_openai_api_key_file: dir.join("config/custom-openai-api-key"),
     };

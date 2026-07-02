@@ -6,6 +6,7 @@ pub mod config;
 pub mod custom_openai;
 pub mod deepseek;
 pub mod error;
+pub mod http_client;
 pub mod logging;
 pub mod model;
 pub mod routing;

@@ -3,6 +3,10 @@ use crate::{
     codex::translate::ResponsesRequest,
     config::{CodexConfig, CodexTransport},
     error::{ProxyError, Result},
+    http_client::{
+        build_client, duration_from_millis, monitor_idle_stream, optional_duration_from_millis,
+        HttpClientTuning,
+    },
 };
 use async_stream::try_stream;
 use bytes::Bytes;
@@ -59,10 +63,12 @@ pub struct CodexClient {
 
 impl CodexClient {
     pub fn new(config: CodexConfig, auth: AuthManager) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .build()?;
+        let http = build_client(HttpClientTuning {
+            connect_timeout_ms: config.connect_timeout_ms,
+            pool_idle_timeout_ms: config.pool_idle_timeout_ms,
+            pool_max_idle_per_host: config.pool_max_idle_per_host,
+            tcp_keepalive_ms: config.tcp_keepalive_ms,
+        })?;
         Ok(Self {
             http,
             config,
@@ -202,8 +208,15 @@ impl CodexClient {
         let stream = response
             .bytes_stream()
             .map(|item| item.map_err(ProxyError::from));
+        let stream = monitor_idle_stream(
+            stream,
+            "Codex HTTP",
+            session_id.map(ToOwned::to_owned),
+            duration_from_millis(self.config.stream_idle_warn_ms),
+            optional_duration_from_millis(self.config.stream_idle_timeout_ms),
+        );
         Ok(CodexResponse {
-            body: Box::pin(stream),
+            body: stream,
             status,
         })
     }

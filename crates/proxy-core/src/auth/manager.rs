@@ -1,6 +1,7 @@
 use crate::{
     auth::{StoredAuth, TokenResponse, TokenStore},
     error::{ProxyError, Result},
+    http_client::{build_client, duration_from_millis, HttpClientTuning},
 };
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -23,31 +24,50 @@ pub struct OAuthRefreshClient {
     issuer: String,
     client_id: String,
     client: reqwest::Client,
+    timeout_ms: u64,
 }
 
 impl OAuthRefreshClient {
     pub fn new(issuer: impl Into<String>, client_id: impl Into<String>) -> Self {
-        Self {
+        Self::with_timeout(issuer, client_id, crate::config::DEFAULT_HEADER_TIMEOUT_MS)
+            .expect("default OAuth refresh client configuration should be valid")
+    }
+
+    pub fn with_timeout(
+        issuer: impl Into<String>,
+        client_id: impl Into<String>,
+        timeout_ms: u64,
+    ) -> Result<Self> {
+        Ok(Self {
             issuer: issuer.into(),
             client_id: client_id.into(),
-            client: reqwest::Client::new(),
-        }
+            client: build_client(HttpClientTuning {
+                connect_timeout_ms: timeout_ms,
+                pool_idle_timeout_ms: crate::config::DEFAULT_POOL_IDLE_TIMEOUT_MS,
+                pool_max_idle_per_host: crate::config::DEFAULT_POOL_MAX_IDLE_PER_HOST,
+                tcp_keepalive_ms: crate::config::DEFAULT_TCP_KEEPALIVE_MS,
+            })?,
+            timeout_ms,
+        })
     }
 }
 
 #[async_trait]
 impl TokenRefreshClient for OAuthRefreshClient {
     async fn refresh(&self, refresh_token: &str) -> Result<TokenResponse> {
-        let response = self
-            .client
-            .post(format!("{}/oauth/token", self.issuer.trim_end_matches('/')))
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_token),
-                ("client_id", self.client_id.as_str()),
-            ])
-            .send()
-            .await?;
+        let response = tokio::time::timeout(
+            duration_from_millis(self.timeout_ms),
+            self.client
+                .post(format!("{}/oauth/token", self.issuer.trim_end_matches('/')))
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token),
+                    ("client_id", self.client_id.as_str()),
+                ])
+                .send(),
+        )
+        .await
+        .map_err(|_| ProxyError::Transport("timed out refreshing Codex OAuth token".into()))??;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();

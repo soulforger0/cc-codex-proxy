@@ -144,6 +144,8 @@ If the app quits, the shim restores or falls back to the original Claude command
 
 The app also refuses to start the proxy while Claude Code is already running. Close existing sessions first, then start the proxy and open a new session so routing is consistent from the beginning.
 
+For requests that carry `x-claude-code-session-id`, the proxy persists a bounded route pin so long-idle sessions continue using the provider/profile selected on their first request, even after profile switches or helper restarts. This is route continuity only: the proxy does not replay or resume a partially streamed model response after bytes have already been sent to Claude Code.
+
 Advanced users can preview or repair managed Claude Code settings from the app's **Advanced settings.json** section, but this is not part of the normal install flow.
 
 ## CLI Usage
@@ -169,12 +171,13 @@ When `serve` starts, it prints the local proxy URL, health URL, log path, and Cl
 | Data | Location |
 | --- | --- |
 | Config, auth, model profiles, admin token | `~/Library/Application Support/CCCodexProxy/` |
+| Session route pins | `~/Library/Application Support/CCCodexProxy/route-pins.json` |
 | DeepSeek API key | `~/Library/Application Support/CCCodexProxy/deepseek-api-key` |
 | Custom OpenAI API key | `~/Library/Application Support/CCCodexProxy/custom-openai-api-key` |
 | Logs | `~/Library/Logs/CCCodexProxy/proxy.log` |
 | Claude shim state | `~/Library/Application Support/CCCodexProxy/claude-shim.json` |
 
-Treat auth files, provider API keys, logs, account identifiers, and Claude Code session details as sensitive when sharing diagnostics.
+Treat auth files, provider API keys, route pins, logs, account identifiers, and Claude Code session details as sensitive when sharing diagnostics.
 
 ## Build From Source
 

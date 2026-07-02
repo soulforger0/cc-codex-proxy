@@ -20,7 +20,7 @@ use crate::{
 use async_stream::try_stream;
 use axum::{
     body::Body,
-    extract::{Json, State},
+    extract::{DefaultBodyLimit, Json, State},
     http::{header, HeaderMap, Response, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -61,6 +61,7 @@ pub struct ServerHandle {
     pub addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
+    shutdown_grace_period: Duration,
 }
 
 impl ServerHandle {
@@ -68,13 +69,26 @@ impl ServerHandle {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        let _ = self.task.await;
+        match tokio::time::timeout(self.shutdown_grace_period, &mut self.task).await {
+            Ok(result) => {
+                let _ = result;
+            }
+            Err(_) => {
+                warn!(
+                    timeout_ms = self.shutdown_grace_period.as_millis(),
+                    "proxy server graceful shutdown timed out; aborting server task"
+                );
+                self.task.abort();
+                let _ = self.task.await;
+            }
+        }
     }
 }
 
 pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Result<ServerHandle> {
     let registry = ModelRegistry::load_or_create(&paths.model_profiles_file)?;
-    let routes = RouteManager::from_config(&config.routing)?;
+    let routes =
+        RouteManager::from_config_and_store(&config.routing, paths.route_pins_file.clone())?;
     let codex = CodexClient::new(config.codex.clone(), auth.clone())?;
     let deepseek =
         DeepSeekClient::new(config.deepseek.clone(), paths.deepseek_api_key_file.clone())?;
@@ -97,8 +111,14 @@ pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Res
         .route("/healthz", get(healthz))
         .route("/admin/status", get(admin_status))
         .route("/admin/route", get(admin_route).put(update_admin_route))
-        .route("/v1/messages", post(messages))
-        .route("/v1/messages/count_tokens", post(count_tokens))
+        .route(
+            "/v1/messages",
+            post(messages).layer(DefaultBodyLimit::max(config.messages_body_limit_bytes)),
+        )
+        .route(
+            "/v1/messages/count_tokens",
+            post(count_tokens).layer(DefaultBodyLimit::max(config.messages_body_limit_bytes)),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -119,6 +139,7 @@ pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Res
         addr,
         shutdown: Some(tx),
         task,
+        shutdown_grace_period: Duration::from_millis(config.shutdown_grace_period_ms),
     })
 }
 
@@ -144,6 +165,9 @@ async fn admin_status(
         "activeProfile": route_status.active_profile,
         "sessionPolicy": route_status.session_policy,
         "pinnedSessionCount": route_status.pinned_session_count,
+        "sessionPinTtlSeconds": route_status.session_pin_ttl_seconds,
+        "maxPinnedSessions": route_status.max_pinned_sessions,
+        "persistSessionPins": route_status.persist_session_pins,
         "routes": route_status.routes,
         "baseUrl": format!("http://127.0.0.1:{}", state.config.port),
         "publicModels": {
@@ -184,6 +208,9 @@ async fn admin_route(
         "route": active,
         "sessionPolicy": status.session_policy,
         "pinnedSessionCount": status.pinned_session_count,
+        "sessionPinTtlSeconds": status.session_pin_ttl_seconds,
+        "maxPinnedSessions": status.max_pinned_sessions,
+        "persistSessionPins": status.persist_session_pins,
     })))
 }
 
@@ -315,15 +342,7 @@ async fn handle_codex_messages(
             tool_catalog,
             Some(request_id),
         );
-        let body = Body::from_stream(with_sse_heartbeats(stream, SSE_HEARTBEAT_INTERVAL));
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
-            .header(header::CACHE_CONTROL, "no-cache")
-            .body(body)
-            .map_err(|err| {
-                ProxyError::Transport(format!("failed to build streaming response: {err}"))
-            })
+        sse_response(stream)
     } else {
         let response = accumulate_response(
             upstream.body,
@@ -361,17 +380,7 @@ async fn handle_deepseek_messages(
     );
 
     if request.wants_stream() {
-        let body = Body::from_stream(with_sse_heartbeats(upstream.body, SSE_HEARTBEAT_INTERVAL));
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
-            .header(header::CACHE_CONTROL, "no-cache")
-            .body(body)
-            .map_err(|err| {
-                ProxyError::Transport(format!(
-                    "failed to build DeepSeek streaming response: {err}"
-                ))
-            })
+        sse_response(upstream.body)
     } else {
         Response::builder()
             .status(StatusCode::OK)
@@ -432,17 +441,7 @@ async fn handle_custom_openai_responses(
             tool_catalog,
             Some(request_id),
         );
-        let body = Body::from_stream(with_sse_heartbeats(stream, SSE_HEARTBEAT_INTERVAL));
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
-            .header(header::CACHE_CONTROL, "no-cache")
-            .body(body)
-            .map_err(|err| {
-                ProxyError::Transport(format!(
-                    "failed to build custom OpenAI Responses streaming response: {err}"
-                ))
-            })
+        sse_response(stream)
     } else {
         let response = accumulate_response(
             upstream.body,
@@ -486,17 +485,7 @@ async fn handle_custom_openai_chat(
 
     if request.wants_stream() {
         let stream = translate_chat_stream(upstream.body, request.model.clone(), Some(request_id));
-        let body = Body::from_stream(with_sse_heartbeats(stream, SSE_HEARTBEAT_INTERVAL));
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
-            .header(header::CACHE_CONTROL, "no-cache")
-            .body(body)
-            .map_err(|err| {
-                ProxyError::Transport(format!(
-                    "failed to build custom OpenAI chat streaming response: {err}"
-                ))
-            })
+        sse_response(stream)
     } else {
         let response = accumulate_chat_response(upstream.body, request.model.clone()).await?;
         Response::builder()
@@ -509,6 +498,19 @@ async fn handle_custom_openai_chat(
                 ))
             })
     }
+}
+
+fn sse_response(
+    stream: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
+) -> Result<Response<Body>> {
+    let body = Body::from_stream(with_sse_heartbeats(stream, SSE_HEARTBEAT_INTERVAL));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache, no-transform")
+        .header("x-accel-buffering", "no")
+        .body(body)
+        .map_err(|err| ProxyError::Transport(format!("failed to build streaming response: {err}")))
 }
 
 fn with_sse_heartbeats(
@@ -695,6 +697,20 @@ mod tests {
         S: Stream<Item = Result<Bytes>> + Send + 'static,
     {
         Box::pin(stream)
+    }
+
+    #[test]
+    fn sse_response_sets_streaming_headers() {
+        let response = sse_response(boxed(stream::empty())).expect("response");
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/event-stream; charset=utf-8"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache, no-transform"
+        );
+        assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
     }
 
     #[tokio::test]

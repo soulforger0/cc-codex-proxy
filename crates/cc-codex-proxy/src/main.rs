@@ -751,10 +751,14 @@ async fn cmd_bench(args: BenchArgs) -> Result<()> {
 fn auth_manager(config: &AppConfig, paths: &proxy_core::AppPaths) -> AuthManager {
     AuthManager::new(
         Arc::new(FileTokenStore::new(paths.auth_file.clone())),
-        Arc::new(OAuthRefreshClient::new(
-            config.codex.oauth_issuer.clone(),
-            config.codex.oauth_client_id.clone(),
-        )),
+        Arc::new(
+            OAuthRefreshClient::with_timeout(
+                config.codex.oauth_issuer.clone(),
+                config.codex.oauth_client_id.clone(),
+                config.codex.header_timeout_ms,
+            )
+            .expect("valid OAuth refresh client configuration"),
+        ),
     )
 }
 

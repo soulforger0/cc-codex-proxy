@@ -3,6 +3,10 @@ use crate::{
     codex::client::ByteStream,
     config::{DeepSeekConfig, DEEPSEEK_API_KEY_ENV},
     error::{ProxyError, Result},
+    http_client::{
+        build_client, duration_from_millis, monitor_idle_stream, optional_duration_from_millis,
+        HttpClientTuning,
+    },
     model::ResolvedModel,
 };
 use futures_util::TryStreamExt;
@@ -13,7 +17,6 @@ use std::{
     env, fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
-    time::Duration,
 };
 use tracing::{info, warn};
 
@@ -33,10 +36,12 @@ pub struct DeepSeekClient {
 
 impl DeepSeekClient {
     pub fn new(config: DeepSeekConfig, api_key_file: PathBuf) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .build()?;
+        let http = build_client(HttpClientTuning {
+            connect_timeout_ms: config.connect_timeout_ms,
+            pool_idle_timeout_ms: config.pool_idle_timeout_ms,
+            pool_max_idle_per_host: config.pool_max_idle_per_host,
+            tcp_keepalive_ms: config.tcp_keepalive_ms,
+        })?;
         Ok(Self {
             http,
             config,
@@ -67,7 +72,7 @@ impl DeepSeekClient {
         );
 
         let response = tokio::time::timeout(
-            Duration::from_millis(self.config.header_timeout_ms),
+            duration_from_millis(self.config.header_timeout_ms),
             self.http
                 .post(url)
                 .headers(self.headers(&api_key)?)
@@ -102,7 +107,13 @@ impl DeepSeekClient {
         }
 
         Ok(DeepSeekResponse {
-            body: Box::pin(response.bytes_stream().map_err(ProxyError::from)),
+            body: monitor_idle_stream(
+                response.bytes_stream().map_err(ProxyError::from),
+                "DeepSeek HTTP",
+                None,
+                duration_from_millis(self.config.stream_idle_warn_ms),
+                optional_duration_from_millis(self.config.stream_idle_timeout_ms),
+            ),
             status,
         })
     }

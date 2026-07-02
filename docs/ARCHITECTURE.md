@@ -15,10 +15,12 @@ Provider selection is explicit through app/CLI config as `codex`, `deepseek`, or
 - On launch, the app temporarily replaces the shell-resolved `claude` command with a managed shim. The shim applies proxy environment variables only when the app PID is alive and `/healthz` succeeds; otherwise it either falls back to the original Claude command or reports that the proxy is stopped.
 - Proxy startup is blocked while existing Claude Code processes are running, so active sessions do not silently switch backend assumptions mid-session.
 - `cc-codex-proxy serve` binds only to `127.0.0.1`.
-- `/v1/messages` streams Anthropic SSE back to Claude Code without buffering the full upstream response.
+- `/v1/messages` streams Anthropic SSE back to Claude Code without buffering the full upstream response. Streaming responses include SSE heartbeats and anti-buffering headers; the Messages endpoints also have an explicit bounded JSON body limit for large-but-controlled Claude Code transcripts.
 - Codex non-streaming requests are accumulated only after the upstream stream completes; DeepSeek non-streaming responses are passed through as JSON. Custom OpenAI non-streaming responses are translated back into Anthropic JSON.
 - Dropping the downstream response body drops the upstream request stream, so client disconnects cancel in-flight work promptly.
+- Upstream response headers use provider-specific timeouts. Open upstream streams are monitored for long idle periods and warn by default; fatal stream-idle timeouts are configurable but disabled by default so legitimate long reasoning turns are not interrupted.
 - Upstream 429/403/400 responses are returned to Claude Code as failures. The proxy does not queue or retry 429s.
+- Graceful shutdown is bounded: the helper stops accepting new work, waits briefly for active requests, then aborts the server task if streams do not drain.
 
 ## Transport Selection
 
@@ -92,7 +94,7 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | non-auto reasoning effort | `include: ["reasoning.encrypted_content"]` | Matches the Codex backend request shape used for reasoning continuity. |
 | `thinking.budget_tokens` | `reasoning.effort` | Deprecated Claude fixed thinking budgets are mapped as a fallback: `0` -> `none`, up to 4k -> `low`, up to 32k -> `medium`, above 32k -> `high`. |
 | `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting with `strict: true`; object schemas are normalized so all properties are required. |
-| `x-claude-code-session-id` | upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. The proxy does not send `prompt_cache_key` in the body on the ChatGPT Codex path. |
+| `x-claude-code-session-id` | upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. It also keys local route pins so an idle session keeps using the provider/profile selected on its first request. The proxy does not send `prompt_cache_key` in the body on the ChatGPT Codex path. |
 
 ### DeepSeek Mapping
 
@@ -120,6 +122,10 @@ Claude Code status-line scripts receive their JSON from Claude Code, not from th
 
 ChatGPT Codex subscription cost and rate-limit state are not exposed through a stable Anthropic-compatible contract, so this proxy does not synthesize Claude Code `cost` or `rate_limits` values.
 
+## Session Route Pins
+
+With the default `pinOnFirstRequest` routing policy, a request carrying `x-claude-code-session-id` is pinned to the active route profile on first use. Pins are persisted in `route-pins.json`, have a configurable TTL, and are bounded with least-recently-seen eviction. This lets long-idle Claude Code sessions keep provider/model routing stable across profile switches or helper restarts. It is not byte-level stream resume: once a response stream has started, the proxy will not replay the upstream request after a disconnect because that could duplicate tool calls or chargeable work.
+
 ## Configuration
 
 - App config: `~/Library/Application Support/CCCodexProxy/config.json`
@@ -127,6 +133,7 @@ ChatGPT Codex subscription cost and rate-limit state are not exposed through a s
 - Admin token: `~/Library/Application Support/CCCodexProxy/admin-token`
 - Claude shim state: `~/Library/Application Support/CCCodexProxy/claude-shim.json`
 - Auth: `~/Library/Application Support/CCCodexProxy/auth.json`
+- Session route pins: `~/Library/Application Support/CCCodexProxy/route-pins.json`
 - DeepSeek API key: `~/Library/Application Support/CCCodexProxy/deepseek-api-key`
 - Custom OpenAI API key: `~/Library/Application Support/CCCodexProxy/custom-openai-api-key`
 - Logs: `~/Library/Logs/CCCodexProxy/proxy.log`
@@ -137,4 +144,6 @@ Model names are intentionally data-driven and provider-scoped. If ChatGPT Codex,
 
 - 100 concurrent local Claude Code-like sessions complete against a mock upstream.
 - 250-session stress runs record latency, cancellation, memory, and file descriptor behavior.
+- Long-idle sessions with stable `x-claude-code-session-id` values resume on their original route profile after helper restart.
+- Streaming responses keep downstream clients alive with heartbeat comments while upstream idle warnings make silent upstream stalls visible.
 - Live upstream limits are treated as external constraints and surfaced to clients.

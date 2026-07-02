@@ -24,6 +24,17 @@ pub const DEFAULT_PUBLIC_PRIMARY_MODEL: &str = "gpt-5.5[1m]";
 pub const DEFAULT_PUBLIC_SMALL_MODEL: &str = "gpt-5.4-mini[1m]";
 pub const DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL: &str = "deepseek-v4-pro[1m]";
 pub const DEFAULT_DEEPSEEK_PUBLIC_SMALL_MODEL: &str = "deepseek-v4-flash";
+pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 15_000;
+pub const DEFAULT_POOL_IDLE_TIMEOUT_MS: u64 = 90_000;
+pub const DEFAULT_POOL_MAX_IDLE_PER_HOST: usize = 16;
+pub const DEFAULT_TCP_KEEPALIVE_MS: u64 = 60_000;
+pub const DEFAULT_STREAM_IDLE_WARN_MS: u64 = 120_000;
+pub const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 0;
+pub const DEFAULT_HEADER_TIMEOUT_MS: u64 = 60_000;
+pub const DEFAULT_MESSAGES_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS: u64 = 10_000;
+pub const DEFAULT_SESSION_PIN_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
+pub const DEFAULT_MAX_PINNED_SESSIONS: usize = 4_096;
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -34,6 +45,7 @@ pub struct AppPaths {
     pub admin_token_file: PathBuf,
     pub claude_shim_file: PathBuf,
     pub auth_file: PathBuf,
+    pub route_pins_file: PathBuf,
     pub deepseek_api_key_file: PathBuf,
     pub custom_openai_api_key_file: PathBuf,
 }
@@ -56,6 +68,7 @@ impl AppPaths {
             admin_token_file: app_support.join("admin-token"),
             claude_shim_file: app_support.join("claude-shim.json"),
             auth_file: app_support.join("auth.json"),
+            route_pins_file: app_support.join("route-pins.json"),
             deepseek_api_key_file: app_support.join("deepseek-api-key"),
             custom_openai_api_key_file: app_support.join("custom-openai-api-key"),
             config_dir: app_support,
@@ -127,6 +140,12 @@ pub struct CodexConfig {
     pub transport: CodexTransport,
     pub previous_response_id: bool,
     pub header_timeout_ms: u64,
+    pub connect_timeout_ms: u64,
+    pub pool_idle_timeout_ms: u64,
+    pub pool_max_idle_per_host: usize,
+    pub tcp_keepalive_ms: u64,
+    pub stream_idle_warn_ms: u64,
+    pub stream_idle_timeout_ms: u64,
 }
 
 impl Default for CodexConfig {
@@ -139,7 +158,13 @@ impl Default for CodexConfig {
             user_agent: format!("{DEFAULT_ORIGINATOR}/{}", env!("CARGO_PKG_VERSION")),
             transport: CodexTransport::default(),
             previous_response_id: false,
-            header_timeout_ms: 60_000,
+            header_timeout_ms: DEFAULT_HEADER_TIMEOUT_MS,
+            connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
+            pool_idle_timeout_ms: DEFAULT_POOL_IDLE_TIMEOUT_MS,
+            pool_max_idle_per_host: DEFAULT_POOL_MAX_IDLE_PER_HOST,
+            tcp_keepalive_ms: DEFAULT_TCP_KEEPALIVE_MS,
+            stream_idle_warn_ms: DEFAULT_STREAM_IDLE_WARN_MS,
+            stream_idle_timeout_ms: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
         }
     }
 }
@@ -150,6 +175,12 @@ pub struct DeepSeekConfig {
     pub base_url: String,
     pub user_agent: String,
     pub header_timeout_ms: u64,
+    pub connect_timeout_ms: u64,
+    pub pool_idle_timeout_ms: u64,
+    pub pool_max_idle_per_host: usize,
+    pub tcp_keepalive_ms: u64,
+    pub stream_idle_warn_ms: u64,
+    pub stream_idle_timeout_ms: u64,
 }
 
 impl Default for DeepSeekConfig {
@@ -157,7 +188,13 @@ impl Default for DeepSeekConfig {
         Self {
             base_url: DEFAULT_DEEPSEEK_ENDPOINT.to_string(),
             user_agent: format!("{DEFAULT_ORIGINATOR}/{}", env!("CARGO_PKG_VERSION")),
-            header_timeout_ms: 60_000,
+            header_timeout_ms: DEFAULT_HEADER_TIMEOUT_MS,
+            connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
+            pool_idle_timeout_ms: DEFAULT_POOL_IDLE_TIMEOUT_MS,
+            pool_max_idle_per_host: DEFAULT_POOL_MAX_IDLE_PER_HOST,
+            tcp_keepalive_ms: DEFAULT_TCP_KEEPALIVE_MS,
+            stream_idle_warn_ms: DEFAULT_STREAM_IDLE_WARN_MS,
+            stream_idle_timeout_ms: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
         }
     }
 }
@@ -202,6 +239,12 @@ pub struct CustomOpenAIConfig {
     pub user_agent: String,
     pub header_timeout_ms: u64,
     pub protocol: CustomOpenAIProtocol,
+    pub connect_timeout_ms: u64,
+    pub pool_idle_timeout_ms: u64,
+    pub pool_max_idle_per_host: usize,
+    pub tcp_keepalive_ms: u64,
+    pub stream_idle_warn_ms: u64,
+    pub stream_idle_timeout_ms: u64,
 }
 
 impl Default for CustomOpenAIConfig {
@@ -209,8 +252,14 @@ impl Default for CustomOpenAIConfig {
         Self {
             base_url: DEFAULT_CUSTOM_OPENAI_ENDPOINT.to_string(),
             user_agent: format!("{DEFAULT_ORIGINATOR}/{}", env!("CARGO_PKG_VERSION")),
-            header_timeout_ms: 60_000,
+            header_timeout_ms: DEFAULT_HEADER_TIMEOUT_MS,
             protocol: CustomOpenAIProtocol::Responses,
+            connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
+            pool_idle_timeout_ms: DEFAULT_POOL_IDLE_TIMEOUT_MS,
+            pool_max_idle_per_host: DEFAULT_POOL_MAX_IDLE_PER_HOST,
+            tcp_keepalive_ms: DEFAULT_TCP_KEEPALIVE_MS,
+            stream_idle_warn_ms: DEFAULT_STREAM_IDLE_WARN_MS,
+            stream_idle_timeout_ms: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
         }
     }
 }
@@ -250,6 +299,9 @@ impl Default for RouteProfileConfig {
 pub struct RoutingConfig {
     pub active_profile: String,
     pub session_policy: SessionRoutingPolicy,
+    pub session_pin_ttl_seconds: u64,
+    pub max_pinned_sessions: usize,
+    pub persist_session_pins: bool,
     pub profiles: Vec<RouteProfileConfig>,
 }
 
@@ -258,6 +310,9 @@ impl Default for RoutingConfig {
         Self {
             active_profile: "codex".into(),
             session_policy: SessionRoutingPolicy::PinOnFirstRequest,
+            session_pin_ttl_seconds: DEFAULT_SESSION_PIN_TTL_SECONDS,
+            max_pinned_sessions: DEFAULT_MAX_PINNED_SESSIONS,
+            persist_session_pins: true,
             profiles: default_route_profiles(),
         }
     }
@@ -330,6 +385,8 @@ pub struct AppConfig {
     pub deepseek: DeepSeekConfig,
     pub custom_openai: CustomOpenAIConfig,
     pub log: LogConfig,
+    pub messages_body_limit_bytes: usize,
+    pub shutdown_grace_period_ms: u64,
 }
 
 impl Default for AppConfig {
@@ -344,6 +401,8 @@ impl Default for AppConfig {
             deepseek: DeepSeekConfig::default(),
             custom_openai: CustomOpenAIConfig::default(),
             log: LogConfig::default(),
+            messages_body_limit_bytes: DEFAULT_MESSAGES_BODY_LIMIT_BYTES,
+            shutdown_grace_period_ms: DEFAULT_SHUTDOWN_GRACE_PERIOD_MS,
         }
     }
 }
