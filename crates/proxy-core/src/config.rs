@@ -30,6 +30,7 @@ pub const DEFAULT_POOL_MAX_IDLE_PER_HOST: usize = 16;
 pub const DEFAULT_TCP_KEEPALIVE_MS: u64 = 60_000;
 pub const DEFAULT_STREAM_IDLE_WARN_MS: u64 = 120_000;
 pub const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 0;
+pub const DEFAULT_CLAUDE_COMPAT_DOWNSTREAM_IDLE_PING_MS: u64 = 10_000;
 pub const DEFAULT_HEADER_TIMEOUT_MS: u64 = 60_000;
 pub const DEFAULT_MESSAGES_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS: u64 = 10_000;
@@ -326,6 +327,7 @@ pub struct ClaudeProxyConfig {
     pub public_primary_model: String,
     pub public_small_model: String,
     pub auto_compact_window: u32,
+    pub downstream_idle_ping_ms: u64,
 }
 
 impl Default for ClaudeProxyConfig {
@@ -336,6 +338,7 @@ impl Default for ClaudeProxyConfig {
             public_primary_model: DEFAULT_PUBLIC_PRIMARY_MODEL.into(),
             public_small_model: DEFAULT_PUBLIC_SMALL_MODEL.into(),
             auto_compact_window: 272_000,
+            downstream_idle_ping_ms: DEFAULT_CLAUDE_COMPAT_DOWNSTREAM_IDLE_PING_MS,
         }
     }
 }
@@ -480,7 +483,22 @@ impl AppConfig {
                 _ => CodexTransport::Auto,
             };
         }
+        if let Some(value) = env_u64("OPENAI_UPSTREAM_IDLE_WARN_MS") {
+            self.codex.stream_idle_warn_ms = value;
+            self.custom_openai.stream_idle_warn_ms = value;
+        }
+        if let Some(value) = env_u64("OPENAI_UPSTREAM_IDLE_ABORT_MS") {
+            self.codex.stream_idle_timeout_ms = value;
+            self.custom_openai.stream_idle_timeout_ms = value;
+        }
+        if let Some(value) = env_u64("CLAUDE_COMPAT_DOWNSTREAM_IDLE_PING_MS") {
+            self.claude.downstream_idle_ping_ms = value;
+        }
     }
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    env::var(name).ok()?.parse::<u64>().ok()
 }
 
 fn truthy(value: &str) -> bool {

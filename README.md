@@ -84,7 +84,7 @@ flowchart LR
 - Custom OpenAI-compatible endpoints are now a first-class provider with Responses and Chat Completions modes.
 - Provider-scoped Claude Code settings and model profiles keep Codex, DeepSeek, and custom endpoint defaults separated.
 - Session route pins keep long-idle Claude Code conversations on their original provider/model profile across helper restarts.
-- Streaming and shutdown handling are more resilient, with heartbeat comments, idle warnings, bounded request bodies, and graceful drain behavior.
+- Streaming and shutdown handling are more resilient, with Claude-compatible ping events, idle warnings, bounded request bodies, and graceful drain behavior.
 
 ## Compatibility
 

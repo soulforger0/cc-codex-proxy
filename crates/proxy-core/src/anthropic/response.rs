@@ -87,6 +87,23 @@ pub fn message_stop() -> Bytes {
     sse_event("message_stop", json!({ "type": "message_stop" }))
 }
 
+pub fn ping() -> Bytes {
+    sse_event("ping", json!({ "type": "ping" }))
+}
+
+pub fn error(error_type: &str, message: &str) -> Bytes {
+    sse_event(
+        "error",
+        json!({
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "message": message
+            }
+        }),
+    )
+}
+
 pub fn response_json(response: AnthropicResponse) -> Value {
     serde_json::to_value(response).unwrap_or_else(|_| json!({}))
 }

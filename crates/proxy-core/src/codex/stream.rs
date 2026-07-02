@@ -31,7 +31,19 @@ pub fn translate_stream(
         let mut event_index = 0_u64;
         futures_util::pin_mut!(upstream);
         while let Some(chunk) = upstream.next().await {
-            for event in parser.push(&chunk?, request_id.as_deref()) {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    warn!(
+                        request_id = request_id.as_deref().unwrap_or("untracked"),
+                        error = %err,
+                        "Codex upstream stream failed after response started"
+                    );
+                    yield response::error("api_error", &format!("upstream stream failed: {err}"));
+                    return;
+                }
+            };
+            for event in parser.push(&chunk, request_id.as_deref()) {
                 event_index += 1;
                 let produced = reducer.process_event(&event);
                 log_codex_event(&event, event_index, produced.len(), request_id.as_deref());
@@ -145,6 +157,10 @@ impl ToolCatalog {
             missing_required,
             extra_input_keys,
         }
+    }
+
+    fn is_known(&self, tool_name: &str) -> bool {
+        self.tools.contains_key(tool_name)
     }
 }
 
@@ -314,9 +330,19 @@ struct CodexReducer {
     next_index: usize,
     text: String,
     tool_blocks: Vec<AnthropicContentBlock>,
+    active_tool_blocks: BTreeMap<String, ActiveToolBlock>,
+    finished_tool_call_ids: BTreeSet<String>,
     usage: AnthropicUsage,
     stop_reason: Option<String>,
     stopped: bool,
+}
+
+#[derive(Debug)]
+struct ActiveToolBlock {
+    index: usize,
+    call_id: String,
+    name: String,
+    arguments: String,
 }
 
 impl CodexReducer {
@@ -336,6 +362,8 @@ impl CodexReducer {
             next_index: 0,
             text: String::new(),
             tool_blocks: Vec::new(),
+            active_tool_blocks: BTreeMap::new(),
+            finished_tool_call_ids: BTreeSet::new(),
             usage: AnthropicUsage {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -352,102 +380,15 @@ impl CodexReducer {
         if let Some(delta) = extract_text_delta(event, self.text.is_empty()) {
             self.push_text(&mut out, &delta);
         }
+        self.start_tool_from_added_item(event, &mut out);
+        self.push_tool_argument_delta(event, &mut out);
+        self.finish_tool_from_argument_done(event, &mut out);
+        self.finish_tool_from_output_item_done(event, &mut out);
         for tool in extract_function_calls(event, self.request_id.as_deref()) {
-            if self
-                .tool_blocks
-                .iter()
-                .any(|block| block.id.as_deref() == Some(tool.call_id.as_str()))
-            {
+            if self.tool_call_finished_or_active(&tool.call_id) {
                 continue;
             }
-            let validation = self.tool_catalog.validate(&tool.name, &tool.arguments);
-            if !validation.known {
-                warn!(
-                    request_id = self.request_id.as_deref().unwrap_or("untracked"),
-                    call_id = %tool.call_id,
-                    tool_name = %tool.name,
-                    input_kind = value_kind(&tool.arguments),
-                    input_keys = %join_set(&validation.input_keys),
-                    raw_arguments = %truncate_for_log(&tool.arguments.to_string(), 1_000),
-                    "upstream requested a tool that Claude Code did not offer; skipping tool_use"
-                );
-                self.push_text(
-                    &mut out,
-                    &format!(
-                        "Skipped unsupported upstream tool call `{}` because Claude Code did not offer that tool.",
-                        tool.name
-                    ),
-                );
-                continue;
-            }
-            if !validation.missing_required.is_empty() {
-                warn!(
-                    request_id = self.request_id.as_deref().unwrap_or("untracked"),
-                    call_id = %tool.call_id,
-                    tool_name = %tool.name,
-                    required = %join_set(&validation.required),
-                    properties = %join_set(&validation.properties),
-                    missing_required = %join_set(&validation.missing_required),
-                    input_kind = value_kind(&tool.arguments),
-                    input_keys = %join_set(&validation.input_keys),
-                    raw_arguments = %truncate_for_log(&tool.arguments.to_string(), 1_000),
-                    "upstream tool call is missing required Claude Code input keys; skipping tool_use"
-                );
-                self.push_text(
-                    &mut out,
-                    &format!(
-                        "Skipped invalid upstream tool call `{}` because required input keys were missing: {}.",
-                        tool.name,
-                        join_set(&validation.missing_required)
-                    ),
-                );
-                continue;
-            }
-            let index = self.next_index;
-            self.next_index += 1;
-            if self.text_open {
-                out.push(response::content_block_stop(self.text_index));
-                self.text_open = false;
-            }
-            info!(
-                request_id = self.request_id.as_deref().unwrap_or("untracked"),
-                call_id = %tool.call_id,
-                tool_name = %tool.name,
-                input_kind = value_kind(&tool.arguments),
-                input_keys = %join_set(&validation.input_keys),
-                required = %join_set(&validation.required),
-                properties = %join_set(&validation.properties),
-                extra_input_keys = %join_set(&validation.extra_input_keys),
-                "emitting Claude tool_use"
-            );
-            let block = AnthropicContentBlock {
-                kind: "tool_use".into(),
-                text: None,
-                id: Some(tool.call_id.clone()),
-                name: Some(tool.name.clone()),
-                input: Some(tool.arguments.clone()),
-            };
-            out.push(response::content_block_start(
-                index,
-                json!({
-                    "type": "tool_use",
-                    "id": tool.call_id,
-                    "name": tool.name,
-                    "input": {}
-                }),
-            ));
-            let arguments_json = tool.arguments.to_string();
-            if arguments_json != "{}" {
-                out.push(response::content_block_delta(
-                    index,
-                    json!({
-                        "type": "input_json_delta",
-                        "partial_json": arguments_json
-                    }),
-                ));
-            }
-            out.push(response::content_block_stop(index));
-            self.tool_blocks.push(block);
+            self.emit_complete_tool_call(tool, &mut out);
         }
         if let Some(usage) = extract_usage(event) {
             self.usage = usage;
@@ -461,6 +402,9 @@ impl CodexReducer {
     }
 
     fn push_text(&mut self, out: &mut Vec<Bytes>, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
         if !self.text_open {
             self.text_open = true;
             self.text_index = self.next_index;
@@ -477,11 +421,289 @@ impl CodexReducer {
         ));
     }
 
+    fn start_tool_from_added_item(&mut self, event: &Value, out: &mut Vec<Bytes>) {
+        if !event_type(event).contains("output_item.added") {
+            return;
+        }
+        let Some(item) = event_item(event) else {
+            return;
+        };
+        let Some((call_id, name)) = tool_call_identity_from_item(item) else {
+            return;
+        };
+        if self.tool_call_finished_or_active(&call_id) {
+            return;
+        }
+        let key = tool_event_key(event, item, &call_id);
+        if self.active_tool_blocks.contains_key(&key) {
+            return;
+        }
+        if !self.tool_catalog.is_known(&name) {
+            warn!(
+                request_id = self.request_id.as_deref().unwrap_or("untracked"),
+                call_id = %call_id,
+                tool_name = %name,
+                "upstream started a tool that Claude Code did not offer; not opening Claude tool_use block"
+            );
+            return;
+        }
+        if self.text_open {
+            out.push(response::content_block_stop(self.text_index));
+            self.text_open = false;
+        }
+        let index = self.next_index;
+        self.next_index += 1;
+        info!(
+            request_id = self.request_id.as_deref().unwrap_or("untracked"),
+            call_id = %call_id,
+            tool_name = %name,
+            "opening streamed Claude tool_use block"
+        );
+        out.push(response::content_block_start(
+            index,
+            json!({
+                "type": "tool_use",
+                "id": call_id.clone(),
+                "name": name.clone(),
+                "input": {}
+            }),
+        ));
+        self.active_tool_blocks.insert(
+            key,
+            ActiveToolBlock {
+                index,
+                call_id,
+                name,
+                arguments: String::new(),
+            },
+        );
+    }
+
+    fn push_tool_argument_delta(&mut self, event: &Value, out: &mut Vec<Bytes>) {
+        if !event_type(event).contains("function_call_arguments.delta") {
+            return;
+        }
+        let Some(delta) = event.get("delta").and_then(Value::as_str) else {
+            return;
+        };
+        if delta.is_empty() {
+            return;
+        }
+        let Some(key) = tool_delta_event_key(event) else {
+            warn!(
+                request_id = self.request_id.as_deref().unwrap_or("untracked"),
+                delta_chars = delta.chars().count(),
+                "upstream function_call argument delta had no tool key; cannot emit Claude input_json_delta"
+            );
+            return;
+        };
+        let Some(block) = self.active_tool_blocks.get_mut(&key) else {
+            warn!(
+                request_id = self.request_id.as_deref().unwrap_or("untracked"),
+                tool_key = %key,
+                delta_chars = delta.chars().count(),
+                "upstream function_call argument delta arrived without an active Claude tool_use block"
+            );
+            return;
+        };
+        block.arguments.push_str(delta);
+        out.push(response::content_block_delta(
+            block.index,
+            json!({
+                "type": "input_json_delta",
+                "partial_json": delta
+            }),
+        ));
+    }
+
+    fn finish_tool_from_argument_done(&mut self, event: &Value, out: &mut Vec<Bytes>) {
+        if !event_type(event).contains("function_call_arguments.done") {
+            return;
+        }
+        let Some(key) = tool_delta_event_key(event) else {
+            return;
+        };
+        let final_arguments = event.get("arguments").and_then(Value::as_str);
+        self.finish_active_tool_block(&key, final_arguments, out);
+    }
+
+    fn finish_tool_from_output_item_done(&mut self, event: &Value, out: &mut Vec<Bytes>) {
+        if !event_type(event).contains("output_item.done") {
+            return;
+        }
+        let Some(item) = event_item(event) else {
+            return;
+        };
+        let Some((call_id, _)) = tool_call_identity_from_item(item) else {
+            return;
+        };
+        let key = tool_event_key(event, item, &call_id);
+        let final_arguments = item.get("arguments").and_then(Value::as_str);
+        self.finish_active_tool_block(&key, final_arguments, out);
+    }
+
+    fn finish_active_tool_block(
+        &mut self,
+        key: &str,
+        final_arguments: Option<&str>,
+        out: &mut Vec<Bytes>,
+    ) {
+        let Some(mut block) = self.active_tool_blocks.remove(key) else {
+            return;
+        };
+        if let Some(arguments) = final_arguments {
+            block.arguments = arguments.to_string();
+        }
+        let arguments = parse_tool_arguments_raw(
+            block.arguments.as_str(),
+            &block.call_id,
+            &block.name,
+            self.request_id.as_deref(),
+        );
+        let arguments = sanitize_tool_arguments(
+            &block.name,
+            arguments,
+            &block.call_id,
+            self.request_id.as_deref(),
+        );
+        let validation = self.tool_catalog.validate(&block.name, &arguments);
+        if !validation.missing_required.is_empty() {
+            warn!(
+                request_id = self.request_id.as_deref().unwrap_or("untracked"),
+                call_id = %block.call_id,
+                tool_name = %block.name,
+                required = %join_set(&validation.required),
+                properties = %join_set(&validation.properties),
+                missing_required = %join_set(&validation.missing_required),
+                input_kind = value_kind(&arguments),
+                input_keys = %join_set(&validation.input_keys),
+                raw_arguments = %truncate_for_log(&block.arguments, 1_000),
+                "streamed upstream tool call is missing required Claude Code input keys"
+            );
+        }
+        out.push(response::content_block_stop(block.index));
+        self.finished_tool_call_ids.insert(block.call_id.clone());
+        self.tool_blocks.push(AnthropicContentBlock {
+            kind: "tool_use".into(),
+            text: None,
+            id: Some(block.call_id),
+            name: Some(block.name),
+            input: Some(arguments),
+        });
+    }
+
+    fn emit_complete_tool_call(&mut self, tool: ToolCall, out: &mut Vec<Bytes>) {
+        let validation = self.tool_catalog.validate(&tool.name, &tool.arguments);
+        if !validation.known {
+            warn!(
+                request_id = self.request_id.as_deref().unwrap_or("untracked"),
+                call_id = %tool.call_id,
+                tool_name = %tool.name,
+                input_kind = value_kind(&tool.arguments),
+                input_keys = %join_set(&validation.input_keys),
+                raw_arguments = %truncate_for_log(&tool.arguments.to_string(), 1_000),
+                "upstream requested a tool that Claude Code did not offer; skipping tool_use"
+            );
+            self.push_text(
+                out,
+                &format!(
+                    "Skipped unsupported upstream tool call `{}` because Claude Code did not offer that tool.",
+                    tool.name
+                ),
+            );
+            return;
+        }
+        if !validation.missing_required.is_empty() {
+            warn!(
+                request_id = self.request_id.as_deref().unwrap_or("untracked"),
+                call_id = %tool.call_id,
+                tool_name = %tool.name,
+                required = %join_set(&validation.required),
+                properties = %join_set(&validation.properties),
+                missing_required = %join_set(&validation.missing_required),
+                input_kind = value_kind(&tool.arguments),
+                input_keys = %join_set(&validation.input_keys),
+                raw_arguments = %truncate_for_log(&tool.arguments.to_string(), 1_000),
+                "upstream tool call is missing required Claude Code input keys; skipping tool_use"
+            );
+            self.push_text(
+                out,
+                &format!(
+                    "Skipped invalid upstream tool call `{}` because required input keys were missing: {}.",
+                    tool.name,
+                    join_set(&validation.missing_required)
+                ),
+            );
+            return;
+        }
+        let index = self.next_index;
+        self.next_index += 1;
+        if self.text_open {
+            out.push(response::content_block_stop(self.text_index));
+            self.text_open = false;
+        }
+        info!(
+            request_id = self.request_id.as_deref().unwrap_or("untracked"),
+            call_id = %tool.call_id,
+            tool_name = %tool.name,
+            input_kind = value_kind(&tool.arguments),
+            input_keys = %join_set(&validation.input_keys),
+            required = %join_set(&validation.required),
+            properties = %join_set(&validation.properties),
+            extra_input_keys = %join_set(&validation.extra_input_keys),
+            "emitting Claude tool_use"
+        );
+        out.push(response::content_block_start(
+            index,
+            json!({
+                "type": "tool_use",
+                "id": tool.call_id.clone(),
+                "name": tool.name.clone(),
+                "input": {}
+            }),
+        ));
+        let arguments_json = tool.arguments.to_string();
+        if arguments_json != "{}" {
+            out.push(response::content_block_delta(
+                index,
+                json!({
+                    "type": "input_json_delta",
+                    "partial_json": arguments_json
+                }),
+            ));
+        }
+        out.push(response::content_block_stop(index));
+        self.finished_tool_call_ids.insert(tool.call_id.clone());
+        self.tool_blocks.push(AnthropicContentBlock {
+            kind: "tool_use".into(),
+            text: None,
+            id: Some(tool.call_id),
+            name: Some(tool.name),
+            input: Some(tool.arguments),
+        });
+    }
+
+    fn tool_call_finished_or_active(&self, call_id: &str) -> bool {
+        self.finished_tool_call_ids.contains(call_id)
+            || self
+                .active_tool_blocks
+                .values()
+                .any(|block| block.call_id == call_id)
+            || self
+                .tool_blocks
+                .iter()
+                .any(|block| block.id.as_deref() == Some(call_id))
+    }
+
     fn finish_events(&mut self) -> Vec<Bytes> {
         let mut out = Vec::new();
         if self.text_open {
             out.push(response::content_block_stop(self.text_index));
             self.text_open = false;
+        }
+        let active_keys = self.active_tool_blocks.keys().cloned().collect::<Vec<_>>();
+        for key in active_keys {
+            self.finish_active_tool_block(&key, None, &mut out);
         }
         let stop_reason = self
             .stop_reason
@@ -537,6 +759,64 @@ struct ToolCall {
     call_id: String,
     name: String,
     arguments: Value,
+}
+
+fn event_item(event: &Value) -> Option<&Value> {
+    event.get("item").or_else(|| event.get("output_item"))
+}
+
+fn tool_call_identity_from_item(item: &Value) -> Option<(String, String)> {
+    let item_type = item.get("type").and_then(Value::as_str)?;
+    if item_type != "function_call" {
+        return None;
+    }
+    let call_id = item
+        .get("call_id")
+        .or_else(|| item.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("tool_call")
+        .to_string();
+    let name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("tool")
+        .to_string();
+    Some((call_id, name))
+}
+
+fn tool_event_key(event: &Value, item: &Value, call_id: &str) -> String {
+    event
+        .get("item_id")
+        .or_else(|| item.get("id"))
+        .or_else(|| item.get("call_id"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            event
+                .get("output_index")
+                .and_then(Value::as_u64)
+                .map(|index| format!("output_index:{index}"))
+        })
+        .unwrap_or_else(|| call_id.to_string())
+}
+
+fn tool_delta_event_key(event: &Value) -> Option<String> {
+    event
+        .get("item_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            event
+                .get("output_index")
+                .and_then(Value::as_u64)
+                .map(|index| format!("output_index:{index}"))
+        })
+        .or_else(|| {
+            event
+                .get("call_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
 }
 
 fn extract_text_delta(event: &Value, allow_snapshot: bool) -> Option<String> {
@@ -595,12 +875,15 @@ fn extract_function_calls(event: &Value, request_id: Option<&str>) -> Vec<ToolCa
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if typ.contains("output_item.added") {
+    if typ.contains("output_item.added")
+        || typ.contains("function_call_arguments.delta")
+        || typ.contains("function_call_arguments.done")
+    {
         return Vec::new();
     }
 
     let mut out = Vec::new();
-    if let Some(item) = event.get("item").or_else(|| event.get("output_item")) {
+    if let Some(item) = event_item(event) {
         if let Some(tool) = tool_call_from_item(item, request_id) {
             out.push(tool);
         }
@@ -616,10 +899,7 @@ fn extract_function_calls(event: &Value, request_id: Option<&str>) -> Vec<ToolCa
 }
 
 fn tool_call_from_item(item: &Value, request_id: Option<&str>) -> Option<ToolCall> {
-    let item_type = item.get("type").and_then(Value::as_str)?;
-    if item_type != "function_call" {
-        return None;
-    }
+    let (call_id, name) = tool_call_identity_from_item(item)?;
     if item
         .get("status")
         .and_then(Value::as_str)
@@ -631,17 +911,6 @@ fn tool_call_from_item(item: &Value, request_id: Option<&str>) -> Option<ToolCal
     {
         return None;
     }
-    let call_id = item
-        .get("call_id")
-        .or_else(|| item.get("id"))
-        .and_then(Value::as_str)
-        .unwrap_or("tool_call")
-        .to_string();
-    let name = item
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("tool")
-        .to_string();
     let arguments = sanitize_tool_arguments(
         &name,
         parse_tool_arguments(item.get("arguments"), &call_id, &name, request_id),
@@ -665,35 +934,7 @@ fn parse_tool_arguments(
         return json!({});
     };
     if let Some(raw) = arguments.as_str() {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return json!({});
-        }
-        match serde_json::from_str::<Value>(trimmed) {
-            Ok(value) if value.is_object() => value,
-            Ok(value) => {
-                warn!(
-                    request_id = request_id.unwrap_or("untracked"),
-                    call_id = %call_id,
-                    tool_name = %name,
-                    argument_kind = value_kind(&value),
-                    raw_arguments = %truncate_for_log(trimmed, 1_000),
-                    "upstream function_call arguments parsed to a non-object; replacing with empty object"
-                );
-                json!({})
-            }
-            Err(err) => {
-                warn!(
-                    request_id = request_id.unwrap_or("untracked"),
-                    call_id = %call_id,
-                    tool_name = %name,
-                    error = %err,
-                    raw_arguments = %truncate_for_log(trimmed, 1_000),
-                    "upstream function_call arguments are invalid JSON; replacing with empty object"
-                );
-                json!({})
-            }
-        }
+        parse_tool_arguments_raw(raw, call_id, name, request_id)
     } else if arguments.is_object() {
         arguments.clone()
     } else {
@@ -706,6 +947,43 @@ fn parse_tool_arguments(
             "upstream function_call arguments are not an object; replacing with empty object"
         );
         json!({})
+    }
+}
+
+fn parse_tool_arguments_raw(
+    raw: &str,
+    call_id: &str,
+    name: &str,
+    request_id: Option<&str>,
+) -> Value {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return json!({});
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) if value.is_object() => value,
+        Ok(value) => {
+            warn!(
+                request_id = request_id.unwrap_or("untracked"),
+                call_id = %call_id,
+                tool_name = %name,
+                argument_kind = value_kind(&value),
+                raw_arguments = %truncate_for_log(trimmed, 1_000),
+                "upstream function_call arguments parsed to a non-object; replacing with empty object"
+            );
+            json!({})
+        }
+        Err(err) => {
+            warn!(
+                request_id = request_id.unwrap_or("untracked"),
+                call_id = %call_id,
+                tool_name = %name,
+                error = %err,
+                raw_arguments = %truncate_for_log(trimmed, 1_000),
+                "upstream function_call arguments are invalid JSON; replacing with empty object"
+            );
+            json!({})
+        }
     }
 }
 
@@ -804,14 +1082,17 @@ fn is_completion_event(event: &Value) -> bool {
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    typ.contains("completed")
-        || typ.contains("done")
-        || event.get("response").is_some_and(|response| {
-            response
-                .get("status")
-                .and_then(Value::as_str)
-                .is_some_and(|status| status == "completed")
-        })
+    matches!(
+        typ,
+        "response.completed" | "response.failed" | "response.incomplete" | "response.cancelled"
+    ) || event.get("response").is_some_and(|response| {
+        response
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| {
+                matches!(status, "completed" | "failed" | "incomplete" | "cancelled")
+            })
+    })
 }
 
 fn extract_stop_reason(event: &Value) -> Option<String> {
@@ -886,6 +1167,20 @@ mod tests {
 
     fn read_tool_catalog(required: &[&str]) -> ToolCatalog {
         tool_catalog("Read", required, &["path", "pages"])
+    }
+
+    async fn collect_stream_body(chunks: Vec<Result<Bytes>>) -> String {
+        translate_stream(
+            Box::pin(stream::iter(chunks)),
+            "gpt-5.4".into(),
+            read_tool_catalog(&["path"]),
+            None,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(|chunk| String::from_utf8(chunk.unwrap().to_vec()).unwrap())
+        .collect::<String>()
     }
 
     #[tokio::test]
@@ -983,6 +1278,59 @@ mod tests {
         assert!(body.contains("\"input\":{}"));
         assert!(body.contains("\"type\":\"input_json_delta\""));
         assert!(body.contains("\\\"path\\\":\\\"Cargo.toml\\\""));
+    }
+
+    #[tokio::test]
+    async fn streaming_text_deltas_are_forwarded_incrementally() {
+        let chunks = vec![Ok(Bytes::from(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"he\"}\n\n\
+             data: {\"type\":\"response.output_text.delta\",\"delta\":\"llo\"}\n\n\
+             data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}\n\n",
+        ))];
+        let body = collect_stream_body(chunks).await;
+
+        assert_eq!(body.matches("\"type\":\"text_delta\"").count(), 2);
+        assert!(body.contains("\"text\":\"he\""), "{body}");
+        assert!(body.contains("\"text\":\"llo\""), "{body}");
+    }
+
+    #[tokio::test]
+    async fn streaming_function_call_arguments_deltas_are_forwarded_incrementally() {
+        let chunks = vec![Ok(Bytes::from(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n\
+             data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"fc_1\",\"delta\":\"{\"}\n\n\
+             data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"fc_1\",\"delta\":\"\\\"path\\\":\\\"Cargo.toml\\\"\"}\n\n\
+             data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"fc_1\",\"delta\":\"}\"}\n\n\
+             data: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"item_id\":\"fc_1\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}\n\n\
+             data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\",\"status\":\"completed\"}}\n\n\
+             data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}\n\n",
+        ))];
+        let body = collect_stream_body(chunks).await;
+
+        assert_eq!(body.matches("\"type\":\"input_json_delta\"").count(), 3);
+        let start = body.find("event: content_block_start").unwrap();
+        let first_delta = body.find("\"type\":\"input_json_delta\"").unwrap();
+        let stop = body.find("event: content_block_stop").unwrap();
+        let message_stop = body.find("event: message_stop").unwrap();
+        assert!(start < first_delta, "{body}");
+        assert!(first_delta < stop, "{body}");
+        assert!(stop < message_stop, "{body}");
+        assert!(body.contains("\"stop_reason\":\"tool_use\""), "{body}");
+    }
+
+    #[tokio::test]
+    async fn streaming_function_call_arguments_can_be_keyed_by_call_id() {
+        let chunks = vec![Ok(Bytes::from(
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n\
+             data: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call_1\",\"delta\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}\n\n\
+             data: {\"type\":\"response.function_call_arguments.done\",\"call_id\":\"call_1\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}\n\n\
+             data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}\n\n",
+        ))];
+        let body = collect_stream_body(chunks).await;
+
+        assert_eq!(body.matches("\"type\":\"input_json_delta\"").count(), 1);
+        assert!(body.contains("\\\"path\\\":\\\"Cargo.toml\\\""), "{body}");
+        assert!(body.contains("\"stop_reason\":\"tool_use\""), "{body}");
     }
 
     #[tokio::test]

@@ -15,7 +15,7 @@ Provider selection is explicit through app/CLI config as `codex`, `deepseek`, or
 - On launch, the app temporarily replaces the shell-resolved `claude` command with a managed shim. The shim applies proxy environment variables only when the app PID is alive and `/healthz` succeeds; otherwise it either falls back to the original Claude command or reports that the proxy is stopped.
 - Proxy startup is blocked while existing Claude Code processes are running, so active sessions do not silently switch backend assumptions mid-session.
 - `cc-codex-proxy serve` binds only to `127.0.0.1`.
-- `/v1/messages` streams Anthropic SSE back to Claude Code without buffering the full upstream response. Streaming responses include SSE heartbeats and anti-buffering headers; the Messages endpoints also have an explicit bounded JSON body limit for large-but-controlled Claude Code transcripts.
+- `/v1/messages` streams Anthropic SSE back to Claude Code without buffering the full upstream response. Streaming responses include Claude-compatible `ping` keepalives and anti-buffering headers; the Messages endpoints also have an explicit bounded JSON body limit for large-but-controlled Claude Code transcripts.
 - Codex non-streaming requests are accumulated only after the upstream stream completes; DeepSeek non-streaming responses are passed through as JSON. Custom OpenAI non-streaming responses are translated back into Anthropic JSON.
 - Dropping the downstream response body drops the upstream request stream, so client disconnects cancel in-flight work promptly.
 - Upstream response headers use provider-specific timeouts. Open upstream streams are monitored for long idle periods and warn by default; fatal stream-idle timeouts are configurable but disabled by default so legitimate long reasoning turns are not interrupted.
@@ -147,5 +147,5 @@ Model names are intentionally data-driven and provider-scoped. If ChatGPT Codex,
 - 100 concurrent local Claude Code-like sessions complete against a mock upstream.
 - 250-session stress runs record latency, cancellation, memory, and file descriptor behavior.
 - Long-idle sessions with stable `x-claude-code-session-id` values resume on their original route profile after helper restart.
-- Streaming responses keep downstream clients alive with heartbeat comments while upstream idle warnings make silent upstream stalls visible.
+- Streaming responses keep downstream clients alive with Claude-compatible `ping` events while upstream idle warnings make silent upstream stalls visible.
 - Live upstream limits are treated as external constraints and surfaced to clients.

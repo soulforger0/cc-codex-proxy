@@ -1,6 +1,8 @@
 use crate::{
     anthropic::{
-        response::{message_delta, message_start, message_stop, response_json},
+        response::{
+            message_delta, message_start, message_stop, ping as claude_ping, response_json,
+        },
         schema::{AnthropicRequest, AnthropicResponse, AnthropicTool, AnthropicUsage},
         tokens::estimate_input_tokens,
     },
@@ -45,8 +47,6 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-const SSE_HEARTBEAT_COMMENT: &[u8] = b": heartbeat\n\n";
 const TRANSCRIPT_TOKEN_DROP_MIN: u64 = 32_768;
 
 #[derive(Clone)]
@@ -441,7 +441,7 @@ async fn handle_codex_messages(
             "started fresh Codex upstream session"
         );
         if reason == CodexSessionResetReason::ClaudeClearCommand {
-            return empty_anthropic_response(&request);
+            return empty_anthropic_response(&request, state.config.claude.downstream_idle_ping_ms);
         }
     }
 
@@ -478,7 +478,7 @@ async fn handle_codex_messages(
             tool_catalog,
             Some(request_id),
         );
-        sse_response(stream)
+        sse_response(stream, state.config.claude.downstream_idle_ping_ms)
     } else {
         let response = accumulate_response(
             upstream.body,
@@ -516,7 +516,7 @@ async fn handle_deepseek_messages(
     );
 
     if request.wants_stream() {
-        sse_response(upstream.body)
+        sse_response(upstream.body, state.config.claude.downstream_idle_ping_ms)
     } else {
         Response::builder()
             .status(StatusCode::OK)
@@ -577,7 +577,7 @@ async fn handle_custom_openai_responses(
             tool_catalog,
             Some(request_id),
         );
-        sse_response(stream)
+        sse_response(stream, state.config.claude.downstream_idle_ping_ms)
     } else {
         let response = accumulate_response(
             upstream.body,
@@ -621,7 +621,7 @@ async fn handle_custom_openai_chat(
 
     if request.wants_stream() {
         let stream = translate_chat_stream(upstream.body, request.model.clone(), Some(request_id));
-        sse_response(stream)
+        sse_response(stream, state.config.claude.downstream_idle_ping_ms)
     } else {
         let response = accumulate_chat_response(upstream.body, request.model.clone()).await?;
         Response::builder()
@@ -638,8 +638,12 @@ async fn handle_custom_openai_chat(
 
 fn sse_response(
     stream: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
+    downstream_idle_ping_ms: u64,
 ) -> Result<Response<Body>> {
-    let body = Body::from_stream(with_sse_heartbeats(stream, SSE_HEARTBEAT_INTERVAL));
+    let body = Body::from_stream(with_claude_ping_keepalives(
+        stream,
+        Duration::from_millis(downstream_idle_ping_ms),
+    ));
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
@@ -649,7 +653,10 @@ fn sse_response(
         .map_err(|err| ProxyError::Transport(format!("failed to build streaming response: {err}")))
 }
 
-fn empty_anthropic_response(request: &AnthropicRequest) -> Result<Response<Body>> {
+fn empty_anthropic_response(
+    request: &AnthropicRequest,
+    downstream_idle_ping_ms: u64,
+) -> Result<Response<Body>> {
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     if request.wants_stream() {
         let events = vec![
@@ -657,7 +664,10 @@ fn empty_anthropic_response(request: &AnthropicRequest) -> Result<Response<Body>
             Ok(message_delta(Some("end_turn"), empty_usage())),
             Ok(message_stop()),
         ];
-        return sse_response(Box::pin(futures_util::stream::iter(events)));
+        return sse_response(
+            Box::pin(futures_util::stream::iter(events)),
+            downstream_idle_ping_ms,
+        );
     }
 
     let response = AnthropicResponse {
@@ -686,12 +696,18 @@ fn empty_usage() -> AnthropicUsage {
     }
 }
 
-fn with_sse_heartbeats(
+fn with_claude_ping_keepalives(
     stream: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
     interval: Duration,
 ) -> Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> {
     Box::pin(try_stream! {
         futures_util::pin_mut!(stream);
+        if interval.is_zero() {
+            while let Some(item) = stream.next().await {
+                yield item?;
+            }
+            return;
+        }
         loop {
             let sleep = tokio::time::sleep(interval);
             tokio::pin!(sleep);
@@ -703,7 +719,7 @@ fn with_sse_heartbeats(
                     }
                 }
                 _ = &mut sleep => {
-                    yield Bytes::from_static(SSE_HEARTBEAT_COMMENT);
+                    yield claude_ping();
                 }
             }
         }
@@ -979,7 +995,7 @@ mod tests {
 
     #[test]
     fn sse_response_sets_streaming_headers() {
-        let response = sse_response(boxed(stream::empty())).expect("response");
+        let response = sse_response(boxed(stream::empty()), 10_000).expect("response");
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE).unwrap(),
             "text/event-stream; charset=utf-8"
@@ -992,45 +1008,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn heartbeat_is_not_sent_immediately() {
-        let mut stream = with_sse_heartbeats(boxed(stream::pending()), Duration::from_millis(50));
+    async fn ping_is_not_sent_immediately() {
+        let mut stream =
+            with_claude_ping_keepalives(boxed(stream::pending()), Duration::from_millis(50));
 
         let result = tokio::time::timeout(Duration::from_millis(10), stream.next()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn heartbeat_is_sent_after_idle_interval() {
-        let mut stream = with_sse_heartbeats(boxed(stream::pending()), Duration::from_millis(10));
+    async fn ping_is_sent_after_idle_interval() {
+        let mut stream =
+            with_claude_ping_keepalives(boxed(stream::pending()), Duration::from_millis(10));
 
         let chunk = tokio::time::timeout(Duration::from_millis(50), stream.next())
             .await
-            .expect("heartbeat should be emitted")
+            .expect("ping should be emitted")
             .expect("stream should stay open")
-            .expect("heartbeat should be ok");
-        assert_eq!(chunk, Bytes::from_static(SSE_HEARTBEAT_COMMENT));
+            .expect("ping should be ok");
+        let body = String::from_utf8(chunk.to_vec()).unwrap();
+        assert!(body.contains("event: ping"), "{body}");
+        assert!(body.contains("\"type\":\"ping\""), "{body}");
     }
 
     #[tokio::test]
-    async fn heartbeats_repeat_during_long_idle_periods() {
-        let mut stream = with_sse_heartbeats(boxed(stream::pending()), Duration::from_millis(10));
+    async fn pings_repeat_during_long_idle_periods() {
+        let mut stream =
+            with_claude_ping_keepalives(boxed(stream::pending()), Duration::from_millis(10));
 
         for _ in 0..2 {
             let chunk = tokio::time::timeout(Duration::from_millis(50), stream.next())
                 .await
-                .expect("heartbeat should be emitted")
+                .expect("ping should be emitted")
                 .expect("stream should stay open")
-                .expect("heartbeat should be ok");
-            assert_eq!(chunk, Bytes::from_static(SSE_HEARTBEAT_COMMENT));
+                .expect("ping should be ok");
+            let body = String::from_utf8(chunk.to_vec()).unwrap();
+            assert!(body.contains("event: ping"), "{body}");
         }
     }
 
     #[tokio::test]
-    async fn forwarded_chunks_reset_heartbeat_timer() {
+    async fn forwarded_chunks_reset_ping_timer() {
         let event = Bytes::from_static(b"event: message_start\ndata: {}\n\n");
         let expected = event.clone();
         let source = stream::once(async move { Ok(event) }).chain(stream::pending());
-        let mut stream = with_sse_heartbeats(boxed(source), Duration::from_millis(30));
+        let mut stream = with_claude_ping_keepalives(boxed(source), Duration::from_millis(30));
 
         let first = stream
             .next()
@@ -1038,6 +1060,14 @@ mod tests {
             .expect("first item")
             .expect("ok first chunk");
         assert_eq!(first, expected);
+
+        let result = tokio::time::timeout(Duration::from_millis(10), stream.next()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn zero_ping_interval_disables_pings() {
+        let mut stream = with_claude_ping_keepalives(boxed(stream::pending()), Duration::ZERO);
 
         let result = tokio::time::timeout(Duration::from_millis(10), stream.next()).await;
         assert!(result.is_err());
