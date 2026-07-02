@@ -143,7 +143,9 @@ async fn claude_clear_starts_fresh_codex_upstream_session_without_forwarding() {
     let after_session = session_ids[1].as_ref().unwrap();
     assert_ne!(first_session, after_session);
     assert!(first_session.starts_with("ccp-"), "{first_session}");
-    assert!(after_session.ends_with("-session-a-g1"), "{after_session}");
+    assert_eq!(after_session, &format!("{first_session}-g1"));
+    assert!(first_session.len() <= 64, "{first_session}");
+    assert!(after_session.len() <= 64, "{after_session}");
 
     let bodies = state.bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2);
@@ -195,12 +197,11 @@ async fn transcript_shrink_starts_fresh_codex_upstream_session() {
     let session_ids = state.session_ids.lock().unwrap().clone();
     assert_eq!(session_ids.len(), 2);
     assert_ne!(session_ids[0], session_ids[1]);
-    assert!(
-        session_ids[1]
-            .as_ref()
-            .is_some_and(|session| session.ends_with("-session-b-g1")),
-        "{session_ids:?}"
-    );
+    let first_session = session_ids[0].as_ref().unwrap();
+    let after_session = session_ids[1].as_ref().unwrap();
+    assert_eq!(after_session, &format!("{first_session}-g1"));
+    assert!(first_session.len() <= 64, "{first_session}");
+    assert!(after_session.len() <= 64, "{after_session}");
     server.stop().await;
 }
 

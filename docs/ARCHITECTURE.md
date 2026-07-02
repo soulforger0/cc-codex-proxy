@@ -94,7 +94,7 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | non-auto reasoning effort | `include: ["reasoning.encrypted_content"]` | Matches the Codex backend request shape used for reasoning continuity. |
 | `thinking.budget_tokens` | `reasoning.effort` | Deprecated Claude fixed thinking budgets are mapped as a fallback: `0` -> `none`, up to 4k -> `low`, up to 32k -> `medium`, above 32k -> `high`. |
 | `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting with `strict: true`; object schemas are normalized so all properties are required. |
-| `x-claude-code-session-id` | upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. It also keys local route pins so an idle session keeps using the provider/profile selected on its first request. The proxy does not send `prompt_cache_key` in the body on the ChatGPT Codex path. |
+| `x-claude-code-session-id` | upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. The upstream session header uses a compact hash of the Claude session id so backend prompt-cache keys stay within length limits. It also keys local route pins so an idle session keeps using the provider/profile selected on its first request. The proxy does not send `prompt_cache_key` in the body on the ChatGPT Codex path. |
 
 ### DeepSeek Mapping
 

@@ -35,8 +35,10 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    fmt::Write,
     net::SocketAddr,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -48,6 +50,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 const TRANSCRIPT_TOKEN_DROP_MIN: u64 = 32_768;
+const CODEX_PROMPT_CACHE_KEY_MAX_LEN: usize = 64;
+const CODEX_SESSION_NAMESPACE_LEN: usize = 16;
+const CODEX_SESSION_HASH_BYTES: usize = 8;
 
 #[derive(Clone)]
 struct AppState {
@@ -159,12 +164,22 @@ impl CodexSessionManager {
     }
 
     fn upstream_session_id(&self, claude_session_id: &str, generation: u64) -> String {
-        let fragment = header_safe_session_fragment(claude_session_id);
-        if generation == 0 {
-            format!("ccp-{}-{fragment}", self.namespace)
+        let namespace = self
+            .namespace
+            .chars()
+            .take(CODEX_SESSION_NAMESPACE_LEN)
+            .collect::<String>();
+        let fragment = session_hash_fragment(claude_session_id);
+        let session_id = if generation == 0 {
+            format!("ccp-{namespace}-{fragment}")
         } else {
-            format!("ccp-{}-{fragment}-g{generation}", self.namespace)
-        }
+            format!("ccp-{namespace}-{fragment}-g{generation}")
+        };
+        debug_assert!(
+            session_id.len() <= CODEX_PROMPT_CACHE_KEY_MAX_LEN,
+            "Codex upstream session id exceeded prompt_cache_key max length"
+        );
+        session_id
     }
 }
 
@@ -785,26 +800,13 @@ fn anthropic_text_content(content: &Value) -> Option<String> {
     }
 }
 
-fn header_safe_session_fragment(session_id: &str) -> String {
-    let mut fragment = session_id
-        .chars()
-        .take(80)
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    while fragment.ends_with('-') {
-        fragment.pop();
+fn session_hash_fragment(session_id: &str) -> String {
+    let digest = Sha256::digest(session_id.as_bytes());
+    let mut fragment = String::with_capacity(CODEX_SESSION_HASH_BYTES * 2);
+    for byte in digest.iter().take(CODEX_SESSION_HASH_BYTES) {
+        let _ = write!(&mut fragment, "{byte:02x}");
     }
-    if fragment.is_empty() {
-        "session".into()
-    } else {
-        fragment
-    }
+    fragment
 }
 
 fn summarize_anthropic_tool_names(tools: Option<&[AnthropicTool]>) -> String {
@@ -1001,6 +1003,24 @@ mod tests {
         for text in ["/compact", "please /clear", "", "   "] {
             assert!(!is_claude_clear_command_request(&request_with_text(text)));
         }
+    }
+
+    #[test]
+    fn codex_upstream_session_ids_fit_prompt_cache_key_limit() {
+        let manager = CodexSessionManager::new();
+        let claude_session_id = "0e377980-02ec-471a-b760-ce1b2f6658a7";
+
+        let first = manager.upstream_session_id(claude_session_id, 0);
+        let generated = manager.upstream_session_id(claude_session_id, u64::MAX);
+
+        assert!(first.starts_with("ccp-"), "{first}");
+        assert!(first.len() <= CODEX_PROMPT_CACHE_KEY_MAX_LEN, "{first}");
+        assert!(!first.contains(claude_session_id), "{first}");
+        assert!(
+            generated.len() <= CODEX_PROMPT_CACHE_KEY_MAX_LEN,
+            "{generated}"
+        );
+        assert!(generated.ends_with("-g18446744073709551615"));
     }
 
     #[test]
