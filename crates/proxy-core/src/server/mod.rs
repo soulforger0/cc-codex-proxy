@@ -172,6 +172,9 @@ impl CodexSessionManager {
 #[serde(rename_all = "camelCase")]
 struct RouteUpdateRequest {
     active_profile: String,
+    primary_model: Option<String>,
+    small_model: Option<String>,
+    context_window: Option<u32>,
 }
 
 pub struct ServerHandle {
@@ -340,11 +343,18 @@ async fn update_admin_route(
     require_admin(&state, &headers)?;
     let route = state
         .routes
-        .set_active_profile(&request.active_profile)
+        .set_active_profile_config(
+            &request.active_profile,
+            request.primary_model,
+            request.small_model,
+            request.context_window,
+        )
         .await?;
     info!(
         active_profile = %route.id,
         provider = route.provider.as_str(),
+        primary_model = %route.primary_model,
+        small_model = %route.small_model,
         "active route updated"
     );
     Ok(Json(json!({

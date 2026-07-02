@@ -2,6 +2,9 @@ import Foundation
 import AppKit
 import SwiftUI
 
+private let claudePublicPrimaryModel = "claude-opus-4-8"
+private let claudePublicSmallModel = "claude-haiku-4-5"
+
 @MainActor
 final class ProxyAppModel: ObservableObject {
     @Published var isRunning = false
@@ -212,6 +215,18 @@ final class ProxyAppModel: ObservableObject {
         await refreshRuntimeStatus()
     }
 
+    func applyUpstreamModelChange() async {
+        replaceCrossProviderModelDefaults()
+        if isRunning {
+            await setActiveRoute()
+        } else {
+            lastMessage = "Model selected. It will apply when the proxy starts."
+        }
+        await refreshClaudeSettingsPreview()
+        await installClaudeShim(updateLastMessage: false)
+        await refreshRuntimeStatus()
+    }
+
     private func setActiveRoute(updateLastMessage: Bool = true) async {
         do {
             let output = try await runCLI([
@@ -220,7 +235,13 @@ final class ProxyAppModel: ObservableObject {
                 "set",
                 provider,
                 "--port",
-                "\(port)"
+                "\(port)",
+                "--model",
+                model,
+                "--small-model",
+                smallModel,
+                "--context-window",
+                "\(autoCompactWindow)"
             ])
             if updateLastMessage {
                 lastMessage = activeRouteMessage(from: output)
@@ -377,9 +398,9 @@ final class ProxyAppModel: ObservableObject {
             "--provider",
             provider,
             "--model",
-            model,
+            claudePublicPrimaryModel,
             "--small-model",
-            smallModel,
+            claudePublicSmallModel,
             "--port",
             "\(port)",
             "--auto-compact-window",
@@ -388,7 +409,19 @@ final class ProxyAppModel: ObservableObject {
     }
 
     private var serveArguments: [String] {
-        var arguments = ["serve", "--provider", provider, "--port", "\(port)"]
+        var arguments = [
+            "serve",
+            "--provider",
+            provider,
+            "--port",
+            "\(port)",
+            "--model",
+            model,
+            "--small-model",
+            smallModel,
+            "--context-window",
+            "\(autoCompactWindow)"
+        ]
         if provider == "custom-openai" {
             let trimmedBaseURL = customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedBaseURL.isEmpty {

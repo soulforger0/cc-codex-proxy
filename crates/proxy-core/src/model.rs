@@ -1,5 +1,5 @@
 use crate::{
-    config::Provider,
+    config::{Provider, DEFAULT_PUBLIC_PRIMARY_MODEL, DEFAULT_PUBLIC_SMALL_MODEL},
     error::{ProxyError, Result},
     routing::RouteSnapshot,
 };
@@ -124,21 +124,21 @@ impl ModelRegistry {
         let public_primary = strip_context_hint(public_primary_model);
         let public_small = strip_context_hint(public_small_model);
 
-        if base == public_primary {
-            return self.resolve_route_model(
-                route,
-                incoming,
-                public_primary_model,
-                &route.primary_model,
-                service_tier,
-            );
-        }
-        if base == public_small {
+        if base == public_small || is_claude_small_model_alias(&base) {
             return self.resolve_route_model(
                 route,
                 incoming,
                 public_small_model,
                 &route.small_model,
+                service_tier,
+            );
+        }
+        if base == public_primary || is_claude_primary_model_alias(&base) {
+            return self.resolve_route_model(
+                route,
+                incoming,
+                public_primary_model,
+                &route.primary_model,
                 service_tier,
             );
         }
@@ -187,10 +187,19 @@ impl ModelRegistry {
     }
 
     fn compatibility_profile(&self, provider: Provider, model: &str) -> Option<&ModelProfile> {
+        if provider != Provider::CustomOpenAI {
+            let stripped = strip_context_hint(model);
+            if is_claude_small_model_alias(&stripped) {
+                return self.default_small_fast(provider);
+            }
+            if is_claude_primary_model_alias(&stripped) {
+                return self.default_primary(provider);
+            }
+        }
+
         if provider != Provider::DeepSeek || !model.starts_with("gpt-") {
             return None;
         }
-
         let target = if model.contains("mini") {
             "deepseek-v4-flash"
         } else {
@@ -219,6 +228,12 @@ impl ModelRegistry {
             .iter()
             .find(|profile| profile.provider == provider && profile.default_small_fast)
     }
+
+    fn default_primary(&self, provider: Provider) -> Option<&ModelProfile> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.provider == provider && !profile.default_small_fast)
+    }
 }
 
 pub fn strip_context_hint(model: &str) -> String {
@@ -231,6 +246,26 @@ fn split_fast_suffix(model: &str) -> (String, Option<String>) {
     } else {
         (model.to_string(), None)
     }
+}
+
+fn is_claude_model_alias(model: &str) -> bool {
+    model
+        == DEFAULT_PUBLIC_PRIMARY_MODEL
+            .strip_suffix("[1m]")
+            .unwrap_or(DEFAULT_PUBLIC_PRIMARY_MODEL)
+        || model
+            == DEFAULT_PUBLIC_SMALL_MODEL
+                .strip_suffix("[1m]")
+                .unwrap_or(DEFAULT_PUBLIC_SMALL_MODEL)
+        || model.starts_with("claude-")
+}
+
+fn is_claude_small_model_alias(model: &str) -> bool {
+    is_claude_model_alias(model) && model.contains("haiku")
+}
+
+fn is_claude_primary_model_alias(model: &str) -> bool {
+    is_claude_model_alias(model) && !is_claude_small_model_alias(model)
 }
 
 pub fn default_profiles() -> Vec<ModelProfile> {
@@ -382,6 +417,21 @@ mod tests {
     }
 
     #[test]
+    fn provider_resolve_accepts_claude_public_aliases() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+
+        let codex = registry
+            .resolve(Provider::Codex, DEFAULT_PUBLIC_PRIMARY_MODEL)
+            .unwrap();
+        assert_eq!(codex.upstream_model, "gpt-5.5");
+
+        let deepseek = registry
+            .resolve(Provider::DeepSeek, DEFAULT_PUBLIC_SMALL_MODEL)
+            .unwrap();
+        assert_eq!(deepseek.upstream_model, "deepseek-v4-flash");
+    }
+
+    #[test]
     fn route_alias_maps_to_active_upstream_model() {
         let registry = ModelRegistry::from_profiles(default_profiles());
         let route = RouteSnapshot {
@@ -393,20 +443,57 @@ mod tests {
         };
 
         let primary = registry
-            .resolve_for_route(&route, "gpt-5.5[1m]", "gpt-5.4-mini[1m]", "gpt-5.5[1m]")
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+            )
             .unwrap();
         assert_eq!(primary.upstream_model, "deepseek-v4-pro");
-        assert_eq!(primary.public_id, "gpt-5.5");
+        assert_eq!(primary.public_id, DEFAULT_PUBLIC_PRIMARY_MODEL);
 
         let small = registry
             .resolve_for_route(
                 &route,
-                "gpt-5.5[1m]",
-                "gpt-5.4-mini[1m]",
-                "gpt-5.4-mini[1m]",
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
             )
             .unwrap();
         assert_eq!(small.upstream_model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn alternate_claude_aliases_follow_route_model_class() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+        let route = RouteSnapshot {
+            id: "codex".into(),
+            provider: Provider::Codex,
+            primary_model: "gpt-5.5".into(),
+            small_model: "gpt-5.4-mini".into(),
+            context_window: 272_000,
+        };
+
+        let sonnet = registry
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                "claude-sonnet-4-5",
+            )
+            .unwrap();
+        assert_eq!(sonnet.upstream_model, "gpt-5.5");
+
+        let haiku = registry
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                "claude-haiku-4-5",
+            )
+            .unwrap();
+        assert_eq!(haiku.upstream_model, "gpt-5.4-mini");
     }
 
     #[test]
@@ -421,7 +508,12 @@ mod tests {
         };
 
         let resolved = registry
-            .resolve_for_route(&route, "gpt-5.5[1m]", "gpt-5.4-mini[1m]", "gpt-5.5[1m]")
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+            )
             .unwrap();
         assert_eq!(resolved.upstream_model, "llama-3.3-70b");
         assert_eq!(resolved.context_window, 128_000);

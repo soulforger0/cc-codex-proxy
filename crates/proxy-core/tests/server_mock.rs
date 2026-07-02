@@ -95,7 +95,7 @@ async fn claude_clear_starts_fresh_codex_upstream_session_without_forwarding() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-a")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "before clear"}]
@@ -109,7 +109,7 @@ async fn claude_clear_starts_fresh_codex_upstream_session_without_forwarding() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-a")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "/clear previous task"}]
@@ -127,7 +127,7 @@ async fn claude_clear_starts_fresh_codex_upstream_session_without_forwarding() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-a")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "after clear"}]
@@ -164,7 +164,7 @@ async fn transcript_shrink_starts_fresh_codex_upstream_session() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-b")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [
@@ -182,7 +182,7 @@ async fn transcript_shrink_starts_fresh_codex_upstream_session() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-b")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "compacted follow-up"}]
@@ -220,7 +220,7 @@ async fn dynamic_provider_switch_uses_same_local_server() {
     let codex_response = client
         .post(format!("http://{addr}/v1/messages"))
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "hello"}]
@@ -237,7 +237,7 @@ async fn dynamic_provider_switch_uses_same_local_server() {
     let deepseek_response = client
         .post(format!("http://{addr}/v1/messages"))
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "hello"}]
@@ -273,7 +273,7 @@ async fn session_pinning_keeps_existing_session_on_original_route() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-a")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "hello"}]
@@ -293,7 +293,7 @@ async fn session_pinning_keeps_existing_session_on_original_route() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-a")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "still pinned"}]
@@ -311,7 +311,7 @@ async fn session_pinning_keeps_existing_session_on_original_route() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-b")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "new route"}]
@@ -346,7 +346,7 @@ async fn persisted_session_pin_survives_server_restart() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-a")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "hello"}]
@@ -365,7 +365,7 @@ async fn persisted_session_pin_survives_server_restart() {
         .post(format!("http://{}/v1/messages", restarted.addr))
         .header("x-claude-code-session-id", "session-a")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "still pinned"}]
@@ -383,7 +383,7 @@ async fn persisted_session_pin_survives_server_restart() {
         .post(format!("http://{}/v1/messages", restarted.addr))
         .header("x-claude-code-session-id", "session-b")
         .json(&serde_json::json!({
-            "model": "gpt-5.5[1m]",
+            "model": "claude-opus-4-8",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "new route"}]
@@ -636,6 +636,60 @@ async fn custom_openai_responses_request_sends_authorization_when_key_saved() {
     assert_eq!(
         state.last_authorization.lock().unwrap().as_deref(),
         Some("Bearer custom-secret")
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn admin_route_model_override_maps_claude_aliases_to_configured_upstream() {
+    let state = Arc::new(CustomOpenAIMockState::default());
+    let upstream = start_mock_upstream(mock_custom_openai_responses_app(state.clone())).await;
+    let (config, paths) =
+        test_custom_openai_config(upstream, CustomOpenAIProtocol::Responses, false).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+
+    admin_set_route_models(
+        server.addr,
+        "custom-openai",
+        "llama-3.3-70b",
+        "llama-3.2-3b",
+        128_000,
+    )
+    .await;
+
+    let primary = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "claude-opus-4-8",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "primary"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(primary.status(), StatusCode::OK);
+    assert_eq!(
+        state.last_model.lock().unwrap().as_deref(),
+        Some("llama-3.3-70b")
+    );
+
+    let small = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "small"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(small.status(), StatusCode::OK);
+    assert_eq!(
+        state.last_model.lock().unwrap().as_deref(),
+        Some("llama-3.2-3b")
     );
     server.stop().await;
 }
@@ -1372,6 +1426,29 @@ async fn admin_set_route(addr: std::net::SocketAddr, active_profile: &str) -> se
         .put(format!("http://{addr}/admin/route"))
         .header("x-cc-codex-admin-token", "test-admin-token")
         .json(&serde_json::json!({ "activeProfile": active_profile }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.json().await.unwrap()
+}
+
+async fn admin_set_route_models(
+    addr: std::net::SocketAddr,
+    active_profile: &str,
+    primary_model: &str,
+    small_model: &str,
+    context_window: u32,
+) -> serde_json::Value {
+    let response = reqwest::Client::new()
+        .put(format!("http://{addr}/admin/route"))
+        .header("x-cc-codex-admin-token", "test-admin-token")
+        .json(&serde_json::json!({
+            "activeProfile": active_profile,
+            "primaryModel": primary_model,
+            "smallModel": small_model,
+            "contextWindow": context_window
+        }))
         .send()
         .await
         .unwrap();

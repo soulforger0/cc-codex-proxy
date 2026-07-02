@@ -174,7 +174,7 @@ struct ContentView: View {
 
     private var modelSelection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("Claude models", systemImage: "cpu")
+            sectionTitle("Upstream models", systemImage: "cpu")
 
             VStack(alignment: .leading, spacing: 8) {
                 settingsInputRow(title: "Provider", detail: "Upstream API") {
@@ -189,11 +189,11 @@ struct ContentView: View {
                         Task { await model.applyProviderChange() }
                     }
                 }
-                settingsInputRow(title: "Model", detail: "Primary model name passed to Claude Code") {
-                    modelTextField("Model", text: $model.model)
+                settingsInputRow(title: "Model", detail: "Primary upstream model") {
+                    modelTextField("Model", text: $model.model, updatesRoute: true)
                 }
-                settingsInputRow(title: "Small Model", detail: "Fast/compact model fallback") {
-                    modelTextField("Small Model", text: $model.smallModel)
+                settingsInputRow(title: "Small Model", detail: "Small upstream model") {
+                    modelTextField("Small Model", text: $model.smallModel, updatesRoute: true)
                 }
                 if model.provider == "custom-openai" {
                     settingsInputRow(title: "Endpoint", detail: "OpenAI-compatible base URL") {
@@ -553,15 +553,23 @@ struct ContentView: View {
         }
     }
 
-    private func modelTextField(_ title: String, text: Binding<String>) -> some View {
+    private func modelTextField(
+        _ title: String,
+        text: Binding<String>,
+        updatesRoute: Bool = false
+    ) -> some View {
         TextField(title, text: text)
             .textFieldStyle(.roundedBorder)
             .font(.system(.body, design: .monospaced))
             .frame(width: title == "https://host.example" ? 300 : 210)
             .onSubmit {
                 Task {
-                    await model.refreshClaudeSettingsPreview()
-                    await model.installClaudeShim()
+                    if updatesRoute {
+                        await model.applyUpstreamModelChange()
+                    } else {
+                        await model.refreshClaudeSettingsPreview()
+                        await model.installClaudeShim()
+                    }
                 }
             }
     }

@@ -234,6 +234,33 @@ impl RouteManager {
         Ok(snapshot)
     }
 
+    pub async fn set_active_profile_config(
+        &self,
+        profile_id: &str,
+        primary_model: Option<String>,
+        small_model: Option<String>,
+        context_window: Option<u32>,
+    ) -> Result<RouteSnapshot> {
+        let snapshot = {
+            let mut profiles = self.inner.profiles.write().await;
+            let profile = profiles.get_mut(profile_id).ok_or_else(|| {
+                ProxyError::Config(format!("route profile \"{profile_id}\" is not configured"))
+            })?;
+            if let Some(primary_model) = primary_model {
+                profile.primary_model = primary_model;
+            }
+            if let Some(small_model) = small_model {
+                profile.small_model = small_model;
+            }
+            if let Some(context_window) = context_window {
+                profile.context_window = context_window;
+            }
+            RouteSnapshot::from(profile.clone())
+        };
+        *self.inner.active_profile.write().await = profile_id.to_string();
+        Ok(snapshot)
+    }
+
     pub async fn status(&self) -> Result<RouteStatus> {
         let active_profile = self.active_profile_id().await;
         let active = self.snapshot_for_profile(&active_profile).await?;
@@ -467,6 +494,29 @@ mod tests {
                 .unwrap()
                 .provider,
             Provider::DeepSeek
+        );
+    }
+
+    #[tokio::test]
+    async fn active_profile_config_can_override_models() {
+        let manager = RouteManager::from_config(&routing_config()).unwrap();
+
+        let updated = manager
+            .set_active_profile_config(
+                "custom-openai",
+                Some("llama-3.3-70b".into()),
+                Some("llama-3.2-3b".into()),
+                Some(128_000),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.provider, Provider::CustomOpenAI);
+        assert_eq!(updated.primary_model, "llama-3.3-70b");
+        assert_eq!(updated.small_model, "llama-3.2-3b");
+        assert_eq!(
+            manager.active_route().await.unwrap().primary_model,
+            "llama-3.3-70b"
         );
     }
 

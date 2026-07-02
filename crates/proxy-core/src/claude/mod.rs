@@ -1,5 +1,8 @@
 use crate::{
-    config::{Provider, DEFAULT_PORT, DEFAULT_PUBLIC_PRIMARY_MODEL, DEFAULT_PUBLIC_SMALL_MODEL},
+    config::{
+        Provider, DEFAULT_PORT, DEFAULT_PUBLIC_PRIMARY_MODEL, DEFAULT_PUBLIC_SMALL_MODEL,
+        DEFAULT_PUBLIC_SONNET_MODEL,
+    },
     error::{ProxyError, Result},
 };
 use chrono::Utc;
@@ -425,6 +428,8 @@ fn latest_backup_path(path: &Path) -> Result<Option<PathBuf>> {
 
 pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
     let mut env = Map::new();
+    let public_primary_model = claude_primary_alias(&options.model);
+    let public_small_model = claude_small_alias(&options.small_fast_model);
     env.insert(
         "ANTHROPIC_BASE_URL".into(),
         Value::String(format!("http://127.0.0.1:{}", options.port)),
@@ -435,27 +440,27 @@ pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
     );
     env.insert(
         "ANTHROPIC_MODEL".into(),
-        Value::String(options.model.clone()),
+        Value::String(public_primary_model.clone()),
     );
     env.insert(
         "ANTHROPIC_SMALL_FAST_MODEL".into(),
-        Value::String(options.small_fast_model.clone()),
+        Value::String(public_small_model.clone()),
     );
     env.insert(
         "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
-        Value::String(options.model.clone()),
+        Value::String(DEFAULT_PUBLIC_PRIMARY_MODEL.into()),
     );
     env.insert(
         "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
-        Value::String(options.model.clone()),
+        Value::String(DEFAULT_PUBLIC_SONNET_MODEL.into()),
     );
     env.insert(
         "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
-        Value::String(options.small_fast_model.clone()),
+        Value::String(DEFAULT_PUBLIC_SMALL_MODEL.into()),
     );
     env.insert(
         "CLAUDE_CODE_SUBAGENT_MODEL".into(),
-        Value::String(options.small_fast_model.clone()),
+        Value::String(public_small_model),
     );
     env.insert(
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
@@ -474,6 +479,24 @@ pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
         Value::Number(1.into()),
     );
     env
+}
+
+fn claude_primary_alias(model: &str) -> String {
+    let model = model.trim();
+    if model.starts_with("claude-") && !model.contains("haiku") {
+        model.to_string()
+    } else {
+        DEFAULT_PUBLIC_PRIMARY_MODEL.into()
+    }
+}
+
+fn claude_small_alias(model: &str) -> String {
+    let model = model.trim();
+    if model.starts_with("claude-") && model.contains("haiku") {
+        model.to_string()
+    } else {
+        DEFAULT_PUBLIC_SMALL_MODEL.into()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -866,6 +889,37 @@ mod tests {
         assert_eq!(
             codex_env.get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
             Some(&Value::String(DEFAULT_PUBLIC_PRIMARY_MODEL.into()))
+        );
+        assert_eq!(
+            codex_env.get("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            Some(&Value::String(DEFAULT_PUBLIC_SONNET_MODEL.into()))
+        );
+        assert_eq!(
+            codex_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            Some(&Value::String(DEFAULT_PUBLIC_SMALL_MODEL.into()))
+        );
+    }
+
+    #[test]
+    fn managed_env_coerces_provider_models_to_claude_aliases() {
+        let env = managed_env(&ClaudeSettingsOptions {
+            provider: Provider::Codex,
+            model: "gpt-5.5[1m]".into(),
+            small_fast_model: "gpt-5.4-mini[1m]".into(),
+            ..ClaudeSettingsOptions::default()
+        });
+
+        assert_eq!(
+            env.get("ANTHROPIC_MODEL"),
+            Some(&Value::String(DEFAULT_PUBLIC_PRIMARY_MODEL.into()))
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_SMALL_FAST_MODEL"),
+            Some(&Value::String(DEFAULT_PUBLIC_SMALL_MODEL.into()))
+        );
+        assert_eq!(
+            env.get("CLAUDE_CODE_SUBAGENT_MODEL"),
+            Some(&Value::String(DEFAULT_PUBLIC_SMALL_MODEL.into()))
         );
     }
 

@@ -77,7 +77,7 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 
 | Claude Code / Anthropic field | Codex Responses field | Notes |
 | --- | --- | --- |
-| `model` | `model` | Resolved through `model-profiles.json`; Claude `[1m]` and proxy `-fast` hints are stripped before upstream. |
+| `model` | `model` | Claude-facing aliases such as `claude-opus-4-8` and `claude-haiku-4-5` resolve to the active route's configured upstream model. Claude `[1m]` and proxy `-fast` hints are stripped before upstream. |
 | top-level `system` | `instructions` | String and text-block arrays are joined into one instruction string. |
 | message role `system` | developer `input[]` message | Mid-conversation system messages are preserved as Responses developer messages; they are not sent as role `system`. |
 | user/assistant text blocks | `input[].content[].input_text` / `output_text` | Assistant history is preserved as Responses input items. |
@@ -100,7 +100,7 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 
 | Claude Code / Anthropic field | DeepSeek field | Notes |
 | --- | --- | --- |
-| `model` | `model` | Resolved through provider-scoped `model-profiles.json`; defaults are `deepseek-v4-pro` and `deepseek-v4-flash`. |
+| `model` | `model` | Claude-facing aliases are resolved before forwarding, then the configured DeepSeek upstream model is sent. |
 | messages, system, tools, tool choice, output config | same Anthropic field | Forwarded directly to DeepSeek's Anthropic-compatible API, except `output_config.effort` is normalized. |
 | `output_config.effort` | `output_config.effort` | `auto` remains `auto`; `max` and `ultracode` become `max`; all other string effort values become `high`; absent or non-string values are left unchanged. |
 | image/document blocks | rejected locally | DeepSeek's Anthropic-compatible API does not support those content blocks. |

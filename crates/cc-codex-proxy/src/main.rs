@@ -51,6 +51,12 @@ struct ServeArgs {
     port: Option<u16>,
     #[arg(long)]
     provider: Option<Provider>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long = "small-model")]
+    small_model: Option<String>,
+    #[arg(long)]
+    context_window: Option<u32>,
     #[arg(long, env = "CCP_CUSTOM_OPENAI_BASE_URL")]
     custom_openai_base_url: Option<String>,
     #[arg(long, env = "CCP_CUSTOM_OPENAI_PROTOCOL")]
@@ -173,6 +179,12 @@ struct AdminRouteSetArgs {
     active_profile: String,
     #[arg(long, env = "PORT")]
     port: Option<u16>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long = "small-model")]
+    small_model: Option<String>,
+    #[arg(long)]
+    context_window: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -201,6 +213,9 @@ async fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Serve(ServeArgs {
         port: None,
         provider: None,
+        model: None,
+        small_model: None,
+        context_window: None,
         custom_openai_base_url: None,
         custom_openai_protocol: None,
     })) {
@@ -229,6 +244,12 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         args.custom_openai_base_url,
         args.custom_openai_protocol,
     );
+    apply_route_model_args(
+        &mut config,
+        args.model,
+        args.small_model,
+        args.context_window,
+    )?;
     let _guards = logging::init(&paths, config.log.stderr, config.log.verbose)?;
     let active_provider = config.active_provider()?;
     tracing::info!(
@@ -677,10 +698,20 @@ async fn cmd_admin(args: AdminCommand) -> Result<()> {
             AdminRouteSubcommand::Set(args) => {
                 let port = args.port.unwrap_or(config.port);
                 let client = reqwest::Client::new();
+                let mut body = serde_json::json!({ "activeProfile": args.active_profile });
+                if let Some(model) = args.model {
+                    body["primaryModel"] = serde_json::Value::String(model);
+                }
+                if let Some(small_model) = args.small_model {
+                    body["smallModel"] = serde_json::Value::String(small_model);
+                }
+                if let Some(context_window) = args.context_window {
+                    body["contextWindow"] = serde_json::Value::Number(context_window.into());
+                }
                 let resp = client
                     .put(format!("http://127.0.0.1:{port}/admin/route"))
                     .header("x-cc-codex-admin-token", &config.admin_token)
-                    .json(&serde_json::json!({ "activeProfile": args.active_profile }))
+                    .json(&body)
                     .send()
                     .await
                     .context("failed to reach local proxy admin endpoint")?;
@@ -773,6 +804,39 @@ fn apply_custom_openai_args(
     if let Some(protocol) = protocol {
         config.custom_openai.protocol = protocol;
     }
+}
+
+fn apply_route_model_args(
+    config: &mut AppConfig,
+    model: Option<String>,
+    small_model: Option<String>,
+    context_window: Option<u32>,
+) -> Result<()> {
+    if model.is_none() && small_model.is_none() && context_window.is_none() {
+        return Ok(());
+    }
+    let active_profile = config.routing.active_profile.clone();
+    let profile = config
+        .routing
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == active_profile)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "active route profile \"{}\" is not configured",
+                active_profile
+            )
+        })?;
+    if let Some(model) = model {
+        profile.primary_model = model;
+    }
+    if let Some(small_model) = small_model {
+        profile.small_model = small_model;
+    }
+    if let Some(context_window) = context_window {
+        profile.context_window = context_window;
+    }
+    Ok(())
 }
 
 fn ensure_codex_provider(provider: Provider, action: &str) -> Result<()> {
