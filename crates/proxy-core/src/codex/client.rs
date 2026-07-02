@@ -228,7 +228,7 @@ impl CodexClient {
         info!(model = %body.model, input_items = body.input.len(), "Codex websocket connected");
         let payload = websocket_create_payload(body);
         socket
-            .send(Message::Text(payload.into()))
+            .send(Message::Text(payload))
             .await
             .map_err(|err| ProxyError::Transport(format!("Codex websocket send failed: {err}")))?;
 
@@ -796,8 +796,7 @@ mod tests {
                     "message": "Expected a 'response.create' message as the first websocket event."
                 }
             })
-            .to_string()
-            .into(),
+            .to_string(),
         ))
         .unwrap_err();
 
@@ -814,20 +813,16 @@ mod tests {
     #[test]
     fn websocket_terminal_detection_only_stops_on_response_terminal_events() {
         assert!(websocket_message_is_terminal(&Message::Text(
-            json!({"type": "response.completed"}).to_string().into()
+            json!({"type": "response.completed"}).to_string()
         )));
         assert!(websocket_message_is_terminal(&Message::Text(
-            json!({"type": "response.failed"}).to_string().into()
+            json!({"type": "response.failed"}).to_string()
         )));
         assert!(!websocket_message_is_terminal(&Message::Text(
-            json!({"type": "response.output_text.done"})
-                .to_string()
-                .into()
+            json!({"type": "response.output_text.done"}).to_string()
         )));
         assert!(!websocket_message_is_terminal(&Message::Text(
-            json!({"type": "response.content_part.done"})
-                .to_string()
-                .into()
+            json!({"type": "response.content_part.done"}).to_string()
         )));
     }
 

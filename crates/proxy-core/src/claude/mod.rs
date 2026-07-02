@@ -1,5 +1,5 @@
 use crate::{
-    config::{Provider, DEFAULT_PORT},
+    config::{Provider, DEFAULT_PORT, DEFAULT_PUBLIC_PRIMARY_MODEL, DEFAULT_PUBLIC_SMALL_MODEL},
     error::{ProxyError, Result},
 };
 use chrono::Utc;
@@ -45,9 +45,9 @@ impl Default for ClaudeSettingsOptions {
         Self {
             provider: Provider::Codex,
             port: DEFAULT_PORT,
-            model: "cc-proxy-primary[1m]".into(),
-            small_fast_model: "cc-proxy-small[1m]".into(),
-            auto_compact_window: 128_000,
+            model: DEFAULT_PUBLIC_PRIMARY_MODEL.into(),
+            small_fast_model: DEFAULT_PUBLIC_SMALL_MODEL.into(),
+            auto_compact_window: 272_000,
         }
     }
 }
@@ -865,7 +865,7 @@ mod tests {
         );
         assert_eq!(
             codex_env.get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
-            Some(&Value::String("cc-proxy-primary[1m]".into()))
+            Some(&Value::String(DEFAULT_PUBLIC_PRIMARY_MODEL.into()))
         );
     }
 

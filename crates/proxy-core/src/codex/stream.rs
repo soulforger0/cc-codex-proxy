@@ -627,7 +627,7 @@ fn tool_call_from_item(item: &Value, request_id: Option<&str>) -> Option<ToolCal
         && item
             .get("arguments")
             .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
+            .map_or(true, str::is_empty)
     {
         return None;
     }

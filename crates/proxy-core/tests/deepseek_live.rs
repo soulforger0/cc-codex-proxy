@@ -39,9 +39,11 @@ async fn live_deepseek_proxy_reaches_deepseek_api() {
         deepseek_api_key_file: dir.path().join("config/deepseek-api-key"),
         custom_openai_api_key_file: dir.path().join("config/custom-openai-api-key"),
     };
-    let mut config = AppConfig::default();
-    config.port = 0;
-    config.provider = Provider::DeepSeek;
+    let config = AppConfig {
+        port: 0,
+        provider: Provider::DeepSeek,
+        ..Default::default()
+    };
 
     let auth = AuthManager::new(Arc::new(MemoryTokenStore::default()), Arc::new(NoRefresh));
     let server = serve(config, paths, auth).await.unwrap();

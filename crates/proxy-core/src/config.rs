@@ -20,8 +20,10 @@ pub const OAUTH_CALLBACK_PORT: u16 = 1455;
 pub const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 pub const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 pub const CUSTOM_OPENAI_API_KEY_ENV: &str = "CUSTOM_OPENAI_API_KEY";
-pub const DEFAULT_PUBLIC_PRIMARY_MODEL: &str = "cc-proxy-primary[1m]";
-pub const DEFAULT_PUBLIC_SMALL_MODEL: &str = "cc-proxy-small[1m]";
+pub const DEFAULT_PUBLIC_PRIMARY_MODEL: &str = "gpt-5.5[1m]";
+pub const DEFAULT_PUBLIC_SMALL_MODEL: &str = "gpt-5.4-mini[1m]";
+pub const DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL: &str = "deepseek-v4-pro[1m]";
+pub const DEFAULT_DEEPSEEK_PUBLIC_SMALL_MODEL: &str = "deepseek-v4-flash";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -68,19 +70,14 @@ impl AppPaths {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
+    #[default]
     Codex,
     DeepSeek,
     #[serde(rename = "custom-openai", alias = "custom-open-ai")]
     CustomOpenAI,
-}
-
-impl Default for Provider {
-    fn default() -> Self {
-        Self::Codex
-    }
 }
 
 impl Provider {
@@ -110,18 +107,13 @@ impl FromStr for Provider {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodexTransport {
+    #[default]
     Auto,
     WebSocket,
     Http,
-}
-
-impl Default for CodexTransport {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,17 +162,12 @@ impl Default for DeepSeekConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CustomOpenAIProtocol {
+    #[default]
     Responses,
     ChatCompletions,
-}
-
-impl Default for CustomOpenAIProtocol {
-    fn default() -> Self {
-        Self::Responses
-    }
 }
 
 impl CustomOpenAIProtocol {
@@ -228,17 +215,12 @@ impl Default for CustomOpenAIConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionRoutingPolicy {
+    #[default]
     PinOnFirstRequest,
     Immediate,
-}
-
-impl Default for SessionRoutingPolicy {
-    fn default() -> Self {
-        Self::PinOnFirstRequest
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -298,7 +280,7 @@ impl Default for ClaudeProxyConfig {
             stable_port: DEFAULT_PORT,
             public_primary_model: DEFAULT_PUBLIC_PRIMARY_MODEL.into(),
             public_small_model: DEFAULT_PUBLIC_SMALL_MODEL.into(),
-            auto_compact_window: 128_000,
+            auto_compact_window: 272_000,
         }
     }
 }
@@ -322,27 +304,18 @@ pub fn default_route_profiles() -> Vec<RouteProfileConfig> {
         RouteProfileConfig {
             id: "custom-openai".into(),
             provider: Provider::CustomOpenAI,
-            primary_model: "gpt-5.4".into(),
+            primary_model: "gpt-5.5".into(),
             small_model: "gpt-5.4-mini".into(),
             context_window: 128_000,
         },
     ]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
     pub stderr: bool,
     pub verbose: bool,
-}
-
-impl Default for LogConfig {
-    fn default() -> Self {
-        Self {
-            stderr: false,
-            verbose: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

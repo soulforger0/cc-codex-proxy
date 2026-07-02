@@ -10,7 +10,7 @@ use bytes::Bytes;
 use futures_util::{future::join_all, StreamExt};
 use proxy_core::{
     auth::{AuthManager, MemoryTokenStore, StoredAuth, TokenRefreshClient, TokenResponse},
-    config::{AppConfig, AppPaths, CodexTransport, CustomOpenAIProtocol, Provider},
+    config::{AppConfig, AppPaths, CodexConfig, CodexTransport, CustomOpenAIProtocol, Provider},
     custom_openai::store_api_key as store_custom_openai_api_key,
     deepseek::store_api_key,
     serve,
@@ -99,7 +99,7 @@ async fn dynamic_provider_switch_uses_same_local_server() {
     let codex_response = client
         .post(format!("http://{addr}/v1/messages"))
         .json(&serde_json::json!({
-            "model": "cc-proxy-primary[1m]",
+            "model": "gpt-5.5[1m]",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "hello"}]
@@ -116,7 +116,7 @@ async fn dynamic_provider_switch_uses_same_local_server() {
     let deepseek_response = client
         .post(format!("http://{addr}/v1/messages"))
         .json(&serde_json::json!({
-            "model": "cc-proxy-primary[1m]",
+            "model": "gpt-5.5[1m]",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "hello"}]
@@ -152,7 +152,7 @@ async fn session_pinning_keeps_existing_session_on_original_route() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-a")
         .json(&serde_json::json!({
-            "model": "cc-proxy-primary[1m]",
+            "model": "gpt-5.5[1m]",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "hello"}]
@@ -172,7 +172,7 @@ async fn session_pinning_keeps_existing_session_on_original_route() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-a")
         .json(&serde_json::json!({
-            "model": "cc-proxy-primary[1m]",
+            "model": "gpt-5.5[1m]",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "still pinned"}]
@@ -190,7 +190,7 @@ async fn session_pinning_keeps_existing_session_on_original_route() {
         .post(format!("http://{}/v1/messages", server.addr))
         .header("x-claude-code-session-id", "session-b")
         .json(&serde_json::json!({
-            "model": "cc-proxy-primary[1m]",
+            "model": "gpt-5.5[1m]",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "new route"}]
@@ -1115,11 +1115,16 @@ async fn test_config(upstream: std::net::SocketAddr, path: &str) -> (AppConfig, 
         deepseek_api_key_file: dir.join("config/deepseek-api-key"),
         custom_openai_api_key_file: dir.join("config/custom-openai-api-key"),
     };
-    let mut config = AppConfig::default();
-    config.port = 0;
-    config.admin_token = "test-admin-token".into();
-    config.codex.transport = CodexTransport::Http;
-    config.codex.base_url = format!("http://{upstream}{path}");
+    let config = AppConfig {
+        port: 0,
+        admin_token: "test-admin-token".into(),
+        codex: CodexConfig {
+            transport: CodexTransport::Http,
+            base_url: format!("http://{upstream}{path}"),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     (config, paths)
 }
 

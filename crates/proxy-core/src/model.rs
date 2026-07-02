@@ -393,22 +393,17 @@ mod tests {
         };
 
         let primary = registry
-            .resolve_for_route(
-                &route,
-                "cc-proxy-primary[1m]",
-                "cc-proxy-small[1m]",
-                "cc-proxy-primary[1m]",
-            )
+            .resolve_for_route(&route, "gpt-5.5[1m]", "gpt-5.4-mini[1m]", "gpt-5.5[1m]")
             .unwrap();
         assert_eq!(primary.upstream_model, "deepseek-v4-pro");
-        assert_eq!(primary.public_id, "cc-proxy-primary");
+        assert_eq!(primary.public_id, "gpt-5.5");
 
         let small = registry
             .resolve_for_route(
                 &route,
-                "cc-proxy-primary[1m]",
-                "cc-proxy-small[1m]",
-                "cc-proxy-small[1m]",
+                "gpt-5.5[1m]",
+                "gpt-5.4-mini[1m]",
+                "gpt-5.4-mini[1m]",
             )
             .unwrap();
         assert_eq!(small.upstream_model, "deepseek-v4-flash");
@@ -426,12 +421,7 @@ mod tests {
         };
 
         let resolved = registry
-            .resolve_for_route(
-                &route,
-                "cc-proxy-primary[1m]",
-                "cc-proxy-small[1m]",
-                "cc-proxy-primary[1m]",
-            )
+            .resolve_for_route(&route, "gpt-5.5[1m]", "gpt-5.4-mini[1m]", "gpt-5.5[1m]")
             .unwrap();
         assert_eq!(resolved.upstream_model, "llama-3.3-70b");
         assert_eq!(resolved.context_window, 128_000);

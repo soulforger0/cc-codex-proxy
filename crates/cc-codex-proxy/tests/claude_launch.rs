@@ -64,7 +64,7 @@ fn launch_sets_proxy_env_when_app_pid_is_alive_and_health_is_ok() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains(&format!("base=http://127.0.0.1:{port}\n")));
-    assert!(stdout.contains("model=gpt-5.4[1m]\n"));
+    assert!(stdout.contains("model=gpt-5.5[1m]\n"));
     assert!(stdout.contains("small=gpt-5.4-mini[1m]\n"));
     assert!(stdout.contains("compact=272000\n"));
 }

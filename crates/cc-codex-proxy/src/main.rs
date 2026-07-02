@@ -8,7 +8,8 @@ use proxy_core::{
         restore_shim, ClaudeSettingsOptions, ClaudeShimInstallOptions, MANAGED_ENV_KEYS,
     },
     config::{
-        AppConfig, CustomOpenAIProtocol, Provider, DEFAULT_PORT, DEFAULT_PUBLIC_PRIMARY_MODEL,
+        AppConfig, CustomOpenAIProtocol, Provider, DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL,
+        DEFAULT_DEEPSEEK_PUBLIC_SMALL_MODEL, DEFAULT_PORT, DEFAULT_PUBLIC_PRIMARY_MODEL,
         DEFAULT_PUBLIC_SMALL_MODEL,
     },
     custom_openai::{
@@ -528,16 +529,43 @@ async fn cmd_claude(args: ClaudeCommand) -> Result<()> {
 }
 
 fn claude_settings_options(args: InstallSettingsArgs) -> ClaudeSettingsOptions {
+    let defaults = provider_claude_defaults(args.provider);
     ClaudeSettingsOptions {
         provider: args.provider,
         port: args.port,
-        model: args
-            .model
-            .unwrap_or_else(|| DEFAULT_PUBLIC_PRIMARY_MODEL.to_string()),
+        model: args.model.unwrap_or_else(|| defaults.model.to_string()),
         small_fast_model: args
             .small_model
-            .unwrap_or_else(|| DEFAULT_PUBLIC_SMALL_MODEL.to_string()),
-        auto_compact_window: args.auto_compact_window.unwrap_or(128_000),
+            .unwrap_or_else(|| defaults.small_model.to_string()),
+        auto_compact_window: args
+            .auto_compact_window
+            .unwrap_or(defaults.auto_compact_window),
+    }
+}
+
+struct ProviderClaudeDefaults {
+    model: &'static str,
+    small_model: &'static str,
+    auto_compact_window: u32,
+}
+
+fn provider_claude_defaults(provider: Provider) -> ProviderClaudeDefaults {
+    match provider {
+        Provider::DeepSeek => ProviderClaudeDefaults {
+            model: DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL,
+            small_model: DEFAULT_DEEPSEEK_PUBLIC_SMALL_MODEL,
+            auto_compact_window: 1_000_000,
+        },
+        Provider::CustomOpenAI => ProviderClaudeDefaults {
+            model: DEFAULT_PUBLIC_PRIMARY_MODEL,
+            small_model: DEFAULT_PUBLIC_SMALL_MODEL,
+            auto_compact_window: 128_000,
+        },
+        Provider::Codex => ProviderClaudeDefaults {
+            model: DEFAULT_PUBLIC_PRIMARY_MODEL,
+            small_model: DEFAULT_PUBLIC_SMALL_MODEL,
+            auto_compact_window: 272_000,
+        },
     }
 }
 
@@ -771,13 +799,26 @@ mod tests {
             port: DEFAULT_PORT,
             auto_compact_window: None,
         });
+        let custom_openai = claude_settings_options(InstallSettingsArgs {
+            provider: Provider::CustomOpenAI,
+            model: None,
+            small_model: None,
+            port: DEFAULT_PORT,
+            auto_compact_window: None,
+        });
 
         assert_eq!(codex.model, DEFAULT_PUBLIC_PRIMARY_MODEL);
         assert_eq!(codex.small_fast_model, DEFAULT_PUBLIC_SMALL_MODEL);
-        assert_eq!(codex.auto_compact_window, 128_000);
-        assert_eq!(deepseek.model, codex.model);
-        assert_eq!(deepseek.small_fast_model, codex.small_fast_model);
-        assert_eq!(deepseek.auto_compact_window, codex.auto_compact_window);
+        assert_eq!(codex.auto_compact_window, 272_000);
+        assert_eq!(custom_openai.model, DEFAULT_PUBLIC_PRIMARY_MODEL);
+        assert_eq!(custom_openai.small_fast_model, DEFAULT_PUBLIC_SMALL_MODEL);
+        assert_eq!(custom_openai.auto_compact_window, 128_000);
+        assert_eq!(deepseek.model, DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL);
+        assert_eq!(
+            deepseek.small_fast_model,
+            DEFAULT_DEEPSEEK_PUBLIC_SMALL_MODEL
+        );
+        assert_eq!(deepseek.auto_compact_window, 1_000_000);
     }
 
     #[test]

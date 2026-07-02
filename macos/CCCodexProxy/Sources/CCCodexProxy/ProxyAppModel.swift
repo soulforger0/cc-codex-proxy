@@ -32,10 +32,10 @@ final class ProxyAppModel: ObservableObject {
     @Published var customOpenAIBaseURL = ""
     @Published var customOpenAIAPIKey = ""
     @Published var customOpenAIProtocol = "responses"
-    @Published var model = "cc-proxy-primary[1m]"
-    @Published var smallModel = "cc-proxy-small[1m]"
+    @Published var model = "gpt-5.5[1m]"
+    @Published var smallModel = "gpt-5.4-mini[1m]"
     @Published var port = 18765
-    @Published var autoCompactWindow = 128_000
+    @Published var autoCompactWindow = 272_000
 
     private var proxyProcess: Process?
 
@@ -210,6 +210,28 @@ final class ProxyAppModel: ObservableObject {
         }
         await refreshClaudeSettingsPreview()
         await refreshRuntimeStatus()
+    }
+
+    private func setActiveRoute(updateLastMessage: Bool = true) async {
+        do {
+            let output = try await runCLI([
+                "admin",
+                "route",
+                "set",
+                provider,
+                "--port",
+                "\(port)"
+            ])
+            if updateLastMessage {
+                lastMessage = activeRouteMessage(from: output)
+            }
+            await refreshProxyStatus(updateLastMessage: false)
+        } catch {
+            if updateLastMessage {
+                lastMessage = "Provider switch failed: \(error.localizedDescription)"
+            }
+            await refreshProxyStatus(updateLastMessage: false)
+        }
     }
 
     func installClaudeSettings() async {
@@ -498,7 +520,7 @@ final class ProxyAppModel: ObservableObject {
             smallModel = "deepseek-v4-flash"
             autoCompactWindow = 1_000_000
         } else if provider == "custom-openai" {
-            model = "gpt-5.4[1m]"
+            model = "gpt-5.5[1m]"
             smallModel = "gpt-5.4-mini[1m]"
             autoCompactWindow = 128_000
         } else {
@@ -524,7 +546,7 @@ final class ProxyAppModel: ObservableObject {
             }
         } else if provider == "custom-openai" {
             if primary.hasPrefix("deepseek-") {
-                model = "gpt-5.4[1m]"
+                model = "gpt-5.5[1m]"
             }
             if small.hasPrefix("deepseek-") {
                 smallModel = "gpt-5.4-mini[1m]"
@@ -552,6 +574,27 @@ final class ProxyAppModel: ObservableObject {
         return "OAuth login complete."
     }
 
+    private func activeRouteMessage(from output: String) -> String {
+        let data = Data(output.utf8)
+        if let status = try? JSONDecoder().decode(ProxyAdminRouteUpdate.self, from: data) {
+            return "Provider switched to \(displayName(forProvider: status.activeProvider))."
+        }
+        return "Provider switched."
+    }
+
+    private func displayName(forProvider value: String) -> String {
+        switch value {
+        case "codex":
+            return "Codex"
+        case "deepseek":
+            return "DeepSeek"
+        case "custom-openai":
+            return "Custom OpenAI"
+        default:
+            return value.isEmpty ? "Unknown" : value
+        }
+    }
+
     private func firstLine(from output: String) -> String? {
         output
             .split(whereSeparator: \.isNewline)
@@ -574,6 +617,10 @@ final class ProxyAppModel: ObservableObject {
 struct ProxyAdminStatus: Decodable {
     let provider: String?
     let transport: ProxyTransportStatus?
+}
+
+struct ProxyAdminRouteUpdate: Decodable {
+    let activeProvider: String
 }
 
 struct ProxyTransportStatus: Decodable {
