@@ -84,6 +84,127 @@ async fn count_tokens_is_local() {
 }
 
 #[tokio::test]
+async fn claude_clear_starts_fresh_codex_upstream_session_without_forwarding() {
+    let state = Arc::new(CodexSessionCaptureState::default());
+    let upstream = start_mock_upstream(mock_codex_session_capture_app(state.clone())).await;
+    let (config, paths) = test_config(upstream, "/codex").await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-a")
+        .json(&serde_json::json!({
+            "model": "gpt-5.5[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "before clear"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let clear = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-a")
+        .json(&serde_json::json!({
+            "model": "gpt-5.5[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "/clear previous task"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(clear.status(), StatusCode::OK);
+    let clear_body = clear.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(clear_body["stop_reason"], "end_turn");
+    assert!(clear_body["content"].as_array().unwrap().is_empty());
+    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+
+    let after = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-a")
+        .json(&serde_json::json!({
+            "model": "gpt-5.5[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "after clear"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), StatusCode::OK);
+
+    let session_ids = state.session_ids.lock().unwrap().clone();
+    assert_eq!(session_ids.len(), 2);
+    let first_session = session_ids[0].as_ref().unwrap();
+    let after_session = session_ids[1].as_ref().unwrap();
+    assert_ne!(first_session, after_session);
+    assert!(first_session.starts_with("ccp-"), "{first_session}");
+    assert!(after_session.ends_with("-session-a-g1"), "{after_session}");
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["input"][0]["content"][0]["text"], "before clear");
+    assert_eq!(bodies[1]["input"][0]["content"][0]["text"], "after clear");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn transcript_shrink_starts_fresh_codex_upstream_session() {
+    let state = Arc::new(CodexSessionCaptureState::default());
+    let upstream = start_mock_upstream(mock_codex_session_capture_app(state.clone())).await;
+    let (config, paths) = test_config(upstream, "/codex").await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let before_compact = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-b")
+        .json(&serde_json::json!({
+            "model": "gpt-5.5[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "second"},
+                {"role": "user", "content": "third"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(before_compact.status(), StatusCode::OK);
+
+    let after_compact = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-b")
+        .json(&serde_json::json!({
+            "model": "gpt-5.5[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "compacted follow-up"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after_compact.status(), StatusCode::OK);
+
+    let session_ids = state.session_ids.lock().unwrap().clone();
+    assert_eq!(session_ids.len(), 2);
+    assert_ne!(session_ids[0], session_ids[1]);
+    assert!(
+        session_ids[1]
+            .as_ref()
+            .is_some_and(|session| session.ends_with("-session-b-g1")),
+        "{session_ids:?}"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn dynamic_provider_switch_uses_same_local_server() {
     let codex_upstream = start_mock_upstream(mock_success_app()).await;
     let deepseek_state = Arc::new(DeepSeekMockState::default());
@@ -789,6 +910,42 @@ fn mock_success_app() -> Router {
                 .unwrap()
         }),
     )
+}
+
+#[derive(Default)]
+struct CodexSessionCaptureState {
+    calls: AtomicUsize,
+    session_ids: Mutex<Vec<Option<String>>>,
+    bodies: Mutex<Vec<serde_json::Value>>,
+}
+
+fn mock_codex_session_capture_app(state: Arc<CodexSessionCaptureState>) -> Router {
+    Router::new()
+        .route("/codex", post(mock_codex_session_capture_response))
+        .with_state(state)
+}
+
+async fn mock_codex_session_capture_response(
+    State(state): State<Arc<CodexSessionCaptureState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response<Body> {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    state.session_ids.lock().unwrap().push(
+        headers
+            .get("session_id")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned),
+    );
+    state.bodies.lock().unwrap().push(body);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"captured\"}\n\n\
+             data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":3}}\n\n",
+        ))
+        .unwrap()
 }
 
 #[derive(Default)]

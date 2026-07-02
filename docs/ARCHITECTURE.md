@@ -110,7 +110,9 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 
 Claude Code owns conversation compaction when it talks to a gateway. The proxy supports that path by exposing `/v1/messages/count_tokens` and by installing `CLAUDE_CODE_AUTO_COMPACT_WINDOW` so Claude Code compacts near the Codex context window rather than relying on a model-name heuristic.
 
-OpenAI Responses also has server-side compaction features, but this proxy does not currently call `/responses/compact`. Claude Code sends a complete Anthropic-shaped transcript after its own compaction, and the proxy translates that transcript as the source of truth.
+OpenAI Responses also has server-side compaction features, but this proxy does not currently call `/responses/compact` or forward `context_management`. Claude Code sends a complete Anthropic-shaped transcript after its own compaction, and the proxy translates that transcript as the source of truth. When the transcript shrinks sharply, the Codex route starts a fresh upstream session id so the ChatGPT Codex backend does not continue from a larger pre-compaction server-side conversation.
+
+Claude Code `/clear`, `/reset`, and `/new` are treated as new-conversation commands, not model prompts. On the Codex route, the proxy maps them to Codex `/new` semantics by advancing the generated upstream session id and returning an empty Anthropic response locally. It does not send `/clear`, `/reset`, or `/new` text to the upstream model.
 
 ### Status Line Metrics
 

@@ -1,6 +1,9 @@
 use crate::{
-    anthropic::schema::AnthropicTool,
-    anthropic::{response::response_json, schema::AnthropicRequest, tokens::estimate_input_tokens},
+    anthropic::{
+        response::{message_delta, message_start, message_stop, response_json},
+        schema::{AnthropicRequest, AnthropicResponse, AnthropicTool, AnthropicUsage},
+        tokens::estimate_input_tokens,
+    },
     auth::AuthManager,
     codex::{
         client::{CodexClient, CodexTransportMethod},
@@ -30,7 +33,13 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -38,6 +47,7 @@ use uuid::Uuid;
 
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_HEARTBEAT_COMMENT: &[u8] = b": heartbeat\n\n";
+const TRANSCRIPT_TOKEN_DROP_MIN: u64 = 32_768;
 
 #[derive(Clone)]
 struct AppState {
@@ -49,6 +59,113 @@ struct AppState {
     custom_openai: CustomOpenAIClient,
     registry: ModelRegistry,
     routes: RouteManager,
+    codex_sessions: CodexSessionManager,
+}
+
+#[derive(Clone)]
+struct CodexSessionManager {
+    namespace: String,
+    sessions: Arc<Mutex<HashMap<String, CodexSessionState>>>,
+}
+
+#[derive(Debug, Default)]
+struct CodexSessionState {
+    generation: u64,
+    initialized: bool,
+    last_message_count: usize,
+    last_input_tokens: u64,
+}
+
+#[derive(Debug)]
+struct CodexSessionResolution {
+    upstream_session_id: Option<String>,
+    generation: Option<u64>,
+    reset_reason: Option<CodexSessionResetReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexSessionResetReason {
+    ClaudeClearCommand,
+    TranscriptShrink,
+}
+
+impl CodexSessionResetReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeClearCommand => "claude-clear-command",
+            Self::TranscriptShrink => "transcript-shrink",
+        }
+    }
+}
+
+impl CodexSessionManager {
+    fn new() -> Self {
+        Self {
+            namespace: Uuid::new_v4().simple().to_string(),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn resolve(
+        &self,
+        claude_session_id: Option<&str>,
+        request: &AnthropicRequest,
+    ) -> CodexSessionResolution {
+        let Some(claude_session_id) = claude_session_id else {
+            return CodexSessionResolution {
+                upstream_session_id: None,
+                generation: None,
+                reset_reason: None,
+            };
+        };
+
+        let clear_command = is_claude_clear_command_request(request);
+        let message_count = request.messages.len();
+        let input_tokens = estimate_input_tokens(request);
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = sessions
+            .entry(claude_session_id.to_string())
+            .or_insert_with(CodexSessionState::default);
+
+        let reset_reason = if clear_command {
+            state.generation = state.generation.saturating_add(1);
+            Some(CodexSessionResetReason::ClaudeClearCommand)
+        } else if state.initialized && transcript_shrank(state, message_count, input_tokens) {
+            state.generation = state.generation.saturating_add(1);
+            Some(CodexSessionResetReason::TranscriptShrink)
+        } else {
+            None
+        };
+
+        if clear_command {
+            state.last_message_count = 0;
+            state.last_input_tokens = 0;
+        } else {
+            state.last_message_count = message_count;
+            state.last_input_tokens = input_tokens;
+        }
+        state.initialized = true;
+
+        CodexSessionResolution {
+            upstream_session_id: Some(
+                self.upstream_session_id(claude_session_id, state.generation),
+            ),
+            generation: Some(state.generation),
+            reset_reason,
+        }
+    }
+
+    fn upstream_session_id(&self, claude_session_id: &str, generation: u64) -> String {
+        let fragment = header_safe_session_fragment(claude_session_id);
+        if generation == 0 {
+            format!("ccp-{}-{fragment}", self.namespace)
+        } else {
+            format!("ccp-{}-{fragment}-g{generation}", self.namespace)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +222,7 @@ pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Res
         custom_openai,
         registry,
         routes,
+        codex_sessions: CodexSessionManager::new(),
     });
 
     let app = Router::new()
@@ -312,17 +430,35 @@ async fn handle_codex_messages(
     request: AnthropicRequest,
     resolved: crate::model::ResolvedModel,
 ) -> Result<Response<Body>> {
+    let codex_session = state
+        .codex_sessions
+        .resolve(session_id.as_deref(), &request);
+    if let Some(reason) = codex_session.reset_reason {
+        info!(
+            %request_id,
+            reason = reason.as_str(),
+            session_generation = codex_session.generation.unwrap_or(0),
+            "started fresh Codex upstream session"
+        );
+        if reason == CodexSessionResetReason::ClaudeClearCommand {
+            return empty_anthropic_response(&request);
+        }
+    }
+
     let tool_catalog = ToolCatalog::from_anthropic_tools(request.tools.as_deref());
-    let translated = translate_request(&request, &resolved, session_id.as_deref())?;
+    let upstream_session_id = codex_session.upstream_session_id.as_deref();
+    let translated = translate_request(&request, &resolved, upstream_session_id)?;
     info!(
         %request_id,
         upstream_model = %resolved.upstream_model,
         input_items = translated.input.len(),
         codex_tool_count = translated.tools.as_ref().map_or(0, Vec::len),
         codex_body_keys = %codex_request_keys(&translated),
+        upstream_session_present = upstream_session_id.is_some(),
+        session_generation = codex_session.generation.unwrap_or(0),
         "translated request for Codex"
     );
-    let upstream = match state.codex.post(&translated, session_id.as_deref()).await {
+    let upstream = match state.codex.post(&translated, upstream_session_id).await {
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(%request_id, error = %err, "Codex upstream request failed");
@@ -513,6 +649,43 @@ fn sse_response(
         .map_err(|err| ProxyError::Transport(format!("failed to build streaming response: {err}")))
 }
 
+fn empty_anthropic_response(request: &AnthropicRequest) -> Result<Response<Body>> {
+    let message_id = format!("msg_{}", Uuid::new_v4().simple());
+    if request.wants_stream() {
+        let events = vec![
+            Ok(message_start(&message_id, &request.model)),
+            Ok(message_delta(Some("end_turn"), empty_usage())),
+            Ok(message_stop()),
+        ];
+        return sse_response(Box::pin(futures_util::stream::iter(events)));
+    }
+
+    let response = AnthropicResponse {
+        id: message_id,
+        kind: "message".into(),
+        role: "assistant".into(),
+        model: request.model.clone(),
+        content: Vec::new(),
+        stop_reason: Some("end_turn".into()),
+        stop_sequence: None,
+        usage: empty_usage(),
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(response_json(response).to_string()))
+        .map_err(|err| ProxyError::Transport(format!("failed to build response: {err}")))
+}
+
+fn empty_usage() -> AnthropicUsage {
+    AnthropicUsage {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+    }
+}
+
 fn with_sse_heartbeats(
     stream: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
     interval: Duration,
@@ -542,6 +715,70 @@ fn claude_session_id(headers: &HeaderMap) -> Option<String> {
         .get("x-claude-code-session-id")
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
+}
+
+fn transcript_shrank(state: &CodexSessionState, message_count: usize, input_tokens: u64) -> bool {
+    if message_count < state.last_message_count {
+        return true;
+    }
+    state.last_input_tokens > input_tokens
+        && state.last_input_tokens - input_tokens >= TRANSCRIPT_TOKEN_DROP_MIN
+        && input_tokens.saturating_mul(2) < state.last_input_tokens
+}
+
+fn is_claude_clear_command_request(request: &AnthropicRequest) -> bool {
+    if request.messages.len() != 1 {
+        return false;
+    }
+    let message = &request.messages[0];
+    if message.role != "user" {
+        return false;
+    }
+    anthropic_text_content(&message.content).is_some_and(|text| {
+        let Some(command) = text.split_whitespace().next() else {
+            return false;
+        };
+        matches!(command, "/clear" | "/reset" | "/new")
+    })
+}
+
+fn anthropic_text_content(content: &Value) -> Option<String> {
+    match content {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => {
+            let mut out = Vec::new();
+            for item in items {
+                if item.get("type").and_then(Value::as_str).unwrap_or("text") != "text" {
+                    return None;
+                }
+                out.push(item.get("text").and_then(Value::as_str)?.to_string());
+            }
+            Some(out.join(""))
+        }
+        _ => None,
+    }
+}
+
+fn header_safe_session_fragment(session_id: &str) -> String {
+    let mut fragment = session_id
+        .chars()
+        .take(80)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while fragment.ends_with('-') {
+        fragment.pop();
+    }
+    if fragment.is_empty() {
+        "session".into()
+    } else {
+        fragment
+    }
 }
 
 fn summarize_anthropic_tool_names(tools: Option<&[AnthropicTool]>) -> String {
@@ -690,6 +927,7 @@ fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anthropic::schema::AnthropicMessage;
     use futures_util::{stream, StreamExt};
 
     fn boxed<S>(stream: S) -> Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>
@@ -697,6 +935,46 @@ mod tests {
         S: Stream<Item = Result<Bytes>> + Send + 'static,
     {
         Box::pin(stream)
+    }
+
+    fn request_with_text(text: &str) -> AnthropicRequest {
+        AnthropicRequest {
+            model: "gpt-5.5".into(),
+            max_tokens: Some(1),
+            temperature: None,
+            top_p: None,
+            stream: None,
+            system: None,
+            messages: vec![AnthropicMessage {
+                role: "user".into(),
+                content: Value::String(text.into()),
+                extra: serde_json::Map::new(),
+            }],
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            output_config: None,
+            thinking: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn recognizes_claude_new_conversation_commands() {
+        for text in [
+            "/clear",
+            " /clear ",
+            "/clear auth refactor",
+            "/reset",
+            "/reset labeled previous chat",
+            "/new",
+        ] {
+            assert!(is_claude_clear_command_request(&request_with_text(text)));
+        }
+
+        for text in ["/compact", "please /clear", "", "   "] {
+            assert!(!is_claude_clear_command_request(&request_with_text(text)));
+        }
     }
 
     #[test]
