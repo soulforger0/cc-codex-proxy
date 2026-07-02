@@ -11,7 +11,7 @@ This project publishes macOS app releases from immutable version tags. The relea
   - `crates/proxy-core/Cargo.toml`
   - `Cargo.lock`
   - `macos/CCCodexProxy/Info.plist`
-  - Homebrew formula/cask metadata under `packaging/homebrew/`
+- Homebrew formula/cask versions under `Formula/`, `Casks/`, and `packaging/homebrew/` should match the release tag. Homebrew checksums are finalized after the GitHub tag source archive and release DMG are available.
 - Do not replace assets on an already-published stable version. If an artifact changes, publish a new tag.
 
 Suggested bump rules:
@@ -76,6 +76,38 @@ git tag v<version>
 git push origin v<version>
 gh run watch --workflow release.yml --exit-status
 gh release view v<version> --web
+```
+
+## Update Homebrew metadata
+
+After the GitHub Release is published, update the Homebrew formula and cask hashes from the immutable tag source archive and release checksum file:
+
+```sh
+VERSION=<version>
+curl -L -o "/tmp/cc-codex-proxy-v$VERSION.tar.gz" "https://github.com/soulforger0/cc-codex-proxy/archive/refs/tags/v$VERSION.tar.gz"
+curl -L -o /tmp/cc-codex-proxy-SHA256SUMS "https://github.com/soulforger0/cc-codex-proxy/releases/download/v$VERSION/SHA256SUMS"
+SOURCE_SHA256="$(shasum -a 256 "/tmp/cc-codex-proxy-v$VERSION.tar.gz" | awk '{print $1}')"
+DMG_SHA256="$(awk -v artifact="CCCodexProxy-$VERSION-macOS.dmg" '$2 == artifact {print $1}' /tmp/cc-codex-proxy-SHA256SUMS)"
+scripts/update-homebrew-packaging.sh "$VERSION" "$SOURCE_SHA256" "$DMG_SHA256"
+```
+
+Validate the metadata before publishing the Homebrew update:
+
+```sh
+ruby -c Formula/cc-codex-proxy.rb
+ruby -c Casks/cc-codex-proxy-app.rb
+ruby -c packaging/homebrew/cc-codex-proxy.rb
+ruby -c packaging/homebrew/cc-codex-proxy-app.rb
+```
+
+After the Homebrew metadata is committed and visible through a tap, validate by tap-qualified name:
+
+```sh
+brew tap soulforger0/cc-codex-proxy https://github.com/soulforger0/cc-codex-proxy
+brew audit --strict --formula soulforger0/cc-codex-proxy/cc-codex-proxy
+brew audit --strict --cask soulforger0/cc-codex-proxy/cc-codex-proxy-app
+brew install --formula --dry-run soulforger0/cc-codex-proxy/cc-codex-proxy
+brew install --cask --dry-run soulforger0/cc-codex-proxy/cc-codex-proxy-app
 ```
 
 ## Verify a downloaded release

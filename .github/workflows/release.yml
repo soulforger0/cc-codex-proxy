@@ -53,6 +53,13 @@ jobs:
           hdiutil verify "dist/CCCodexProxy-macOS.dmg"
           (cd dist && shasum -a 256 -c SHA256SUMS)
 
+      - name: Validate Homebrew metadata
+        run: |
+          ruby -c Formula/cc-codex-proxy.rb
+          ruby -c Casks/cc-codex-proxy-app.rb
+          ruby -c packaging/homebrew/cc-codex-proxy.rb
+          ruby -c packaging/homebrew/cc-codex-proxy-app.rb
+
       - name: Attest release artifacts
         uses: actions/attest@v4
         with:
