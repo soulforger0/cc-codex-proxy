@@ -103,6 +103,25 @@ flowchart LR
 
 ## Install
 
+### Homebrew
+
+The app cask installs the same release DMG as the manual download path:
+
+```sh
+brew tap soulforger0/cc-codex-proxy https://github.com/soulforger0/cc-codex-proxy
+brew install --cask soulforger0/cc-codex-proxy/cc-codex-proxy-app
+```
+
+The CLI-only helper is also available for direct development and diagnostics:
+
+```sh
+brew install soulforger0/cc-codex-proxy/cc-codex-proxy
+```
+
+Because releases are not yet Developer ID signed or notarized, macOS may still show a Gatekeeper warning on first launch. If that happens, right-click `CCCodexProxy.app` and choose **Open**.
+
+### DMG
+
 Download the latest release asset:
 
 - [CCCodexProxy-macOS.dmg](https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/CCCodexProxy-macOS.dmg)

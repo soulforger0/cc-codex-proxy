@@ -40,3 +40,13 @@ jobs:
           hdiutil verify dist/CCCodexProxy-0.0.0-macOS.dmg
           hdiutil verify dist/CCCodexProxy-macOS.dmg
           (cd dist && shasum -a 256 -c SHA256SUMS)
+
+  homebrew:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - run: ruby -c Formula/cc-codex-proxy.rb
+      - run: ruby -c Casks/cc-codex-proxy-app.rb
+      - run: ruby -c packaging/homebrew/cc-codex-proxy.rb
+      - run: ruby -c packaging/homebrew/cc-codex-proxy-app.rb
