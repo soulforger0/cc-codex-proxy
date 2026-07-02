@@ -68,9 +68,10 @@ hdiutil verify dist/CCCodexProxy-macOS.dmg
 
 ## Publish a release
 
-After the release commit is on `main`:
+After the release commit is ready locally:
 
 ```sh
+git push origin main
 git tag v<version>
 git push origin v<version>
 gh run watch --workflow release.yml --exit-status
