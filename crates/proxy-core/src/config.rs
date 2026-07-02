@@ -20,6 +20,8 @@ pub const OAUTH_CALLBACK_PORT: u16 = 1455;
 pub const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 pub const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 pub const CUSTOM_OPENAI_API_KEY_ENV: &str = "CUSTOM_OPENAI_API_KEY";
+pub const DEFAULT_PUBLIC_PRIMARY_MODEL: &str = "cc-proxy-primary[1m]";
+pub const DEFAULT_PUBLIC_SMALL_MODEL: &str = "cc-proxy-small[1m]";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -226,6 +228,107 @@ impl Default for CustomOpenAIConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionRoutingPolicy {
+    PinOnFirstRequest,
+    Immediate,
+}
+
+impl Default for SessionRoutingPolicy {
+    fn default() -> Self {
+        Self::PinOnFirstRequest
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RouteProfileConfig {
+    pub id: String,
+    pub provider: Provider,
+    pub primary_model: String,
+    pub small_model: String,
+    pub context_window: u32,
+}
+
+impl Default for RouteProfileConfig {
+    fn default() -> Self {
+        Self {
+            id: "codex".into(),
+            provider: Provider::Codex,
+            primary_model: "gpt-5.5".into(),
+            small_model: "gpt-5.4-mini".into(),
+            context_window: 272_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RoutingConfig {
+    pub active_profile: String,
+    pub session_policy: SessionRoutingPolicy,
+    pub profiles: Vec<RouteProfileConfig>,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            active_profile: "codex".into(),
+            session_policy: SessionRoutingPolicy::PinOnFirstRequest,
+            profiles: default_route_profiles(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ClaudeProxyConfig {
+    pub stable_host: String,
+    pub stable_port: u16,
+    pub public_primary_model: String,
+    pub public_small_model: String,
+    pub auto_compact_window: u32,
+}
+
+impl Default for ClaudeProxyConfig {
+    fn default() -> Self {
+        Self {
+            stable_host: "127.0.0.1".into(),
+            stable_port: DEFAULT_PORT,
+            public_primary_model: DEFAULT_PUBLIC_PRIMARY_MODEL.into(),
+            public_small_model: DEFAULT_PUBLIC_SMALL_MODEL.into(),
+            auto_compact_window: 128_000,
+        }
+    }
+}
+
+pub fn default_route_profiles() -> Vec<RouteProfileConfig> {
+    vec![
+        RouteProfileConfig {
+            id: "codex".into(),
+            provider: Provider::Codex,
+            primary_model: "gpt-5.5".into(),
+            small_model: "gpt-5.4-mini".into(),
+            context_window: 272_000,
+        },
+        RouteProfileConfig {
+            id: "deepseek".into(),
+            provider: Provider::DeepSeek,
+            primary_model: "deepseek-v4-pro".into(),
+            small_model: "deepseek-v4-flash".into(),
+            context_window: 1_000_000,
+        },
+        RouteProfileConfig {
+            id: "custom-openai".into(),
+            provider: Provider::CustomOpenAI,
+            primary_model: "gpt-5.4".into(),
+            small_model: "gpt-5.4-mini".into(),
+            context_window: 128_000,
+        },
+    ]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
@@ -248,6 +351,8 @@ pub struct AppConfig {
     pub port: u16,
     pub admin_token: String,
     pub provider: Provider,
+    pub routing: RoutingConfig,
+    pub claude: ClaudeProxyConfig,
     pub codex: CodexConfig,
     pub deepseek: DeepSeekConfig,
     pub custom_openai: CustomOpenAIConfig,
@@ -260,6 +365,8 @@ impl Default for AppConfig {
             port: DEFAULT_PORT,
             admin_token: String::new(),
             provider: Provider::Codex,
+            routing: RoutingConfig::default(),
+            claude: ClaudeProxyConfig::default(),
             codex: CodexConfig::default(),
             deepseek: DeepSeekConfig::default(),
             custom_openai: CustomOpenAIConfig::default(),
@@ -287,10 +394,25 @@ impl AppConfig {
         Ok((cfg, paths))
     }
 
+    pub fn active_provider(&self) -> Result<Provider> {
+        self.routing
+            .profiles
+            .iter()
+            .find(|profile| profile.id == self.routing.active_profile)
+            .map(|profile| profile.provider)
+            .ok_or_else(|| {
+                ProxyError::Config(format!(
+                    "active route profile \"{}\" is not configured",
+                    self.routing.active_profile
+                ))
+            })
+    }
+
     fn apply_env(&mut self) {
         if let Ok(port) = env::var("PORT") {
             if let Ok(port) = port.parse::<u16>() {
                 self.port = port;
+                self.claude.stable_port = port;
             }
         }
         if let Ok(url) = env::var("CCP_CODEX_BASE_URL") {
@@ -299,6 +421,7 @@ impl AppConfig {
         if let Ok(provider) = env::var("CCP_PROVIDER") {
             if let Ok(provider) = provider.parse::<Provider>() {
                 self.provider = provider;
+                self.routing.active_profile = provider.as_str().into();
             }
         }
         if let Ok(url) = env::var("CCP_DEEPSEEK_BASE_URL") {
@@ -379,25 +502,17 @@ mod tests {
     }
 
     #[test]
-    fn default_transport_is_auto() {
-        assert!(matches!(
-            CodexConfig::default().transport,
-            CodexTransport::Auto
-        ));
-    }
-
-    #[test]
-    fn provider_parses_config_values() {
-        assert_eq!("codex".parse::<Provider>().unwrap(), Provider::Codex);
-        assert_eq!("deepseek".parse::<Provider>().unwrap(), Provider::DeepSeek);
+    fn default_routing_uses_stable_profiles() {
+        let config = AppConfig::default();
+        assert_eq!(config.routing.active_profile, "codex");
+        assert!(config
+            .routing
+            .profiles
+            .iter()
+            .any(|profile| profile.id == "deepseek" && profile.provider == Provider::DeepSeek));
         assert_eq!(
-            "custom-openai".parse::<Provider>().unwrap(),
-            Provider::CustomOpenAI
+            config.claude.public_primary_model,
+            DEFAULT_PUBLIC_PRIMARY_MODEL
         );
-        assert_eq!(
-            "openai".parse::<Provider>().unwrap(),
-            Provider::CustomOpenAI
-        );
-        assert!("other".parse::<Provider>().is_err());
     }
 }

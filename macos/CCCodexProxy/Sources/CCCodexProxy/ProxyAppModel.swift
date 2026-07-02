@@ -32,10 +32,10 @@ final class ProxyAppModel: ObservableObject {
     @Published var customOpenAIBaseURL = ""
     @Published var customOpenAIAPIKey = ""
     @Published var customOpenAIProtocol = "responses"
-    @Published var model = "gpt-5.5[1m]"
-    @Published var smallModel = "gpt-5.4-mini[1m]"
+    @Published var model = "cc-proxy-primary[1m]"
+    @Published var smallModel = "cc-proxy-small[1m]"
     @Published var port = 18765
-    @Published var autoCompactWindow = 272_000
+    @Published var autoCompactWindow = 128_000
 
     private var proxyProcess: Process?
 
@@ -99,15 +99,6 @@ final class ProxyAppModel: ObservableObject {
             lastMessage = "Enter a custom OpenAI endpoint URL before starting."
             return
         }
-        do {
-            _ = try await runCLI(["claude", "check-live-sessions"])
-        } catch {
-            let detail = error.localizedDescription
-            lastMessage = "Proxy not started because Claude Code is running."
-            showLiveClaudeSessionAlert(detail: detail)
-            return
-        }
-
         let process = Process()
         process.arguments = serveArguments
         do {
@@ -120,8 +111,9 @@ final class ProxyAppModel: ObservableObject {
             transportBadgeText = "Waiting"
             transportCurrentMethod = nil
             lastMessage = "Proxy started."
-            await installClaudeShim(updateLastMessage: false)
             try? await Task.sleep(nanoseconds: 250_000_000)
+            await setActiveRoute(updateLastMessage: false)
+            await installClaudeShim(updateLastMessage: false)
             await refreshProxyStatus(updateLastMessage: false)
         } catch {
             lastMessage = "Failed to start proxy: \(error.localizedDescription)"
@@ -209,10 +201,14 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func applyProviderChange() async {
-        applyProviderDefaults()
+        replaceCrossProviderModelDefaults()
         await checkAuthStatus()
+        if isRunning {
+            await setActiveRoute()
+        } else {
+            lastMessage = "Provider selected. It will apply when the proxy starts."
+        }
         await refreshClaudeSettingsPreview()
-        await installClaudeShim(updateLastMessage: false)
         await refreshRuntimeStatus()
     }
 

@@ -8,6 +8,7 @@ pub mod deepseek;
 pub mod error;
 pub mod logging;
 pub mod model;
+pub mod routing;
 pub mod server;
 
 pub use config::{AppConfig, AppPaths};

@@ -84,6 +84,130 @@ async fn count_tokens_is_local() {
 }
 
 #[tokio::test]
+async fn dynamic_provider_switch_uses_same_local_server() {
+    let codex_upstream = start_mock_upstream(mock_success_app()).await;
+    let deepseek_state = Arc::new(DeepSeekMockState::default());
+    let deepseek_upstream =
+        start_mock_upstream(mock_deepseek_json_app(deepseek_state.clone())).await;
+    let (mut config, paths) = test_config(codex_upstream, "/codex").await;
+    config.deepseek.base_url = format!("http://{deepseek_upstream}/anthropic");
+    store_api_key(&paths.deepseek_api_key_file, "deepseek-secret").unwrap();
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let addr = server.addr;
+    let client = reqwest::Client::new();
+
+    let codex_response = client
+        .post(format!("http://{addr}/v1/messages"))
+        .json(&serde_json::json!({
+            "model": "cc-proxy-primary[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(codex_response.status(), StatusCode::OK);
+    let codex_body = codex_response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(codex_body["content"][0]["text"], "hello from codex");
+
+    admin_set_route(addr, "deepseek").await;
+
+    let deepseek_response = client
+        .post(format!("http://{addr}/v1/messages"))
+        .json(&serde_json::json!({
+            "model": "cc-proxy-primary[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deepseek_response.status(), StatusCode::OK);
+    let deepseek_body = deepseek_response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(deepseek_body["content"][0]["text"], "hello from deepseek");
+    assert_eq!(deepseek_state.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        deepseek_state.last_model.lock().unwrap().as_deref(),
+        Some("deepseek-v4-pro")
+    );
+    assert_eq!(server.addr, addr);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn session_pinning_keeps_existing_session_on_original_route() {
+    let codex_upstream = start_mock_upstream(mock_success_app()).await;
+    let deepseek_state = Arc::new(DeepSeekMockState::default());
+    let deepseek_upstream =
+        start_mock_upstream(mock_deepseek_json_app(deepseek_state.clone())).await;
+    let (mut config, paths) = test_config(codex_upstream, "/codex").await;
+    config.deepseek.base_url = format!("http://{deepseek_upstream}/anthropic");
+    store_api_key(&paths.deepseek_api_key_file, "deepseek-secret").unwrap();
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-a")
+        .json(&serde_json::json!({
+            "model": "cc-proxy-primary[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(
+        first.json::<serde_json::Value>().await.unwrap()["content"][0]["text"],
+        "hello from codex"
+    );
+
+    admin_set_route(server.addr, "deepseek").await;
+
+    let pinned = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-a")
+        .json(&serde_json::json!({
+            "model": "cc-proxy-primary[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "still pinned"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pinned.status(), StatusCode::OK);
+    assert_eq!(
+        pinned.json::<serde_json::Value>().await.unwrap()["content"][0]["text"],
+        "hello from codex"
+    );
+
+    let fresh = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-b")
+        .json(&serde_json::json!({
+            "model": "cc-proxy-primary[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "new route"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::OK);
+    assert_eq!(
+        fresh.json::<serde_json::Value>().await.unwrap()["content"][0]["text"],
+        "hello from deepseek"
+    );
+    assert_eq!(deepseek_state.calls.load(Ordering::SeqCst), 1);
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn upstream_429_is_preserved() {
     let upstream = start_mock_upstream(Router::new().route(
         "/rate-limit",
@@ -375,6 +499,7 @@ async fn deepseek_missing_api_key_is_local_unauthorized() {
     let upstream = start_mock_upstream(mock_deepseek_json_app(Arc::default())).await;
     let (mut config, paths) = test_config(upstream, "/unused").await;
     config.provider = Provider::DeepSeek;
+    config.routing.active_profile = "deepseek".into();
     config.deepseek.base_url = format!("http://{upstream}/anthropic");
     let server = serve(config, paths, test_auth()).await.unwrap();
     let client = reqwest::Client::new();
@@ -965,6 +1090,18 @@ async fn admin_status(addr: std::net::SocketAddr) -> serde_json::Value {
         .unwrap()
 }
 
+async fn admin_set_route(addr: std::net::SocketAddr, active_profile: &str) -> serde_json::Value {
+    let response = reqwest::Client::new()
+        .put(format!("http://{addr}/admin/route"))
+        .header("x-cc-codex-admin-token", "test-admin-token")
+        .json(&serde_json::json!({ "activeProfile": active_profile }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.json().await.unwrap()
+}
+
 async fn test_config(upstream: std::net::SocketAddr, path: &str) -> (AppConfig, AppPaths) {
     let dir = tempfile::tempdir().unwrap().keep();
     let paths = AppPaths {
@@ -989,6 +1126,7 @@ async fn test_config(upstream: std::net::SocketAddr, path: &str) -> (AppConfig, 
 async fn test_deepseek_config(upstream: std::net::SocketAddr) -> (AppConfig, AppPaths) {
     let (mut config, paths) = test_config(upstream, "/unused").await;
     config.provider = Provider::DeepSeek;
+    config.routing.active_profile = "deepseek".into();
     config.deepseek.base_url = format!("http://{upstream}/anthropic");
     store_api_key(&paths.deepseek_api_key_file, "deepseek-secret").unwrap();
     (config, paths)
@@ -1001,6 +1139,7 @@ async fn test_custom_openai_config(
 ) -> (AppConfig, AppPaths) {
     let (mut config, paths) = test_config(upstream, "/unused").await;
     config.provider = Provider::CustomOpenAI;
+    config.routing.active_profile = "custom-openai".into();
     config.custom_openai.base_url = format!("http://{upstream}/openai");
     config.custom_openai.protocol = protocol;
     if with_key {

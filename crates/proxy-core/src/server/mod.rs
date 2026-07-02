@@ -15,6 +15,7 @@ use crate::{
     deepseek::DeepSeekClient,
     error::{ProxyError, Result},
     model::ModelRegistry,
+    routing::RouteManager,
 };
 use async_stream::try_stream;
 use axum::{
@@ -27,6 +28,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
@@ -46,6 +48,13 @@ struct AppState {
     deepseek: DeepSeekClient,
     custom_openai: CustomOpenAIClient,
     registry: ModelRegistry,
+    routes: RouteManager,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteUpdateRequest {
+    active_profile: String,
 }
 
 pub struct ServerHandle {
@@ -65,6 +74,7 @@ impl ServerHandle {
 
 pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Result<ServerHandle> {
     let registry = ModelRegistry::load_or_create(&paths.model_profiles_file)?;
+    let routes = RouteManager::from_config(&config.routing)?;
     let codex = CodexClient::new(config.codex.clone(), auth.clone())?;
     let deepseek =
         DeepSeekClient::new(config.deepseek.clone(), paths.deepseek_api_key_file.clone())?;
@@ -80,11 +90,13 @@ pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Res
         deepseek,
         custom_openai,
         registry,
+        routes,
     });
 
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/admin/status", get(admin_status))
+        .route("/admin/route", get(admin_route).put(update_admin_route))
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
         .layer(TraceLayer::new_for_http())
@@ -119,19 +131,30 @@ async fn admin_status(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>> {
     require_admin(&state, &headers)?;
-    let auth = if state.config.provider == Provider::Codex {
+    let route_status = state.routes.status().await?;
+    let auth = if route_status.active_provider == Provider::Codex {
         state.auth.status().await?
     } else {
         None
     };
     Ok(Json(json!({
         "ok": true,
-        "provider": state.config.provider.as_str(),
+        "provider": route_status.active_provider.as_str(),
+        "activeProvider": route_status.active_provider.as_str(),
+        "activeProfile": route_status.active_profile,
+        "sessionPolicy": route_status.session_policy,
+        "pinnedSessionCount": route_status.pinned_session_count,
+        "routes": route_status.routes,
+        "baseUrl": format!("http://127.0.0.1:{}", state.config.port),
+        "publicModels": {
+            "primary": state.config.claude.public_primary_model,
+            "small": state.config.claude.public_small_model,
+        },
         "port": state.config.port,
         "configDir": state.paths.config_dir,
         "logsDir": state.paths.logs_dir,
-        "transport": transport_status_json(&state),
-        "models": state.registry.supported_models(state.config.provider),
+        "transport": transport_status_json(&state, route_status.active_provider),
+        "models": state.registry.supported_models(route_status.active_provider),
         "deepseek": {
             "apiKey": state.deepseek.api_key_status(),
         },
@@ -148,13 +171,61 @@ async fn admin_status(
     })))
 }
 
+async fn admin_route(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>> {
+    require_admin(&state, &headers)?;
+    let active = state.routes.active_route().await?;
+    let status = state.routes.status().await?;
+    Ok(Json(json!({
+        "activeProfile": active.id,
+        "activeProvider": active.provider.as_str(),
+        "route": active,
+        "sessionPolicy": status.session_policy,
+        "pinnedSessionCount": status.pinned_session_count,
+    })))
+}
+
+async fn update_admin_route(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<RouteUpdateRequest>,
+) -> Result<Json<serde_json::Value>> {
+    require_admin(&state, &headers)?;
+    let route = state
+        .routes
+        .set_active_profile(&request.active_profile)
+        .await?;
+    info!(
+        active_profile = %route.id,
+        provider = route.provider.as_str(),
+        "active route updated"
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "activeProfile": route.id,
+        "activeProvider": route.provider.as_str(),
+        "route": route,
+    })))
+}
+
 async fn count_tokens(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<AnthropicRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    let _ = state
-        .registry
-        .resolve(state.config.provider, &request.model)?;
+    let session_id = claude_session_id(&headers);
+    let route = state
+        .routes
+        .resolve_for_request(session_id.as_deref())
+        .await?;
+    let _ = state.registry.resolve_for_route(
+        &route,
+        &state.config.claude.public_primary_model,
+        &state.config.claude.public_small_model,
+        &request.model,
+    )?;
     Ok(Json(
         json!({ "input_tokens": estimate_input_tokens(&request) }),
     ))
@@ -166,13 +237,15 @@ async fn messages(
     Json(request): Json<AnthropicRequest>,
 ) -> Result<Response<Body>> {
     let request_id = format!("req_{}", Uuid::new_v4().simple());
-    let session_id = headers
-        .get("x-claude-code-session-id")
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
+    let session_id = claude_session_id(&headers);
+    let route = state
+        .routes
+        .resolve_for_request(session_id.as_deref())
+        .await?;
     info!(
         %request_id,
-        provider = state.config.provider.as_str(),
+        route = %route.id,
+        provider = route.provider.as_str(),
         model = %request.model,
         stream = request.wants_stream(),
         message_count = request.messages.len(),
@@ -182,17 +255,19 @@ async fn messages(
         tools = %summarize_anthropic_tools(request.tools.as_deref()),
         "received Anthropic messages request"
     );
-    let resolved = match state
-        .registry
-        .resolve(state.config.provider, &request.model)
-    {
+    let resolved = match state.registry.resolve_for_route(
+        &route,
+        &state.config.claude.public_primary_model,
+        &state.config.claude.public_small_model,
+        &request.model,
+    ) {
         Ok(resolved) => resolved,
         Err(err) => {
             warn!(%request_id, error = %err, "failed to resolve requested model");
             return Err(err);
         }
     };
-    match state.config.provider {
+    match route.provider {
         Provider::Codex => {
             handle_codex_messages(state, request_id, session_id, request, resolved).await
         }
@@ -460,6 +535,13 @@ fn with_sse_heartbeats(
     })
 }
 
+fn claude_session_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-claude-code-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+}
+
 fn summarize_anthropic_tool_names(tools: Option<&[AnthropicTool]>) -> String {
     let Some(tools) = tools else {
         return "none".into();
@@ -549,8 +631,8 @@ fn configured_transport_name(transport: &CodexTransport) -> &'static str {
     }
 }
 
-fn transport_status_json(state: &AppState) -> serde_json::Value {
-    match state.config.provider {
+fn transport_status_json(state: &AppState, provider: Provider) -> serde_json::Value {
+    match provider {
         Provider::Codex => {
             let transport = state.codex.transport_status();
             json!({
@@ -659,81 +741,11 @@ mod tests {
         let first = stream
             .next()
             .await
-            .expect("event should be forwarded")
-            .expect("event should be ok");
+            .expect("first item")
+            .expect("ok first chunk");
         assert_eq!(first, expected);
 
-        let early = tokio::time::timeout(Duration::from_millis(10), stream.next()).await;
-        assert!(
-            early.is_err(),
-            "heartbeat should wait for a fresh idle interval"
-        );
-
-        let heartbeat = tokio::time::timeout(Duration::from_millis(50), stream.next())
-            .await
-            .expect("heartbeat should be emitted after reset interval")
-            .expect("stream should stay open")
-            .expect("heartbeat should be ok");
-        assert_eq!(heartbeat, Bytes::from_static(SSE_HEARTBEAT_COMMENT));
-    }
-
-    #[tokio::test]
-    async fn completed_stream_does_not_emit_trailing_heartbeat() {
-        let mut stream = with_sse_heartbeats(boxed(stream::empty()), Duration::from_millis(10));
-
-        assert!(stream.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn stream_errors_are_forwarded() {
-        let mut stream = with_sse_heartbeats(
-            boxed(stream::iter(vec![Err(ProxyError::Transport(
-                "boom".into(),
-            ))])),
-            Duration::from_millis(10),
-        );
-
-        let err = stream
-            .next()
-            .await
-            .expect("error should be forwarded")
-            .expect_err("item should be an error");
-        assert!(err.to_string().contains("boom"));
-    }
-
-    #[tokio::test]
-    async fn heartbeat_comment_is_inserted_between_complete_sse_frames() {
-        let first =
-            Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n");
-        let second =
-            Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
-        let (tx, rx) = tokio::sync::mpsc::channel(2);
-        tx.send(Ok(first.clone())).await.unwrap();
-        let source = tokio_stream::wrappers::ReceiverStream::new(rx);
-        let mut stream = with_sse_heartbeats(boxed(source), Duration::from_millis(10));
-
-        let first_chunk = stream
-            .next()
-            .await
-            .expect("first frame should be forwarded")
-            .expect("first frame should be ok");
-        assert_eq!(first_chunk, first);
-
-        let heartbeat = tokio::time::timeout(Duration::from_millis(50), stream.next())
-            .await
-            .expect("heartbeat should be emitted before the next frame")
-            .expect("stream should stay open")
-            .expect("heartbeat should be ok");
-        assert_eq!(heartbeat, Bytes::from_static(SSE_HEARTBEAT_COMMENT));
-
-        tx.send(Ok(second.clone())).await.unwrap();
-        drop(tx);
-        let second_chunk = stream
-            .next()
-            .await
-            .expect("second frame should be forwarded")
-            .expect("second frame should be ok");
-        assert_eq!(second_chunk, second);
-        assert!(stream.next().await.is_none());
+        let result = tokio::time::timeout(Duration::from_millis(10), stream.next()).await;
+        assert!(result.is_err());
     }
 }

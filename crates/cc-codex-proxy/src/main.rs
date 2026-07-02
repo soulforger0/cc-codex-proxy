@@ -7,7 +7,10 @@ use proxy_core::{
         live_claude_sessions_message, managed_env_strings, preview_settings, restore_latest_backup,
         restore_shim, ClaudeSettingsOptions, ClaudeShimInstallOptions, MANAGED_ENV_KEYS,
     },
-    config::{AppConfig, CustomOpenAIProtocol, Provider, DEFAULT_PORT},
+    config::{
+        AppConfig, CustomOpenAIProtocol, Provider, DEFAULT_PORT, DEFAULT_PUBLIC_PRIMARY_MODEL,
+        DEFAULT_PUBLIC_SMALL_MODEL,
+    },
     custom_openai::{
         api_key_status as custom_openai_api_key_status,
         clear_api_key as clear_custom_openai_api_key, store_api_key as store_custom_openai_api_key,
@@ -15,6 +18,7 @@ use proxy_core::{
     deepseek::{api_key_status, clear_api_key, store_api_key},
     logging,
     model::ModelRegistry,
+    routing::RouteManager,
     serve,
 };
 use std::{io::Read, path::PathBuf, process::Command as StdCommand, sync::Arc, time::Duration};
@@ -148,6 +152,26 @@ struct LaunchArgs {
 #[derive(Debug, Subcommand)]
 enum AdminSubcommand {
     Status(AdminStatusArgs),
+    Route(AdminRouteCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum AdminRouteSubcommand {
+    Get(AdminStatusArgs),
+    Set(AdminRouteSetArgs),
+}
+
+#[derive(Debug, Args)]
+struct AdminRouteCommand {
+    #[command(subcommand)]
+    command: AdminRouteSubcommand,
+}
+
+#[derive(Debug, Args)]
+struct AdminRouteSetArgs {
+    active_profile: String,
+    #[arg(long, env = "PORT")]
+    port: Option<u16>,
 }
 
 #[derive(Debug, Args)]
@@ -193,9 +217,11 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     let (mut config, paths) = AppConfig::load_default()?;
     if let Some(port) = args.port {
         config.port = port;
+        config.claude.stable_port = port;
     }
     if let Some(provider) = args.provider {
         config.provider = provider;
+        config.routing.active_profile = provider.as_str().into();
     }
     apply_custom_openai_args(
         &mut config,
@@ -203,9 +229,11 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         args.custom_openai_protocol,
     );
     let _guards = logging::init(&paths, config.log.stderr, config.log.verbose)?;
+    let active_provider = config.active_provider()?;
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        provider = config.provider.as_str(),
+        active_profile = %config.routing.active_profile,
+        provider = active_provider.as_str(),
         port = config.port,
         transport = ?config.codex.transport,
         codex_base_url = %config.codex.base_url,
@@ -222,11 +250,11 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     println!("Logs: {}", paths.logs_dir.join("proxy.log").display());
     println!("Claude Code:");
     let settings = ClaudeSettingsOptions {
-        provider: config.provider,
+        provider: active_provider,
         port: config.port,
-        model: default_model(config.provider).into(),
-        small_fast_model: default_small_model(config.provider).into(),
-        auto_compact_window: default_auto_compact_window(config.provider),
+        model: config.claude.public_primary_model.clone(),
+        small_fast_model: config.claude.public_small_model.clone(),
+        auto_compact_window: config.claude.auto_compact_window,
     };
     for (key, value) in managed_env_strings(&settings) {
         println!("  export {key}=\"{value}\"");
@@ -343,14 +371,28 @@ async fn cmd_doctor(args: DoctorArgs) -> Result<()> {
         args.custom_openai_base_url,
         args.custom_openai_protocol,
     );
-    let provider = args.provider.unwrap_or(config.provider);
+    let provider = args.provider.unwrap_or(config.active_provider()?);
     let model = args
         .model
-        .unwrap_or_else(|| default_model(provider).to_string());
+        .unwrap_or_else(|| config.claude.public_primary_model.clone());
     let registry = ModelRegistry::load_or_create(&paths.model_profiles_file)?;
-    let resolved = registry.resolve(provider, &model)?;
+    let route = RouteManager::from_config(&config.routing)?
+        .active_route()
+        .await?;
+    let resolved = if args.provider.is_some() {
+        registry.resolve(provider, &model)?
+    } else {
+        registry.resolve_for_route(
+            &route,
+            &config.claude.public_primary_model,
+            &config.claude.public_small_model,
+            &model,
+        )?
+    };
     println!("Config: {}", paths.config_file.display());
     println!("Model profiles: {}", paths.model_profiles_file.display());
+    println!("Stable base URL: http://127.0.0.1:{}", config.port);
+    println!("Active profile: {}", config.routing.active_profile);
     println!("Provider: {}", provider.as_str());
     println!("Model: {} -> {}", model, resolved.upstream_model);
     match provider {
@@ -486,19 +528,16 @@ async fn cmd_claude(args: ClaudeCommand) -> Result<()> {
 }
 
 fn claude_settings_options(args: InstallSettingsArgs) -> ClaudeSettingsOptions {
-    let provider = args.provider;
     ClaudeSettingsOptions {
-        provider,
+        provider: args.provider,
         port: args.port,
         model: args
             .model
-            .unwrap_or_else(|| default_model(provider).to_string()),
+            .unwrap_or_else(|| DEFAULT_PUBLIC_PRIMARY_MODEL.to_string()),
         small_fast_model: args
             .small_model
-            .unwrap_or_else(|| default_small_model(provider).to_string()),
-        auto_compact_window: args
-            .auto_compact_window
-            .unwrap_or_else(|| default_auto_compact_window(provider)),
+            .unwrap_or_else(|| DEFAULT_PUBLIC_SMALL_MODEL.to_string()),
+        auto_compact_window: args.auto_compact_window.unwrap_or(128_000),
     }
 }
 
@@ -597,23 +636,58 @@ async fn cmd_admin(args: AdminCommand) -> Result<()> {
     let (config, _) = AppConfig::load_default()?;
     match args.command {
         AdminSubcommand::Status(args) => {
-            let port = args.port.unwrap_or(config.port);
-            let client = reqwest::Client::new();
-            let resp = client
-                .get(format!("http://127.0.0.1:{port}/admin/status"))
-                .header("x-cc-codex-admin-token", config.admin_token)
-                .send()
-                .await
-                .context("failed to reach local proxy admin endpoint")?;
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                anyhow::bail!("admin status failed: {status} {body}");
-            }
+            let body =
+                admin_get(config.port, args.port, &config.admin_token, "/admin/status").await?;
             println!("{body}");
         }
+        AdminSubcommand::Route(args) => match args.command {
+            AdminRouteSubcommand::Get(args) => {
+                let body =
+                    admin_get(config.port, args.port, &config.admin_token, "/admin/route").await?;
+                println!("{body}");
+            }
+            AdminRouteSubcommand::Set(args) => {
+                let port = args.port.unwrap_or(config.port);
+                let client = reqwest::Client::new();
+                let resp = client
+                    .put(format!("http://127.0.0.1:{port}/admin/route"))
+                    .header("x-cc-codex-admin-token", &config.admin_token)
+                    .json(&serde_json::json!({ "activeProfile": args.active_profile }))
+                    .send()
+                    .await
+                    .context("failed to reach local proxy admin endpoint")?;
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    anyhow::bail!("admin route set failed: {status} {body}");
+                }
+                println!("{body}");
+            }
+        },
     }
     Ok(())
+}
+
+async fn admin_get(
+    default_port: u16,
+    port: Option<u16>,
+    admin_token: &str,
+    path: &str,
+) -> Result<String> {
+    let port = port.unwrap_or(default_port);
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}{path}"))
+        .header("x-cc-codex-admin-token", admin_token)
+        .send()
+        .await
+        .context("failed to reach local proxy admin endpoint")?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("admin request failed: {status} {body}");
+    }
+    Ok(body)
 }
 
 async fn cmd_bench(args: BenchArgs) -> Result<()> {
@@ -677,52 +751,20 @@ fn ensure_codex_provider(provider: Provider, action: &str) -> Result<()> {
     }
 }
 
-fn default_model(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Codex => "gpt-5.4[1m]",
-        Provider::DeepSeek => "deepseek-v4-pro[1m]",
-        Provider::CustomOpenAI => "gpt-5.4[1m]",
-    }
-}
-
-fn default_small_model(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Codex => "gpt-5.4-mini[1m]",
-        Provider::DeepSeek => "deepseek-v4-flash",
-        Provider::CustomOpenAI => "gpt-5.4-mini[1m]",
-    }
-}
-
-fn default_auto_compact_window(provider: Provider) -> u32 {
-    match provider {
-        Provider::Codex => 272_000,
-        Provider::DeepSeek => 1_000_000,
-        Provider::CustomOpenAI => 128_000,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn claude_settings_options_use_codex_defaults() {
-        let options = claude_settings_options(InstallSettingsArgs {
+    fn claude_settings_options_use_stable_defaults() {
+        let codex = claude_settings_options(InstallSettingsArgs {
             provider: Provider::Codex,
             model: None,
             small_model: None,
             port: DEFAULT_PORT,
             auto_compact_window: None,
         });
-
-        assert_eq!(options.model, "gpt-5.4[1m]");
-        assert_eq!(options.small_fast_model, "gpt-5.4-mini[1m]");
-        assert_eq!(options.auto_compact_window, 272_000);
-    }
-
-    #[test]
-    fn claude_settings_options_use_deepseek_defaults() {
-        let options = claude_settings_options(InstallSettingsArgs {
+        let deepseek = claude_settings_options(InstallSettingsArgs {
             provider: Provider::DeepSeek,
             model: None,
             small_model: None,
@@ -730,24 +772,12 @@ mod tests {
             auto_compact_window: None,
         });
 
-        assert_eq!(options.model, "deepseek-v4-pro[1m]");
-        assert_eq!(options.small_fast_model, "deepseek-v4-flash");
-        assert_eq!(options.auto_compact_window, 1_000_000);
-    }
-
-    #[test]
-    fn claude_settings_options_use_custom_openai_defaults() {
-        let options = claude_settings_options(InstallSettingsArgs {
-            provider: Provider::CustomOpenAI,
-            model: None,
-            small_model: None,
-            port: DEFAULT_PORT,
-            auto_compact_window: None,
-        });
-
-        assert_eq!(options.model, "gpt-5.4[1m]");
-        assert_eq!(options.small_fast_model, "gpt-5.4-mini[1m]");
-        assert_eq!(options.auto_compact_window, 128_000);
+        assert_eq!(codex.model, DEFAULT_PUBLIC_PRIMARY_MODEL);
+        assert_eq!(codex.small_fast_model, DEFAULT_PUBLIC_SMALL_MODEL);
+        assert_eq!(codex.auto_compact_window, 128_000);
+        assert_eq!(deepseek.model, codex.model);
+        assert_eq!(deepseek.small_fast_model, codex.small_fast_model);
+        assert_eq!(deepseek.auto_compact_window, codex.auto_compact_window);
     }
 
     #[test]

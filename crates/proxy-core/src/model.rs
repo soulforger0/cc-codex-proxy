@@ -1,6 +1,7 @@
 use crate::{
     config::Provider,
     error::{ProxyError, Result},
+    routing::RouteSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fs, io::ErrorKind, path::Path};
@@ -72,11 +73,7 @@ impl ModelRegistry {
 
     pub fn resolve(&self, provider: Provider, incoming: &str) -> Result<ResolvedModel> {
         let stripped = strip_context_hint(incoming);
-        let (base, service_tier) = if let Some(base) = stripped.strip_suffix("-fast") {
-            (base.to_string(), Some("priority".to_string()))
-        } else {
-            (stripped.clone(), None)
-        };
+        let (base, service_tier) = split_fast_suffix(&stripped);
         if let Some(profile) = self
             .find_profile(provider, &base)
             .or_else(|| self.compatibility_profile(provider, &base))
@@ -113,6 +110,74 @@ impl ModelRegistry {
             provider.as_str(),
             self.supported_models(provider).join(", ")
         )))
+    }
+
+    pub fn resolve_for_route(
+        &self,
+        route: &RouteSnapshot,
+        public_primary_model: &str,
+        public_small_model: &str,
+        incoming: &str,
+    ) -> Result<ResolvedModel> {
+        let stripped = strip_context_hint(incoming);
+        let (base, service_tier) = split_fast_suffix(&stripped);
+        let public_primary = strip_context_hint(public_primary_model);
+        let public_small = strip_context_hint(public_small_model);
+
+        if base == public_primary {
+            return self.resolve_route_model(
+                route,
+                incoming,
+                public_primary_model,
+                &route.primary_model,
+                service_tier,
+            );
+        }
+        if base == public_small {
+            return self.resolve_route_model(
+                route,
+                incoming,
+                public_small_model,
+                &route.small_model,
+                service_tier,
+            );
+        }
+
+        self.resolve(route.provider, incoming)
+    }
+
+    fn resolve_route_model(
+        &self,
+        route: &RouteSnapshot,
+        incoming: &str,
+        public_id: &str,
+        upstream: &str,
+        service_tier: Option<String>,
+    ) -> Result<ResolvedModel> {
+        let upstream = strip_context_hint(upstream);
+        let profile = self.find_profile(route.provider, &upstream);
+        if service_tier.is_some()
+            && !profile
+                .map(|profile| profile.supports_fast)
+                .unwrap_or(false)
+        {
+            return Err(ProxyError::InvalidRequest(format!(
+                "Model \"{}\" does not support -fast routing",
+                strip_context_hint(public_id)
+            )));
+        }
+        Ok(ResolvedModel {
+            provider: route.provider,
+            requested: incoming.to_string(),
+            public_id: strip_context_hint(public_id),
+            upstream_model: profile
+                .map(|profile| profile.upstream_model.clone())
+                .unwrap_or(upstream),
+            service_tier,
+            context_window: profile
+                .map(|profile| profile.context_window)
+                .unwrap_or(route.context_window),
+        })
     }
 
     fn find_profile(&self, provider: Provider, model: &str) -> Option<&ModelProfile> {
@@ -158,6 +223,14 @@ impl ModelRegistry {
 
 pub fn strip_context_hint(model: &str) -> String {
     model.strip_suffix("[1m]").unwrap_or(model).to_string()
+}
+
+fn split_fast_suffix(model: &str) -> (String, Option<String>) {
+    if let Some(base) = model.strip_suffix("-fast") {
+        (base.to_string(), Some("priority".to_string()))
+    } else {
+        (model.to_string(), None)
+    }
 }
 
 pub fn default_profiles() -> Vec<ModelProfile> {
@@ -262,6 +335,7 @@ fn merge_missing_default_profiles(profiles: &mut Vec<ModelProfile>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routing::RouteSnapshot;
 
     #[test]
     fn resolves_context_hint_and_fast_suffix() {
@@ -305,6 +379,62 @@ mod tests {
             .unwrap();
         assert_eq!(small.upstream_model, "deepseek-v4-flash");
         assert_eq!(small.public_id, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn route_alias_maps_to_active_upstream_model() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+        let route = RouteSnapshot {
+            id: "deepseek".into(),
+            provider: Provider::DeepSeek,
+            primary_model: "deepseek-v4-pro".into(),
+            small_model: "deepseek-v4-flash".into(),
+            context_window: 1_000_000,
+        };
+
+        let primary = registry
+            .resolve_for_route(
+                &route,
+                "cc-proxy-primary[1m]",
+                "cc-proxy-small[1m]",
+                "cc-proxy-primary[1m]",
+            )
+            .unwrap();
+        assert_eq!(primary.upstream_model, "deepseek-v4-pro");
+        assert_eq!(primary.public_id, "cc-proxy-primary");
+
+        let small = registry
+            .resolve_for_route(
+                &route,
+                "cc-proxy-primary[1m]",
+                "cc-proxy-small[1m]",
+                "cc-proxy-small[1m]",
+            )
+            .unwrap();
+        assert_eq!(small.upstream_model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn custom_route_alias_uses_configured_upstream_model() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+        let route = RouteSnapshot {
+            id: "custom-local".into(),
+            provider: Provider::CustomOpenAI,
+            primary_model: "llama-3.3-70b".into(),
+            small_model: "llama-3.2-3b".into(),
+            context_window: 128_000,
+        };
+
+        let resolved = registry
+            .resolve_for_route(
+                &route,
+                "cc-proxy-primary[1m]",
+                "cc-proxy-small[1m]",
+                "cc-proxy-primary[1m]",
+            )
+            .unwrap();
+        assert_eq!(resolved.upstream_model, "llama-3.3-70b");
+        assert_eq!(resolved.context_window, 128_000);
     }
 
     #[test]

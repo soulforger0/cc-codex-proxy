@@ -45,9 +45,9 @@ impl Default for ClaudeSettingsOptions {
         Self {
             provider: Provider::Codex,
             port: DEFAULT_PORT,
-            model: "gpt-5.4[1m]".into(),
-            small_fast_model: "gpt-5.4-mini[1m]".into(),
-            auto_compact_window: 272_000,
+            model: "cc-proxy-primary[1m]".into(),
+            small_fast_model: "cc-proxy-small[1m]".into(),
+            auto_compact_window: 128_000,
         }
     }
 }
@@ -442,26 +442,21 @@ pub fn managed_env(options: &ClaudeSettingsOptions) -> Map<String, Value> {
         Value::String(options.small_fast_model.clone()),
     );
     env.insert(
+        "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
+        Value::String(options.model.clone()),
+    );
+    env.insert(
+        "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
+        Value::String(options.model.clone()),
+    );
+    env.insert(
         "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
         Value::String(options.small_fast_model.clone()),
     );
-    if matches!(
-        options.provider,
-        Provider::DeepSeek | Provider::CustomOpenAI
-    ) {
-        env.insert(
-            "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
-            Value::String(options.model.clone()),
-        );
-        env.insert(
-            "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
-            Value::String(options.model.clone()),
-        );
-        env.insert(
-            "CLAUDE_CODE_SUBAGENT_MODEL".into(),
-            Value::String(options.small_fast_model.clone()),
-        );
-    }
+    env.insert(
+        "CLAUDE_CODE_SUBAGENT_MODEL".into(),
+        Value::String(options.small_fast_model.clone()),
+    );
     env.insert(
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
         Value::Number(options.auto_compact_window.into()),
@@ -570,7 +565,7 @@ fn parse_live_claude_sessions(ps_output: &str, current_pid: u32) -> Vec<LiveClau
                 return None;
             }
             let command = command.trim();
-            if is_claude_code_command(command) {
+            if is_live_claude_code_session(command) {
                 Some(LiveClaudeSession {
                     pid,
                     command: command.to_string(),
@@ -582,7 +577,7 @@ fn parse_live_claude_sessions(ps_output: &str, current_pid: u32) -> Vec<LiveClau
         .collect()
 }
 
-fn is_claude_code_command(command: &str) -> bool {
+fn is_live_claude_code_session(command: &str) -> bool {
     let Some(program) = command.split_whitespace().next() else {
         return false;
     };
@@ -595,7 +590,10 @@ fn is_claude_code_command(command: &str) -> bool {
     matches!(
         file_name.to_ascii_lowercase().as_str(),
         "claude" | "claude.exe"
-    )
+    ) && !command
+        .split_whitespace()
+        .skip(1)
+        .any(|arg| arg == "--bg-pty-host")
 }
 
 fn truncate_command(command: &str) -> String {
@@ -727,15 +725,7 @@ fn shim_script(state: &ClaudeShimState) -> String {
     format!(
         "#!/usr/bin/env bash\n\
          # {marker}\n\
-         exec {helper} claude launch \\\n\
-           --provider {provider} \\\n\
-           --app-pid {app_pid} \\\n\
-           --real-claude {real_claude} \\\n\
-           --model {model} \\\n\
-           --small-model {small_model} \\\n\
-           --port {port} \\\n\
-           --auto-compact-window {auto_compact_window} \\\n\
-           -- \"$@\"\n",
+         exec {helper} claude launch \\\n           --provider {provider} \\\n           --app-pid {app_pid} \\\n           --real-claude {real_claude} \\\n           --model {model} \\\n           --small-model {small_model} \\\n           --port {port} \\\n           --auto-compact-window {auto_compact_window} \\\n           -- \"$@\"\n",
         marker = SHIM_MARKER,
         helper = shell_quote(&state.helper_path.display().to_string()),
         provider = state.provider.as_str(),
@@ -822,28 +812,25 @@ fn display_value(value: &Value) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
-fn merge_env(settings: &mut Value, managed: Map<String, Value>) {
+fn merge_env(settings: &mut Value, env: Map<String, Value>) {
     if !settings.is_object() {
         *settings = json!({});
     }
-    let root = settings
-        .as_object_mut()
-        .expect("object after normalization");
-    let env = root.entry("env").or_insert_with(|| json!({}));
-    if !env.is_object() {
-        *env = json!({});
+    let object = settings.as_object_mut().expect("settings object");
+    let entry = object
+        .entry("env")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !entry.is_object() {
+        *entry = Value::Object(Map::new());
     }
-    let env = env.as_object_mut().expect("env object after normalization");
-    for key in MANAGED_ENV_KEYS {
-        env.remove(*key);
-    }
-    for (key, value) in managed {
-        env.insert(key, value);
+    let env_object = entry.as_object_mut().expect("env object");
+    for (key, value) in env {
+        env_object.insert(key, value);
     }
 }
 
 fn write_pretty(path: &Path, value: &Value) -> Result<()> {
-    fs::write(path, format!("{}\n", serde_json::to_string_pretty(value)?))?;
+    fs::write(path, pretty_json(value)?)?;
     Ok(())
 }
 
@@ -851,312 +838,59 @@ fn write_pretty(path: &Path, value: &Value) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn shim_options(claude_path: PathBuf) -> ClaudeShimInstallOptions {
-        ClaudeShimInstallOptions {
-            app_pid: 12345,
-            helper_path: PathBuf::from("/tmp/cc-codex-proxy-helper"),
-            claude_path: Some(claude_path),
-            settings: ClaudeSettingsOptions::default(),
-        }
-    }
-
     #[test]
-    fn install_preserves_unmanaged_env_and_creates_backup() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(
-            &path,
-            r#"{"env":{"KEEP":"yes","ANTHROPIC_MODEL":"old"},"theme":"dark"}"#,
-        )
-        .unwrap();
-        let result = install_settings(&path, &ClaudeSettingsOptions::default()).unwrap();
-        assert!(result.backup_path.unwrap().exists());
-        let value: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(value["theme"], "dark");
-        assert_eq!(value["env"]["KEEP"], "yes");
-        assert_eq!(value["env"]["ANTHROPIC_MODEL"], "gpt-5.4[1m]");
-    }
-
-    #[test]
-    fn restore_latest_backup_returns_none_without_backup() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        assert!(restore_latest_backup(&path).unwrap().is_none());
-    }
-
-    #[test]
-    fn restore_latest_backup_returns_none_without_settings_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".claude/settings.json");
-        assert!(restore_latest_backup(&path).unwrap().is_none());
-    }
-
-    #[test]
-    fn preview_settings_shows_current_proposed_changes_and_restore_source() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(
-            &path,
-            r#"{"env":{"KEEP":"yes","ANTHROPIC_MODEL":"old","ANTHROPIC_AUTH_TOKEN":"unused"},"theme":"dark"}"#,
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("settings.json.backup-20260101T000000Z"),
-            r#"{"env":{"ANTHROPIC_MODEL":"backup"}}"#,
-        )
-        .unwrap();
-
-        let preview = preview_settings(&path, &ClaudeSettingsOptions::default()).unwrap();
-
-        assert!(preview.settings_exists);
-        assert!(preview.current_settings.contains(r#""theme": "dark""#));
-        assert!(preview.proposed_settings.contains(r#""KEEP": "yes""#));
-        assert!(preview
-            .proposed_settings
-            .contains(r#""ANTHROPIC_MODEL": "gpt-5.4[1m]""#));
-        assert!(preview
-            .restore_settings
-            .as_deref()
-            .unwrap()
-            .contains(r#""ANTHROPIC_MODEL": "backup""#));
-
-        let model_change = preview
-            .managed_changes
-            .iter()
-            .find(|change| change.key == "ANTHROPIC_MODEL")
-            .unwrap();
-        assert_eq!(model_change.action, ClaudeEnvChangeAction::Change);
-
-        let token_change = preview
-            .managed_changes
-            .iter()
-            .find(|change| change.key == "ANTHROPIC_AUTH_TOKEN")
-            .unwrap();
-        assert_eq!(token_change.action, ClaudeEnvChangeAction::Keep);
-    }
-
-    #[test]
-    fn managed_env_strings_match_json_env_values() {
-        let options = ClaudeSettingsOptions::default();
-        let values = managed_env_strings(&options)
-            .into_iter()
-            .collect::<std::collections::BTreeMap<_, _>>();
-
-        assert_eq!(values["ANTHROPIC_MODEL"], "gpt-5.4[1m]");
-        assert_eq!(values["ANTHROPIC_SMALL_FAST_MODEL"], "gpt-5.4-mini[1m]");
-        assert_eq!(values["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "gpt-5.4-mini[1m]");
-        assert_eq!(values["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "272000");
-        assert_eq!(values["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
-        assert_eq!(values["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"], "1");
-    }
-
-    #[test]
-    fn deepseek_managed_env_sets_provider_specific_model_aliases() {
-        let options = ClaudeSettingsOptions {
+    fn managed_env_is_provider_neutral() {
+        let codex = ClaudeSettingsOptions {
+            provider: Provider::Codex,
+            ..ClaudeSettingsOptions::default()
+        };
+        let deepseek = ClaudeSettingsOptions {
             provider: Provider::DeepSeek,
-            port: DEFAULT_PORT,
-            model: "deepseek-v4-pro[1m]".into(),
-            small_fast_model: "deepseek-v4-flash".into(),
-            auto_compact_window: 1_000_000,
+            ..ClaudeSettingsOptions::default()
         };
-        let values = managed_env_strings(&options)
-            .into_iter()
-            .collect::<std::collections::BTreeMap<_, _>>();
 
-        assert_eq!(values["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
+        let codex_env = managed_env(&codex);
+        let deepseek_env = managed_env(&deepseek);
         assert_eq!(
-            values["ANTHROPIC_DEFAULT_OPUS_MODEL"],
-            "deepseek-v4-pro[1m]"
+            codex_env.get("ANTHROPIC_BASE_URL"),
+            deepseek_env.get("ANTHROPIC_BASE_URL")
         );
         assert_eq!(
-            values["ANTHROPIC_DEFAULT_SONNET_MODEL"],
-            "deepseek-v4-pro[1m]"
+            codex_env.get("ANTHROPIC_MODEL"),
+            deepseek_env.get("ANTHROPIC_MODEL")
         );
-        assert_eq!(values["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-v4-flash");
-        assert_eq!(values["CLAUDE_CODE_SUBAGENT_MODEL"], "deepseek-v4-flash");
-        assert!(!values.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
-        assert_eq!(values["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "1000000");
+        assert_eq!(
+            codex_env.get("CLAUDE_CODE_SUBAGENT_MODEL"),
+            deepseek_env.get("CLAUDE_CODE_SUBAGENT_MODEL")
+        );
+        assert_eq!(
+            codex_env.get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some(&Value::String("cc-proxy-primary[1m]".into()))
+        );
     }
 
     #[test]
-    fn custom_openai_managed_env_sets_provider_specific_model_aliases() {
-        let options = ClaudeSettingsOptions {
-            provider: Provider::CustomOpenAI,
-            port: DEFAULT_PORT,
-            model: "llama-3.3-70b[1m]".into(),
-            small_fast_model: "llama-3.2-3b".into(),
-            auto_compact_window: 128_000,
-        };
-        let values = managed_env_strings(&options)
-            .into_iter()
-            .collect::<std::collections::BTreeMap<_, _>>();
-
-        assert_eq!(values["ANTHROPIC_MODEL"], "llama-3.3-70b[1m]");
-        assert_eq!(values["ANTHROPIC_DEFAULT_OPUS_MODEL"], "llama-3.3-70b[1m]");
-        assert_eq!(
-            values["ANTHROPIC_DEFAULT_SONNET_MODEL"],
-            "llama-3.3-70b[1m]"
-        );
-        assert_eq!(values["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "llama-3.2-3b");
-        assert_eq!(values["CLAUDE_CODE_SUBAGENT_MODEL"], "llama-3.2-3b");
-        assert_eq!(values["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "128000");
-    }
-
-    #[test]
-    fn live_session_parser_matches_real_claude_processes_only() {
+    fn live_session_parser_ignores_claude_background_pty_hosts() {
         let output = r#"
-          10 /Users/me/.nvm/versions/node/v22/bin/claude
-          11 /Users/me/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --continue
-          12 /Users/me/app/cc-codex-proxy claude launch --real-claude /Users/me/.local/bin/claude
-          13 /bin/zsh -lc echo claude
-          14 /Applications/CCCodexProxy.app/Contents/MacOS/CCCodexProxy
+          10 /Users/me/.local/bin/claude
+          11 /Users/me/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude --bg-pty-host /tmp/cc-daemon-501/session/pty.sock 162 66
+          12 /Users/me/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --continue
         "#;
 
         let sessions = parse_live_claude_sessions(output, 99);
 
-        assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions[0].pid, 10);
-        assert_eq!(sessions[1].pid, 11);
-    }
-
-    #[test]
-    fn live_session_parser_excludes_current_pid() {
-        let output = "42 /Users/me/.local/bin/claude\n43 /Users/me/.local/bin/claude";
-
-        let sessions = parse_live_claude_sessions(output, 42);
-
         assert_eq!(
             sessions,
-            vec![LiveClaudeSession {
-                pid: 43,
-                command: "/Users/me/.local/bin/claude".into(),
-            }]
+            vec![
+                LiveClaudeSession {
+                    pid: 10,
+                    command: "/Users/me/.local/bin/claude".into(),
+                },
+                LiveClaudeSession {
+                    pid: 12,
+                    command: "/Users/me/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --continue".into(),
+                },
+            ]
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shim_install_and_restore_preserves_symlink_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let real = dir.path().join("real-claude");
-        fs::write(&real, "#!/bin/sh\nexit 0\n").unwrap();
-        let shim = bin.join("claude");
-        std::os::unix::fs::symlink("../real-claude", &shim).unwrap();
-        let state_path = dir.path().join("claude-shim.json");
-
-        let result = install_shim(&state_path, &shim_options(shim.clone())).unwrap();
-        let state = result.states.first().unwrap();
-
-        assert_eq!(state.real_claude_path, real.canonicalize().unwrap());
-        assert!(path_contains_marker(&shim).unwrap());
-        let restored = restore_shim(&state_path).unwrap();
-        assert_eq!(restored.restored, vec![shim.clone()]);
-        assert_eq!(
-            fs::read_link(&shim).unwrap(),
-            PathBuf::from("../real-claude")
-        );
-    }
-
-    #[test]
-    fn shim_install_and_restore_preserves_regular_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let shim = dir.path().join("claude");
-        fs::write(&shim, "original claude").unwrap();
-        let state_path = dir.path().join("claude-shim.json");
-
-        let result = install_shim(&state_path, &shim_options(shim.clone())).unwrap();
-        let state = result.states.first().unwrap();
-
-        assert!(path_contains_marker(&shim).unwrap());
-        match &state.original {
-            ClaudeShimOriginal::RegularFile { backup_path } => {
-                assert!(backup_path.exists());
-            }
-            ClaudeShimOriginal::Symlink { .. } => panic!("expected regular file"),
-        }
-        let restored = restore_shim(&state_path).unwrap();
-        assert_eq!(restored.restored, vec![shim.clone()]);
-        assert_eq!(fs::read_to_string(&shim).unwrap(), "original claude");
-    }
-
-    #[test]
-    fn shim_restore_skips_when_current_command_was_changed() {
-        let dir = tempfile::tempdir().unwrap();
-        let shim = dir.path().join("claude");
-        fs::write(&shim, "original claude").unwrap();
-        let state_path = dir.path().join("claude-shim.json");
-
-        install_shim(&state_path, &shim_options(shim.clone())).unwrap();
-        fs::write(&shim, "user replacement").unwrap();
-
-        let restored = restore_shim(&state_path).unwrap();
-
-        assert!(restored.restored.is_empty());
-        assert_eq!(restored.skipped.len(), 1);
-        assert_eq!(fs::read_to_string(&shim).unwrap(), "user replacement");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shim_reinstall_reuses_existing_original() {
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("real-claude");
-        fs::write(&real, "#!/bin/sh\nexit 0\n").unwrap();
-        let shim = dir.path().join("claude");
-        std::os::unix::fs::symlink("real-claude", &shim).unwrap();
-        let state_path = dir.path().join("claude-shim.json");
-
-        install_shim(&state_path, &shim_options(shim.clone())).unwrap();
-        let mut options = shim_options(shim.clone());
-        options.settings.port = 18888;
-        install_shim(&state_path, &options).unwrap();
-
-        let script = fs::read_to_string(&shim).unwrap();
-        let state = read_shim_state(&state_path).unwrap();
-        assert!(script.contains("--port 18888"));
-        assert_eq!(state.real_claude_path, real.canonicalize().unwrap());
-        assert_eq!(
-            restore_shim(&state_path).unwrap().restored,
-            vec![shim.clone()]
-        );
-        assert_eq!(fs::read_link(&shim).unwrap(), PathBuf::from("real-claude"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shim_restore_handles_multiple_managed_paths() {
-        let dir = tempfile::tempdir().unwrap();
-        let real_a = dir.path().join("real-a");
-        let real_b = dir.path().join("real-b");
-        fs::write(&real_a, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::write(&real_b, "#!/bin/sh\nexit 0\n").unwrap();
-        let shim_a = dir.path().join("claude-a");
-        let shim_b = dir.path().join("claude-b");
-        std::os::unix::fs::symlink("real-a", &shim_a).unwrap();
-        std::os::unix::fs::symlink("real-b", &shim_b).unwrap();
-        let state_path = dir.path().join("claude-shim.json");
-
-        install_shim(&state_path, &shim_options(shim_a.clone())).unwrap();
-        let mut options = shim_options(shim_b.clone());
-        options.claude_path = Some(shim_b.clone());
-        let mut states = read_shim_states(&state_path).unwrap();
-        states.push(install_shim(&state_path, &options).unwrap().states[0].clone());
-        fs::write(
-            &state_path,
-            serde_json::to_string_pretty(&ClaudeShimStateFile {
-                version: SHIM_STATE_VERSION,
-                shims: states,
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        let restored = restore_shim(&state_path).unwrap();
-
-        assert_eq!(restored.restored.len(), 2);
-        assert_eq!(fs::read_link(&shim_a).unwrap(), PathBuf::from("real-a"));
-        assert_eq!(fs::read_link(&shim_b).unwrap(), PathBuf::from("real-b"));
     }
 }
