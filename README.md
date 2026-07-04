@@ -73,18 +73,19 @@ flowchart LR
 | DeepSeek API keys | Store a DeepSeek API key locally or provide `DEEPSEEK_API_KEY`. |
 | Custom OpenAI endpoints | Route to a user-provided OpenAI-compatible base URL with Responses or Chat Completions and an optional API key. |
 | Temporary Claude routing | A managed shim injects proxy environment variables only when the app is alive and healthy. |
+| Background agents | Claude Code background agents route through the proxy without requiring native Anthropic/Claude auth. |
 | Local-only server | The proxy binds to `127.0.0.1` and does not expose a remote service. |
 | Anthropic-compatible endpoints | Implements `/v1/messages` and `/v1/messages/count_tokens` for Claude Code. |
 | Streaming translation | Streams Anthropic SSE back to Claude Code without buffering the full upstream response. |
 | Transport fallback | In `auto` mode, tries Codex WebSocket first and falls back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
-## What's New In 0.4.1
+## What's New In 0.4.2
 
-- Tool definitions and JSON schemas are canonicalized before upstream requests, so Codex, DeepSeek, and custom OpenAI-compatible providers receive stable tool order, stable `required` arrays, and no exact duplicate tools.
-- Codex upstream session state now persists across helper restarts in `codex-session-state.json`, using hashed Claude Code session IDs rather than raw session identifiers.
-- Claude `/clear`, `/reset`, `/new`, and large transcript shrink resets advance the generated Codex upstream session generation durably, preventing old prompt-cache state from leaking into compacted or reset conversations.
-- The new Codex session state file stays local and bounded with hashed session keys, matching the existing route-pin and log-retention privacy model.
+- Claude Code background agents now work through the managed shim without native Anthropic/Claude auth.
+- The shim starts Claude's background daemon with proxy environment variables, then launches foreground and background sessions with inline proxy settings so respawned jobs stay on CC Codex Proxy.
+- Daemon management commands are passed through without inline settings, avoiding the native daemon hang/login path while preserving normal `claude daemon status` behavior.
+- Background daemon pty host processes are ignored by the live-session guard, so they do not block proxy startup or repair flows.
 
 ## Compatibility
 
@@ -92,6 +93,7 @@ flowchart LR
 | --- | --- |
 | macOS app | Supported. Releases ship as a drag-and-drop DMG. |
 | Claude Code | Supported for new sessions launched after the proxy starts. Existing sessions must be closed first. |
+| Claude Code background agents | Supported for proxy-routed `claude --bg` jobs while the app and local proxy are running. Native Claude auth is not required. |
 | ChatGPT OAuth | Supported through the app or CLI. |
 | DeepSeek API | Supported through app key storage, `DEEPSEEK_API_KEY`, or CLI key setup. |
 | Custom OpenAI-compatible API | Supported with a configured base URL, `responses` or `chat-completions`, and optional `CUSTOM_OPENAI_API_KEY`. |
@@ -162,6 +164,8 @@ When the app launches, it discovers your existing `claude` command and installs 
 If the app quits, the shim restores or falls back to the original Claude command. If the app is open but the proxy is stopped, new Claude Code launches fail fast instead of silently using the wrong backend.
 
 Normal app launches pass proxy routing through the child process environment and an inline Claude Code settings payload. They do not write `~/.claude/settings.json`.
+
+For Claude Code background agents, the shim first ensures Claude's background daemon is reachable using only managed proxy environment variables. Actual foreground and background sessions still receive inline proxy settings, which lets daemon-respawned jobs keep routing through CC Codex Proxy instead of falling back to native Claude auth.
 
 The app also refuses to start the proxy while Claude Code is already running. Close existing sessions first, then start the proxy and open a new session so routing is consistent from the beginning.
 

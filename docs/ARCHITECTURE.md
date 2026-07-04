@@ -13,6 +13,7 @@ Provider selection is explicit through app/CLI config as `codex`, `deepseek`, or
 - The shipped `CCCodexProxy.app` embeds the Rust proxy helper at `Contents/Helpers/cc-codex-proxy`.
 - The menu bar process starts/stops that bundled helper; app users do not need a separate CLI install.
 - On launch, the app temporarily replaces the shell-resolved `claude` command with a managed shim. The shim applies proxy environment variables only when the app PID is alive and `/healthz` succeeds; otherwise it either falls back to the original Claude command or reports that the proxy is stopped.
+- For Claude Code background agents, the shim ensures Claude's background daemon is reachable with managed proxy environment variables before launching the session. Daemon subcommands are passed through without inline settings, while foreground and background sessions receive inline proxy settings so daemon-respawned jobs continue using CC Codex Proxy without native Claude auth.
 - Proxy startup is blocked while existing Claude Code processes are running, so active sessions do not silently switch backend assumptions mid-session.
 - `cc-codex-proxy serve` binds only to `127.0.0.1`.
 - `/v1/messages` streams Anthropic SSE back to Claude Code without buffering the full upstream response. Streaming responses include Claude-compatible `ping` keepalives and anti-buffering headers; the Messages endpoints also have an explicit bounded JSON body limit for large-but-controlled Claude Code transcripts.
@@ -46,7 +47,7 @@ Custom OpenAI-compatible endpoints use HTTPS or HTTP only. `custom_openai.base_u
 - Auth fallback: a Codex 401 forces one token refresh and one retry.
 - DeepSeek auth and capacity errors are not retried. The proxy surfaces upstream `401`, `402`, `422`, `429`, `500`, `503`, and `Retry-After` directly to Claude Code.
 - Custom OpenAI auth is optional. When configured, the proxy sends `Authorization: Bearer <key>`; when absent, requests are sent without an authorization header for local or unauthenticated gateways. Custom endpoint upstream errors and `Retry-After` are surfaced directly.
-- Launch fallback: the managed `claude` shim only injects proxy environment variables while the app PID is alive and `/healthz` succeeds. If the app is gone, it launches the original Claude command without proxy variables. If the app is alive but the helper is unhealthy, it fails fast so new sessions do not start with inconsistent routing.
+- Launch fallback: the managed `claude` shim only injects proxy environment variables while the app PID is alive and `/healthz` succeeds. If the app is gone, it launches the original Claude command without proxy variables. If the app is alive but the helper is unhealthy, it fails fast so new sessions do not start with inconsistent routing. Background-agent daemon management uses environment-only proxy settings; actual sessions use inline settings so persisted daemon respawn flags do not fall back to native Claude auth.
 - Capacity fallback: 429, 403, 400, and `Retry-After` are passed through to Claude Code. The proxy does not queue, fan out, or retry rate-limited work because that would hide subscription limits and can amplify load.
 
 Recommended setup: leave app users on `http`; use `auto` only for controlled reliability tests; use `websocket` only when validating WebSocket behavior directly.

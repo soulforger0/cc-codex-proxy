@@ -23,7 +23,13 @@ use proxy_core::{
     routing::RouteManager,
     serve,
 };
-use std::{io::Read, path::PathBuf, process::Command as StdCommand, sync::Arc, time::Duration};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Command as StdCommand, Stdio},
+    sync::Arc,
+    time::Duration,
+};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -613,6 +619,9 @@ async fn launch_claude(args: LaunchArgs) -> Result<()> {
             for (key, value) in managed_env_strings(&settings) {
                 command.env(key, value);
             }
+            if !is_daemon_command(&args.args) && !is_background_pty_host(&args.args) {
+                ensure_daemon_started(&args.real_claude, &settings).await;
+            }
             command.args(claude_args_with_inline_proxy_settings(
                 &args.args, &settings,
             )?);
@@ -636,7 +645,7 @@ fn claude_args_with_inline_proxy_settings(
     args: &[String],
     settings: &ClaudeSettingsOptions,
 ) -> Result<Vec<String>> {
-    if args_have_settings(args) {
+    if args_have_settings(args) || is_daemon_command(args) {
         return Ok(args.to_vec());
     }
     let inline_settings = serde_json::to_string(&serde_json::json!({
@@ -654,6 +663,69 @@ fn args_have_settings(args: &[String]) -> bool {
         .any(|arg| arg == "--settings" || arg.starts_with("--settings="))
 }
 
+fn is_daemon_command(args: &[String]) -> bool {
+    first_positional_arg(args) == Some("daemon")
+}
+
+fn is_background_pty_host(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--bg-pty-host")
+}
+
+fn first_positional_arg(args: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" {
+            return args.get(index + 1).map(String::as_str);
+        }
+        if !arg.starts_with('-') {
+            return Some(arg);
+        }
+        index += if option_takes_value(arg) { 2 } else { 1 };
+    }
+    None
+}
+
+fn option_takes_value(arg: &str) -> bool {
+    if arg.contains('=') {
+        return false;
+    }
+    matches!(
+        arg,
+        "--add-dir"
+            | "--agent"
+            | "--agents"
+            | "--append-system-prompt"
+            | "--debug-file"
+            | "--effort"
+            | "--fallback-model"
+            | "--file"
+            | "--from-pr"
+            | "--input-format"
+            | "--json-schema"
+            | "--max-budget-usd"
+            | "--mcp-config"
+            | "--model"
+            | "--name"
+            | "-n"
+            | "--output-format"
+            | "--permission-mode"
+            | "--plugin-dir"
+            | "--plugin-url"
+            | "--remote-control"
+            | "--remote-control-session-name-prefix"
+            | "--resume"
+            | "-r"
+            | "--session-id"
+            | "--setting-sources"
+            | "--settings"
+            | "--system-prompt"
+            | "--tools"
+            | "--worktree"
+            | "-w"
+    )
+}
+
 fn pid_is_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -666,6 +738,58 @@ fn pid_is_alive(pid: u32) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+async fn ensure_daemon_started(real_claude: &Path, settings: &ClaudeSettingsOptions) {
+    if daemon_status_ok(real_claude, settings) {
+        return;
+    }
+
+    let mut command = StdCommand::new(real_claude);
+    command
+        .args(["daemon", "run"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    apply_managed_env(&mut command, settings);
+
+    if command.spawn().is_err() {
+        return;
+    }
+
+    for _ in 0..20 {
+        if daemon_status_ok(real_claude, settings) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn daemon_status_ok(real_claude: &Path, settings: &ClaudeSettingsOptions) -> bool {
+    let mut command = StdCommand::new(real_claude);
+    command
+        .args(["daemon", "status"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    apply_managed_env(&mut command, settings);
+    command
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn apply_managed_env(command: &mut StdCommand, settings: &ClaudeSettingsOptions) {
+    for key in MANAGED_ENV_KEYS {
+        command.env_remove(key);
+    }
+    for (key, value) in managed_env_strings(settings) {
+        command.env(key, value);
+    }
 }
 
 async fn proxy_health_ok(port: u16) -> bool {
@@ -948,6 +1072,29 @@ mod tests {
         );
         assert_eq!(parsed["env"]["ANTHROPIC_AUTH_TOKEN"], "unused");
         assert_eq!(parsed["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], 1);
+    }
+
+    #[test]
+    fn inline_proxy_settings_are_not_added_to_daemon_commands() {
+        let args = vec!["daemon".to_string(), "status".to_string()];
+
+        let with_settings =
+            claude_args_with_inline_proxy_settings(&args, &ClaudeSettingsOptions::default())
+                .unwrap();
+
+        assert_eq!(with_settings, args);
+    }
+
+    #[test]
+    fn daemon_command_is_detected_after_global_options() {
+        let args = vec![
+            "--model".to_string(),
+            "claude-opus-4-8".to_string(),
+            "daemon".to_string(),
+            "status".to_string(),
+        ];
+
+        assert!(is_daemon_command(&args));
     }
 
     #[test]

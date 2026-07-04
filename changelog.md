@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-07-04 AEST - v0.4.2 background agent proxy routing
+
+- Fixed Claude Code background agents launched through the managed shim so they work without native Anthropic/Claude auth.
+- Started Claude's background daemon with managed proxy environment variables before launching sessions, while leaving daemon subcommands free of inline settings.
+- Kept foreground and background sessions on inline proxy settings so daemon-respawned jobs persist `ANTHROPIC_BASE_URL`, model aliases, and related proxy routing without editing `~/.claude/settings.json`.
+- Ignored Claude background pty host processes in live-session checks so daemon-owned helper processes do not block proxy startup or repair flows.
+- Updated README, architecture notes, app/package versions, and Homebrew release metadata for `v0.4.2`.
+- Validation: `cargo fmt --all -- --check`; `cargo test -p cc-codex-proxy -- --nocapture`; `cargo test --all`; installed-shim live smoke test with `claude --bg`; real Claude native auth remained logged out.
+
 ## 2026-07-04 AEST - v0.4.1 runtime session state and tool canonicalization
 
 - Added shared Anthropic request canonicalization so Codex, DeepSeek, and custom OpenAI routes send stable tool definitions and JSON Schemas while removing exact duplicate tools.
