@@ -9,6 +9,7 @@ use crate::{
     auth::AuthManager,
     codex::{
         client::{CodexClient, CodexTransportMethod},
+        count_tokens::count_translated_tokens,
         stream::{accumulate_response, translate_stream, ToolCatalog},
         translate::{translate_request, ResponsesRequest},
     },
@@ -390,14 +391,15 @@ async fn count_tokens(
         .routes
         .resolve_for_request(session_id.as_deref())
         .await?;
-    let _ = state.registry.resolve_for_route(
+    let resolved = state.registry.resolve_for_route(
         &route,
         &state.config.claude.public_primary_model,
         &state.config.claude.public_small_model,
         &request.model,
     )?;
+    let translated = translate_request(&request, &resolved, None)?;
     Ok(Json(
-        json!({ "input_tokens": estimate_input_tokens(&request) }),
+        json!({ "input_tokens": count_translated_tokens(&translated) }),
     ))
 }
 

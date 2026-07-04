@@ -475,6 +475,16 @@ mod tests {
             context_window: 272_000,
         };
 
+        let opus = registry
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                "claude-opus-4-8",
+            )
+            .unwrap();
+        assert_eq!(opus.upstream_model, "gpt-5.5");
+
         let sonnet = registry
             .resolve_for_route(
                 &route,

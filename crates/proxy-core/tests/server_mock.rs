@@ -9,10 +9,13 @@ use axum::{
 use bytes::Bytes;
 use futures_util::{future::join_all, StreamExt};
 use proxy_core::{
+    anthropic::schema::AnthropicRequest,
     auth::{AuthManager, MemoryTokenStore, StoredAuth, TokenRefreshClient, TokenResponse},
+    codex::{count_tokens::count_translated_tokens, translate::translate_request},
     config::{AppConfig, AppPaths, CodexConfig, CodexTransport, CustomOpenAIProtocol, Provider},
     custom_openai::store_api_key as store_custom_openai_api_key,
     deepseek::store_api_key,
+    model::ResolvedModel,
     serve,
 };
 use std::{
@@ -63,24 +66,66 @@ async fn count_tokens_is_local() {
     let (config, paths) = test_config(upstream, "/codex").await;
     let server = serve(config, paths, test_auth()).await.unwrap();
     let client = reqwest::Client::new();
+    let tool_output = "alpha ".repeat(1_000);
+    let request_body = serde_json::json!({
+        "model": "gpt-5.4",
+        "max_tokens": 1,
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "call_1",
+                "content": tool_output
+            }]
+        }]
+    });
+    let anthropic: AnthropicRequest = serde_json::from_value(request_body.clone()).unwrap();
+    let resolved = ResolvedModel {
+        provider: Provider::Codex,
+        requested: "gpt-5.4".into(),
+        public_id: "gpt-5.4".into(),
+        upstream_model: "gpt-5.4".into(),
+        service_tier: None,
+        context_window: 272_000,
+    };
+    let translated = translate_request(&anthropic, &resolved, None).unwrap();
+    let expected = count_translated_tokens(&translated);
+    let raw_wrapper_estimate = old_raw_anthropic_estimate(&anthropic);
+
     let response = client
         .post(format!("http://{}/v1/messages/count_tokens", server.addr))
-        .json(&serde_json::json!({
-            "model": "gpt-5.4",
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "hello"}]
-        }))
+        .json(&request_body)
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        response.json::<serde_json::Value>().await.unwrap()["input_tokens"]
-            .as_u64()
-            .unwrap()
-            > 0
-    );
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["input_tokens"].as_u64().unwrap(), expected);
+    assert!(expected < raw_wrapper_estimate);
     server.stop().await;
+}
+
+fn old_raw_anthropic_estimate(request: &AnthropicRequest) -> u64 {
+    let mut chars = request.model.len();
+    if let Some(system) = &request.system {
+        chars += system.to_string().len();
+    }
+    for message in &request.messages {
+        chars += message.role.len();
+        chars += message.content.to_string().len();
+    }
+    if let Some(tools) = &request.tools {
+        for tool in tools {
+            chars += tool.name.len();
+            chars += tool.description.as_deref().unwrap_or("").len();
+            chars += tool
+                .input_schema
+                .as_ref()
+                .map(|schema| schema.to_string().len())
+                .unwrap_or(0);
+        }
+    }
+    ((chars as f64) / 3.5).ceil() as u64
 }
 
 #[tokio::test]
