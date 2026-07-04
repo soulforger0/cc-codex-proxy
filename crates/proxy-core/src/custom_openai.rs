@@ -6,6 +6,9 @@ use crate::{
             AnthropicUsage,
         },
     },
+    canonical::{
+        canonicalize_anthropic_tools, canonicalize_json_schema, is_hosted_web_search_tool,
+    },
     codex::{
         client::ByteStream,
         translate::{translate_request, ResponsesRequest},
@@ -25,7 +28,7 @@ use http::StatusCode;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     env, fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
@@ -787,27 +790,34 @@ fn system_to_text(system: &Value) -> String {
 }
 
 fn translate_chat_tools(tools: &[AnthropicTool]) -> Result<Vec<Value>> {
+    let tools = canonicalize_anthropic_tools(tools.to_vec());
     let mut out = Vec::with_capacity(tools.len());
-    for tool in tools {
-        if tool.name.starts_with("web_search")
-            || tool
-                .extra
-                .get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind.starts_with("web_search_"))
-        {
+    for tool in &tools {
+        if is_hosted_web_search_tool(tool) {
             continue;
         }
+        let mut function = serde_json::Map::new();
+        function.insert("name".into(), json!(tool.name.clone()));
+        if let Some(description) = tool
+            .description
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            function.insert("description".into(), json!(description));
+        }
+        function.insert(
+            "parameters".into(),
+            tool.input_schema
+                .clone()
+                .map(canonicalize_json_schema)
+                .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+        );
         out.push(json!({
             "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description.clone().unwrap_or_default(),
-                "parameters": tool.input_schema.clone().unwrap_or_else(|| json!({"type": "object", "properties": {}})),
-            }
+            "function": Value::Object(function),
         }));
     }
-    Ok(out)
+    Ok(dedupe_json_values(out))
 }
 
 fn translate_chat_tool_choice(choice: &Value) -> Value {
@@ -838,6 +848,18 @@ fn chat_response_format(request: &AnthropicRequest) -> Option<Value> {
             "strict": true,
         }
     }))
+}
+
+fn dedupe_json_values(values: Vec<Value>) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        let key = serde_json::to_string(&value).unwrap_or_else(|_| value.to_string());
+        if seen.insert(key) {
+            out.push(value);
+        }
+    }
+    out
 }
 
 fn usage_from_value(value: Option<&Value>) -> AnthropicUsage {
@@ -1001,6 +1023,41 @@ mod tests {
             translated.tool_choice.as_ref().unwrap(),
             &json!({"type": "function", "function": {"name": "lookup"}})
         );
+    }
+
+    #[test]
+    fn chat_tool_translation_canonicalizes_and_omits_empty_descriptions() {
+        let mut request = anthropic_request();
+        let duplicate = request.tools.as_ref().unwrap()[0].clone();
+        request.tools = Some(vec![
+            AnthropicTool {
+                name: "Write".into(),
+                description: None,
+                input_schema: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"},
+                        "path": {"type": "string"}
+                    },
+                    "required": ["path", "content"]
+                })),
+                extra: Default::default(),
+            },
+            duplicate.clone(),
+            duplicate,
+        ]);
+
+        let translated = translate_chat_request(&request, &resolved()).unwrap();
+        let tools = translated.tools.as_ref().unwrap();
+
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["function"]["name"], "Write");
+        assert_eq!(
+            tools[0]["function"]["parameters"]["required"],
+            json!(["content", "path"])
+        );
+        assert!(tools[0]["function"].get("description").is_none());
+        assert_eq!(tools[1]["function"]["name"], "lookup");
     }
 
     #[test]

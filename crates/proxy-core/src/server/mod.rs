@@ -6,6 +6,7 @@ use crate::{
         schema::{AnthropicRequest, AnthropicResponse, AnthropicTool, AnthropicUsage},
     },
     auth::AuthManager,
+    canonical::{canonicalize_anthropic_request, full_session_hash},
     codex::{
         client::{CodexClient, CodexTransportMethod},
         count_tokens::count_translated_tokens,
@@ -33,16 +34,17 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    fmt::Write,
+    fs,
+    io::Write as IoWrite,
     net::SocketAddr,
+    path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tower_http::trace::TraceLayer;
@@ -53,6 +55,9 @@ const TRANSCRIPT_TOKEN_DROP_MIN: u64 = 32_768;
 const CODEX_PROMPT_CACHE_KEY_MAX_LEN: usize = 64;
 const CODEX_SESSION_NAMESPACE_LEN: usize = 16;
 const CODEX_SESSION_HASH_BYTES: usize = 8;
+const CODEX_SESSION_STATE_VERSION: u32 = 1;
+const CODEX_SESSION_STATE_MAX_SESSIONS: usize = 512;
+const CODEX_SESSION_STATE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
 #[derive(Clone)]
 struct AppState {
@@ -71,14 +76,25 @@ struct AppState {
 struct CodexSessionManager {
     namespace: String,
     sessions: Arc<Mutex<HashMap<String, CodexSessionState>>>,
+    store_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct CodexSessionState {
     generation: u64,
+    #[serde(skip)]
     initialized: bool,
     last_message_count: usize,
     last_input_tokens: u64,
+    #[serde(default)]
+    last_seen_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredCodexSessionState {
+    version: u32,
+    namespace: String,
+    sessions: HashMap<String, CodexSessionState>,
 }
 
 #[derive(Debug)]
@@ -104,10 +120,31 @@ impl CodexSessionResetReason {
 }
 
 impl CodexSessionManager {
+    #[cfg(test)]
     fn new() -> Self {
         Self {
-            namespace: Uuid::new_v4().simple().to_string(),
+            namespace: new_codex_session_namespace(),
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            store_path: None,
+        }
+    }
+
+    fn with_store(path: PathBuf) -> Self {
+        let now_ms = now_millis();
+        match load_codex_session_state(&path, now_ms) {
+            Ok((namespace, sessions)) => Self {
+                namespace,
+                sessions: Arc::new(Mutex::new(sessions)),
+                store_path: Some(path),
+            },
+            Err(err) => {
+                warn!(path = %path.display(), error = %err, "failed to load Codex session state; using fresh in-memory state");
+                Self {
+                    namespace: new_codex_session_namespace(),
+                    sessions: Arc::new(Mutex::new(HashMap::new())),
+                    store_path: Some(path),
+                }
+            }
         }
     }
 
@@ -126,55 +163,83 @@ impl CodexSessionManager {
             };
         };
 
-        let mut sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let state = sessions
-            .entry(claude_session_id.to_string())
-            .or_insert_with(CodexSessionState::default);
+        let session_hash = full_session_hash(claude_session_id);
+        let now_ms = now_millis();
+        let (resolution, snapshot) = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            evict_expired_codex_sessions(&mut sessions, now_ms);
+            let state = sessions
+                .entry(session_hash.clone())
+                .or_insert_with(CodexSessionState::default);
 
-        let reset_reason = if clear_command {
-            state.generation = state.generation.saturating_add(1);
-            Some(CodexSessionResetReason::ClaudeClearCommand)
-        } else if state.initialized
-            && should_reset_upstream_session_after_transcript_shrink(
-                state,
-                message_count,
-                input_tokens,
+            let reset_reason = if clear_command {
+                state.generation = state.generation.saturating_add(1);
+                Some(CodexSessionResetReason::ClaudeClearCommand)
+            } else if state.initialized
+                && should_reset_upstream_session_after_transcript_shrink(
+                    state,
+                    message_count,
+                    input_tokens,
+                )
+            {
+                state.generation = state.generation.saturating_add(1);
+                Some(CodexSessionResetReason::TranscriptShrink)
+            } else {
+                None
+            };
+
+            if clear_command {
+                state.last_message_count = 0;
+                state.last_input_tokens = 0;
+            } else {
+                state.last_message_count = message_count;
+                state.last_input_tokens = input_tokens;
+            }
+            state.last_seen_ms = now_ms;
+            state.initialized = true;
+
+            let generation = state.generation;
+            evict_excess_codex_sessions(&mut sessions, CODEX_SESSION_STATE_MAX_SESSIONS);
+            let snapshot = self.store_path.as_ref().map(|_| sessions.clone());
+            (
+                CodexSessionResolution {
+                    upstream_session_id: Some(
+                        self.upstream_session_id_from_hash(&session_hash, generation),
+                    ),
+                    generation: Some(generation),
+                    reset_reason,
+                },
+                snapshot,
             )
-        {
-            state.generation = state.generation.saturating_add(1);
-            Some(CodexSessionResetReason::TranscriptShrink)
-        } else {
-            None
         };
 
-        if clear_command {
-            state.last_message_count = 0;
-            state.last_input_tokens = 0;
-        } else {
-            state.last_message_count = message_count;
-            state.last_input_tokens = input_tokens;
+        if let Some(snapshot) = snapshot {
+            if let Err(err) = self.persist_snapshot(snapshot) {
+                warn!(error = %err, "failed to persist Codex session state");
+            }
         }
-        state.initialized = true;
 
-        CodexSessionResolution {
-            upstream_session_id: Some(
-                self.upstream_session_id(claude_session_id, state.generation),
-            ),
-            generation: Some(state.generation),
-            reset_reason,
-        }
+        resolution
     }
 
+    #[cfg(test)]
     fn upstream_session_id(&self, claude_session_id: &str, generation: u64) -> String {
+        self.upstream_session_id_from_hash(&full_session_hash(claude_session_id), generation)
+    }
+
+    fn upstream_session_id_from_hash(&self, session_hash: &str, generation: u64) -> String {
         let namespace = self
             .namespace
             .chars()
             .take(CODEX_SESSION_NAMESPACE_LEN)
             .collect::<String>();
-        let fragment = session_hash_fragment(claude_session_id);
+        let fragment = session_hash
+            .chars()
+            .take(CODEX_SESSION_HASH_BYTES * 2)
+            .collect::<String>();
         let session_id = if generation == 0 {
             format!("ccp-{namespace}-{fragment}")
         } else {
@@ -186,6 +251,116 @@ impl CodexSessionManager {
         );
         session_id
     }
+
+    fn persist_snapshot(&self, sessions: HashMap<String, CodexSessionState>) -> Result<()> {
+        let Some(path) = &self.store_path else {
+            return Ok(());
+        };
+        let stored = StoredCodexSessionState {
+            version: CODEX_SESSION_STATE_VERSION,
+            namespace: self.namespace.clone(),
+            sessions,
+        };
+        write_private_json_atomic(path, &stored)
+    }
+}
+
+fn load_codex_session_state(
+    path: &PathBuf,
+    now_ms: u64,
+) -> Result<(String, HashMap<String, CodexSessionState>)> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((new_codex_session_namespace(), HashMap::new()));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let mut stored: StoredCodexSessionState = serde_json::from_str(&raw)?;
+    if stored.namespace.trim().is_empty() {
+        stored.namespace = new_codex_session_namespace();
+    }
+    for state in stored.sessions.values_mut() {
+        state.initialized = true;
+    }
+    evict_expired_codex_sessions(&mut stored.sessions, now_ms);
+    evict_excess_codex_sessions(&mut stored.sessions, CODEX_SESSION_STATE_MAX_SESSIONS);
+    Ok((stored.namespace, stored.sessions))
+}
+
+fn write_private_json_atomic<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_file_name(format!(
+        "{}.tmp-{}",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("codex-session-state.json"),
+        Uuid::new_v4().simple()
+    ));
+    let bytes = serde_json::to_vec_pretty(value)?;
+    let write_result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp_path)?;
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        file.sync_all()?;
+        fs::rename(&tmp_path, path)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
+fn evict_expired_codex_sessions(sessions: &mut HashMap<String, CodexSessionState>, now_ms: u64) {
+    sessions.retain(|_, state| {
+        state.last_seen_ms > 0
+            && now_ms.saturating_sub(state.last_seen_ms) <= CODEX_SESSION_STATE_TTL_MS
+    });
+}
+
+fn evict_excess_codex_sessions(
+    sessions: &mut HashMap<String, CodexSessionState>,
+    max_sessions: usize,
+) {
+    if sessions.len() <= max_sessions {
+        return;
+    }
+    let mut entries = sessions
+        .iter()
+        .map(|(key, state)| (key.clone(), state.last_seen_ms))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(_, last_seen_ms)| *last_seen_ms);
+    let remove_count = sessions.len().saturating_sub(max_sessions);
+    for (key, _) in entries.into_iter().take(remove_count) {
+        sessions.remove(&key);
+    }
+}
+
+fn new_codex_session_namespace() -> String {
+    Uuid::new_v4().simple().to_string()
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,6 +404,7 @@ pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Res
     let registry = ModelRegistry::load_or_create(&paths.model_profiles_file)?;
     let routes =
         RouteManager::from_config_and_store(&config.routing, paths.route_pins_file.clone())?;
+    let codex_sessions = CodexSessionManager::with_store(paths.codex_session_state_file.clone());
     let codex = CodexClient::new(config.codex.clone(), auth.clone())?;
     let deepseek =
         DeepSeekClient::new(config.deepseek.clone(), paths.deepseek_api_key_file.clone())?;
@@ -245,7 +421,7 @@ pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Res
         custom_openai,
         registry,
         routes,
-        codex_sessions: CodexSessionManager::new(),
+        codex_sessions,
     });
 
     let app = Router::new()
@@ -388,8 +564,9 @@ async fn update_admin_route(
 async fn count_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(request): Json<AnthropicRequest>,
+    Json(mut request): Json<AnthropicRequest>,
 ) -> Result<Json<serde_json::Value>> {
+    canonicalize_anthropic_request(&mut request);
     let session_id = claude_session_id(&headers);
     let route = state
         .routes
@@ -410,9 +587,10 @@ async fn count_tokens(
 async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(request): Json<AnthropicRequest>,
+    Json(mut request): Json<AnthropicRequest>,
 ) -> Result<Response<Body>> {
     let request_id = format!("req_{}", Uuid::new_v4().simple());
+    canonicalize_anthropic_request(&mut request);
     let session_id = claude_session_id(&headers);
     let route = state
         .routes
@@ -837,15 +1015,6 @@ fn anthropic_text_content(content: &Value) -> Option<String> {
     }
 }
 
-fn session_hash_fragment(session_id: &str) -> String {
-    let digest = Sha256::digest(session_id.as_bytes());
-    let mut fragment = String::with_capacity(CODEX_SESSION_HASH_BYTES * 2);
-    for byte in digest.iter().take(CODEX_SESSION_HASH_BYTES) {
-        let _ = write!(&mut fragment, "{byte:02x}");
-    }
-    fragment
-}
-
 fn summarize_anthropic_tool_names(tools: Option<&[AnthropicTool]>) -> String {
     let Some(tools) = tools else {
         return "none".into();
@@ -1058,6 +1227,100 @@ mod tests {
             "{generated}"
         );
         assert!(generated.ends_with("-g18446744073709551615"));
+    }
+
+    #[test]
+    fn codex_session_state_persists_without_raw_session_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex-session-state.json");
+        let claude_session_id = "0e377980-02ec-471a-b760-ce1b2f6658a7";
+
+        let first = {
+            let manager = CodexSessionManager::with_store(path.clone());
+            manager
+                .resolve(Some(claude_session_id), 10, 100_000, false)
+                .upstream_session_id
+                .unwrap()
+        };
+        let restored = CodexSessionManager::with_store(path.clone());
+        let second = restored
+            .resolve(Some(claude_session_id), 10, 100_000, false)
+            .upstream_session_id
+            .unwrap();
+
+        assert_eq!(first, second);
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(!raw.contains(claude_session_id), "{raw}");
+        assert!(raw.contains(&full_session_hash(claude_session_id)), "{raw}");
+    }
+
+    #[test]
+    fn codex_session_generation_persists_after_transcript_shrink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex-session-state.json");
+        let claude_session_id = "session-that-compacts";
+
+        let shrunk = {
+            let manager = CodexSessionManager::with_store(path.clone());
+            manager.resolve(Some(claude_session_id), 30, 100_000, false);
+            manager.resolve(Some(claude_session_id), 12, 20_000, false)
+        };
+
+        assert_eq!(shrunk.generation, Some(1));
+        assert_eq!(
+            shrunk.reset_reason,
+            Some(CodexSessionResetReason::TranscriptShrink)
+        );
+
+        let restored = CodexSessionManager::with_store(path);
+        let resumed = restored.resolve(Some(claude_session_id), 12, 20_000, false);
+        assert_eq!(resumed.generation, Some(1));
+        assert!(resumed.reset_reason.is_none());
+        assert!(resumed.upstream_session_id.unwrap().ends_with("-g1"));
+    }
+
+    #[test]
+    fn codex_session_state_evicts_expired_and_excess_sessions() {
+        let now = 10 * CODEX_SESSION_STATE_TTL_MS;
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            "expired".into(),
+            CodexSessionState {
+                generation: 8,
+                initialized: true,
+                last_message_count: 1,
+                last_input_tokens: 1,
+                last_seen_ms: now - CODEX_SESSION_STATE_TTL_MS - 1,
+            },
+        );
+        sessions.insert(
+            "fresh".into(),
+            CodexSessionState {
+                generation: 1,
+                initialized: true,
+                last_message_count: 1,
+                last_input_tokens: 1,
+                last_seen_ms: now,
+            },
+        );
+        evict_expired_codex_sessions(&mut sessions, now);
+        assert!(!sessions.contains_key("expired"));
+        assert!(sessions.contains_key("fresh"));
+
+        for index in 0..(CODEX_SESSION_STATE_MAX_SESSIONS + 8) {
+            sessions.insert(
+                format!("session-{index}"),
+                CodexSessionState {
+                    generation: 0,
+                    initialized: true,
+                    last_message_count: 1,
+                    last_input_tokens: 1,
+                    last_seen_ms: index as u64 + 1,
+                },
+            );
+        }
+        evict_excess_codex_sessions(&mut sessions, CODEX_SESSION_STATE_MAX_SESSIONS);
+        assert_eq!(sessions.len(), CODEX_SESSION_STATE_MAX_SESSIONS);
     }
 
     #[test]

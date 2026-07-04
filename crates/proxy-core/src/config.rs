@@ -49,6 +49,7 @@ pub struct AppPaths {
     pub claude_shim_file: PathBuf,
     pub auth_file: PathBuf,
     pub route_pins_file: PathBuf,
+    pub codex_session_state_file: PathBuf,
     pub deepseek_api_key_file: PathBuf,
     pub custom_openai_api_key_file: PathBuf,
 }
@@ -72,6 +73,7 @@ impl AppPaths {
             claude_shim_file: app_support.join("claude-shim.json"),
             auth_file: app_support.join("auth.json"),
             route_pins_file: app_support.join("route-pins.json"),
+            codex_session_state_file: app_support.join("codex-session-state.json"),
             deepseek_api_key_file: app_support.join("deepseek-api-key"),
             custom_openai_api_key_file: app_support.join("custom-openai-api-key"),
             config_dir: app_support,

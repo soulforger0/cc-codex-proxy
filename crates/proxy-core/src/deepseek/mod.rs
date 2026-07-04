@@ -1,5 +1,6 @@
 use crate::{
     anthropic::schema::AnthropicRequest,
+    canonical::canonicalize_anthropic_request,
     codex::client::ByteStream,
     config::{DeepSeekConfig, DEEPSEEK_API_KEY_ENV},
     error::{ProxyError, Result},
@@ -61,6 +62,7 @@ impl DeepSeekClient {
         validate_deepseek_request(request)?;
         let api_key = resolve_api_key(&self.api_key_file)?;
         let mut body = request.clone();
+        canonicalize_anthropic_request(&mut body);
         body.model = resolved.upstream_model.clone();
         normalize_deepseek_effort(&mut body);
         let url = messages_url(&self.config.base_url);

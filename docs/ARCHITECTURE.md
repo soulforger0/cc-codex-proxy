@@ -64,6 +64,7 @@ Recommended setup: leave app users on `http`; use `auto` only for controlled rel
 ## Translation
 
 - Claude Code messages, system prompts, tools, tool calls, tool results, images, JSON output formats, and reasoning effort are translated into the Codex Responses request shape.
+- Tool definitions are canonicalized before provider handoff: exact duplicates are removed, hosted web-search tools sort ahead of function tools, object keys are stable, and JSON Schema `required` arrays are sorted while order-sensitive arrays such as `enum` remain unchanged.
 - Custom OpenAI Responses mode reuses the same Responses request translation and stream reducer as Codex, but uses static bearer-token-or-no-auth HTTP instead of ChatGPT OAuth/WebSocket transport.
 - Custom OpenAI Chat Completions mode maps Anthropic messages into `chat/completions` messages, translates tools into OpenAI function tools, maps tool calls/results, and converts OpenAI chat responses or stream deltas back into Anthropic content blocks.
 - Hosted web search maps to Codex `web_search`.
@@ -84,7 +85,7 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | image blocks | `input_image.image_url` | Supports base64 data URLs and URL images. |
 | `tool_use` | `function_call` | Preserves call id, tool name, and JSON arguments. |
 | `tool_result` | `function_call_output` | Text is forwarded; image results become placeholders. |
-| `tools[]` | `tools[]` with `type: "function"` | Anthropic `input_schema` becomes Responses `parameters`; `strict` is disabled for Claude Code compatibility. |
+| `tools[]` | `tools[]` with `type: "function"` | Anthropic `input_schema` becomes Responses `parameters`; exact duplicate tools are removed, schemas are canonicalized, empty descriptions are omitted, and `strict` is disabled for Claude Code compatibility. |
 | `type: web_search_*`, `name: web_search` | `web_search` | Hosted web-search bridge. Sends `external_web_access: false`, `search_content_types: ["text", "image"]`, and non-empty `allowed_domains`/`blocked_domains` as `filters`. Anthropic `max_uses`, `response_inclusion`, `user_location`, and `search_context_size` are not forwarded. |
 | `tool_choice` | `tool_choice` | `auto`, `none`, `any`, forced function tools, and forced `web_search` map to Responses equivalents. |
 | `max_tokens` | omitted | The Codex backend rejects explicit output-limit parameters; Claude Code's field is not forwarded upstream. |
@@ -94,7 +95,7 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | non-auto reasoning effort | `include: ["reasoning.encrypted_content"]` | Matches the Codex backend request shape used for reasoning continuity. |
 | `thinking.budget_tokens` | `reasoning.effort` | Deprecated Claude fixed thinking budgets are mapped as a fallback: `0` -> `none`, up to 4k -> `low`, up to 32k -> `medium`, above 32k -> `high`. |
 | `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting with `strict: true`; object schemas are normalized so all properties are required. |
-| `x-claude-code-session-id` | upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. The upstream session header uses a compact hash of the Claude session id so backend prompt-cache keys stay within length limits. It also keys local route pins so an idle session keeps using the provider/profile selected on its first request. The proxy does not send `prompt_cache_key` in the body on the ChatGPT Codex path. |
+| `x-claude-code-session-id` | upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. The upstream session header uses a compact hash of the Claude session id so backend prompt-cache keys stay within length limits. It also keys local route pins so an idle session keeps using the provider/profile selected on its first request. The hashed Codex session-state record persists separately so upstream session generations survive helper restarts. The proxy does not send `prompt_cache_key` in the body on the ChatGPT Codex path. |
 
 ### DeepSeek Mapping
 
@@ -110,9 +111,9 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 
 Claude Code owns conversation compaction when it talks to a gateway. The proxy supports that path by exposing `/v1/messages/count_tokens` and by installing `CLAUDE_CODE_AUTO_COMPACT_WINDOW` so Claude Code compacts near the Codex context window rather than relying on a model-name heuristic. Token counting is local-only and based on the translated Codex Responses request shape; it does not call upstream token-count APIs.
 
-OpenAI Responses also has server-side compaction features, but this proxy does not call `/responses/compact`, forward `context_management`, block requests on token thresholds, or synthesize compacted context. Claude Code sends a complete Anthropic-shaped transcript after its own compaction, and the proxy translates that transcript as the source of truth. When the already-local transcript shrinks sharply, the Codex route only advances the generated upstream session id (`session_id`, `x-client-request-id`, and `x-codex-window-id`) so the ChatGPT Codex backend does not continue from a larger pre-compaction server-side conversation.
+OpenAI Responses also has server-side compaction features, but this proxy does not call `/responses/compact`, forward `context_management`, block requests on token thresholds, or synthesize compacted context. Claude Code sends a complete Anthropic-shaped transcript after its own compaction, and the proxy translates that transcript as the source of truth. When the already-local transcript shrinks sharply, the Codex route advances the generated upstream session id (`session_id`, `x-client-request-id`, and `x-codex-window-id`) and persists that generation in `codex-session-state.json` so a helper restart does not return the session to stale pre-compaction cache state.
 
-Claude Code `/clear`, `/reset`, and `/new` are treated as new-conversation commands, not model prompts. On the Codex route, the proxy maps them to Codex `/new` semantics by advancing the generated upstream session id and returning an empty Anthropic response locally. It does not send `/clear`, `/reset`, or `/new` text to the upstream model.
+Claude Code `/clear`, `/reset`, and `/new` are treated as new-conversation commands, not model prompts. On the Codex route, the proxy maps them to Codex `/new` semantics by advancing and persisting the generated upstream session generation and returning an empty Anthropic response locally. It does not send `/clear`, `/reset`, or `/new` text to the upstream model.
 
 ### Status Line Metrics
 
@@ -136,6 +137,7 @@ With the default `pinOnFirstRequest` routing policy, a request carrying `x-claud
 - Claude shim state: `~/Library/Application Support/CCCodexProxy/claude-shim.json`
 - Auth: `~/Library/Application Support/CCCodexProxy/auth.json`
 - Session route pins: `~/Library/Application Support/CCCodexProxy/route-pins.json`
+- Codex upstream session state: `~/Library/Application Support/CCCodexProxy/codex-session-state.json` — a bounded, 30-day, 512-entry cache of hashed Claude Code session IDs and Codex session generations. Raw Claude Code session IDs are not stored here.
 - DeepSeek API key: `~/Library/Application Support/CCCodexProxy/deepseek-api-key`
 - Custom OpenAI API key: `~/Library/Application Support/CCCodexProxy/custom-openai-api-key`
 - Logs: `~/Library/Logs/CCCodexProxy/proxy.log` — a single size-capped file. The proxy never creates rotated log archives; when the file would exceed `log.max_bytes` / `CCP_LOG_MAX_BYTES`, it truncates the same file and continues writing there.

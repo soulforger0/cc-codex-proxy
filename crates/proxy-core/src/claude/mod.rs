@@ -160,12 +160,20 @@ pub fn default_settings_path() -> Result<PathBuf> {
 }
 
 pub fn install_settings(path: &Path, options: &ClaudeSettingsOptions) -> Result<InstallResult> {
+    let current = read_settings(path)?;
+    let mut settings = current.clone();
+    merge_env(&mut settings, managed_env(options));
+    if settings == current {
+        return Ok(InstallResult {
+            settings_path: path.to_path_buf(),
+            backup_path: None,
+        });
+    }
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let backup_path = backup_existing(path)?;
-    let mut settings = read_settings(path)?;
-    merge_env(&mut settings, managed_env(options));
     write_pretty(path, &settings)?;
     Ok(InstallResult {
         settings_path: path.to_path_buf(),
@@ -921,6 +929,34 @@ mod tests {
             env.get("CLAUDE_CODE_SUBAGENT_MODEL"),
             Some(&Value::String(DEFAULT_PUBLIC_SMALL_MODEL.into()))
         );
+    }
+
+    #[test]
+    fn install_settings_is_idempotent_when_managed_env_is_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let options = ClaudeSettingsOptions::default();
+
+        let first = install_settings(&path, &options).unwrap();
+        assert!(first.backup_path.is_none());
+        let first_raw = fs::read_to_string(&path).unwrap();
+
+        let second = install_settings(&path, &options).unwrap();
+        assert!(second.backup_path.is_none());
+        let second_raw = fs::read_to_string(&path).unwrap();
+        assert_eq!(second_raw, first_raw);
+
+        let backup_count = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("settings.json.backup-"))
+            })
+            .count();
+        assert_eq!(backup_count, 0);
     }
 
     #[test]

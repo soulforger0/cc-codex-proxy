@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod auth;
+pub mod canonical;
 pub mod claude;
 pub mod codex;
 pub mod config;

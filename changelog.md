@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-07-04 AEST - v0.4.1 runtime session state and tool canonicalization
+
+- Added shared Anthropic request canonicalization so Codex, DeepSeek, and custom OpenAI routes send stable tool definitions and JSON Schemas while removing exact duplicate tools.
+- Persisted Codex upstream session generations in `codex-session-state.json` so helper restarts keep compacted or cleared Claude Code conversations on the correct generated Codex session.
+- Stored Codex session state by full SHA-256 session hash, with bounded 30-day retention and a 512-session cap, so raw Claude Code session IDs are not written to the state file.
+- Updated Claude Code launches to pass proxy routing through environment variables plus inline process settings, without writing `~/.claude/settings.json` during the normal app flow.
+- Updated README and architecture documentation for the new runtime file, cache/reset behavior, and v0.4.1 changes.
+- Validation: local proxy runtime verification against mock Codex, DeepSeek, and custom OpenAI upstreams; `cargo fmt --check`; `cargo test --all`; Swift package build; release artifact build and checksum verification.
+
 ## 2026-07-02 23:09 AEST - Homebrew install support
 
 - Added tap-visible Homebrew formula and cask definitions for the Rust CLI helper and macOS app.

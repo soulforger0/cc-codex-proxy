@@ -11,7 +11,7 @@ This project publishes macOS app releases from immutable version tags. The relea
   - `crates/proxy-core/Cargo.toml`
   - `Cargo.lock`
   - `macos/CCCodexProxy/Info.plist`
-- Homebrew formula/cask versions under `Formula/`, `Casks/`, and `packaging/homebrew/` should match the release tag. Homebrew checksums are finalized after the GitHub tag source archive and release DMG are available.
+- Homebrew formula/cask versions under `Formula/`, `Casks/`, and `packaging/homebrew/` should point at the release tag before tagging. Use `sha256 "PLACEHOLDER"` for Homebrew checksums until the GitHub tag source archive and release DMG are available, then replace them with final hashes in a follow-up metadata commit.
 - Do not replace assets on an already-published stable version. If an artifact changes, publish a new tag.
 
 Suggested bump rules:
@@ -99,6 +99,8 @@ ruby -c Casks/cc-codex-proxy-app.rb
 ruby -c packaging/homebrew/cc-codex-proxy.rb
 ruby -c packaging/homebrew/cc-codex-proxy-app.rb
 ```
+
+Do not run `brew audit` or `brew install --dry-run` against a release whose formula or cask still contains `sha256 "PLACEHOLDER"`; those commands are only meaningful after the follow-up Homebrew hash commit is pushed.
 
 After the Homebrew metadata is committed and visible through a tap, validate by tap-qualified name:
 

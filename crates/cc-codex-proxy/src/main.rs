@@ -4,8 +4,9 @@ use proxy_core::{
     auth::{browser_login, default_oauth_options, AuthManager, FileTokenStore, OAuthRefreshClient},
     claude::{
         default_settings_path, install_settings, install_shim, live_claude_sessions,
-        live_claude_sessions_message, managed_env_strings, preview_settings, restore_latest_backup,
-        restore_shim, ClaudeSettingsOptions, ClaudeShimInstallOptions, MANAGED_ENV_KEYS,
+        live_claude_sessions_message, managed_env, managed_env_strings, preview_settings,
+        restore_latest_backup, restore_shim, ClaudeSettingsOptions, ClaudeShimInstallOptions,
+        MANAGED_ENV_KEYS,
     },
     config::{
         AppConfig, CustomOpenAIProtocol, Provider, DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL,
@@ -603,7 +604,6 @@ async fn launch_claude(args: LaunchArgs) -> Result<()> {
     let settings = claude_settings_options(args.settings);
     let app_is_alive = pid_is_alive(args.app_pid);
     let mut command = StdCommand::new(&args.real_claude);
-    command.args(&args.args);
     for key in MANAGED_ENV_KEYS {
         command.env_remove(key);
     }
@@ -613,6 +613,9 @@ async fn launch_claude(args: LaunchArgs) -> Result<()> {
             for (key, value) in managed_env_strings(&settings) {
                 command.env(key, value);
             }
+            command.args(claude_args_with_inline_proxy_settings(
+                &args.args, &settings,
+            )?);
         } else {
             let message = format!(
                 "CC Codex Proxy is open, but the proxy server is stopped on 127.0.0.1:{}. Start the proxy before launching Claude Code.",
@@ -622,9 +625,33 @@ async fn launch_claude(args: LaunchArgs) -> Result<()> {
             notify_proxy_stopped(&message);
             std::process::exit(2);
         }
+    } else {
+        command.args(&args.args);
     }
 
     exec_command(command)
+}
+
+fn claude_args_with_inline_proxy_settings(
+    args: &[String],
+    settings: &ClaudeSettingsOptions,
+) -> Result<Vec<String>> {
+    if args_have_settings(args) {
+        return Ok(args.to_vec());
+    }
+    let inline_settings = serde_json::to_string(&serde_json::json!({
+        "env": managed_env(settings),
+    }))?;
+    let mut out = Vec::with_capacity(args.len() + 2);
+    out.push("--settings".into());
+    out.push(inline_settings);
+    out.extend(args.iter().cloned());
+    Ok(out)
+}
+
+fn args_have_settings(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--settings" || arg.starts_with("--settings="))
 }
 
 fn pid_is_alive(pid: u32) -> bool {
@@ -900,5 +927,41 @@ mod tests {
         });
 
         assert_eq!(options.auto_compact_window, 123_456);
+    }
+
+    #[test]
+    fn inline_proxy_settings_are_prepended_to_claude_args() {
+        let args = vec!["agents".to_string(), "--json".to_string()];
+        let options = ClaudeSettingsOptions {
+            port: 19_876,
+            ..ClaudeSettingsOptions::default()
+        };
+
+        let with_settings = claude_args_with_inline_proxy_settings(&args, &options).unwrap();
+
+        assert_eq!(with_settings[0], "--settings");
+        assert_eq!(with_settings[2..], args);
+        let parsed: serde_json::Value = serde_json::from_str(&with_settings[1]).unwrap();
+        assert_eq!(
+            parsed["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:19876"
+        );
+        assert_eq!(parsed["env"]["ANTHROPIC_AUTH_TOKEN"], "unused");
+        assert_eq!(parsed["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], 1);
+    }
+
+    #[test]
+    fn explicit_settings_arg_is_not_overridden() {
+        let args = vec![
+            "--settings".to_string(),
+            "{}".to_string(),
+            "agents".to_string(),
+        ];
+
+        let with_settings =
+            claude_args_with_inline_proxy_settings(&args, &ClaudeSettingsOptions::default())
+                .unwrap();
+
+        assert_eq!(with_settings, args);
     }
 }

@@ -79,12 +79,12 @@ flowchart LR
 | Transport fallback | In `auto` mode, tries Codex WebSocket first and falls back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
-## What's New In 0.3.0
+## What's New In 0.4.1
 
-- Custom OpenAI-compatible endpoints are now a first-class provider with Responses and Chat Completions modes.
-- Provider-scoped Claude Code settings and model profiles keep Codex, DeepSeek, and custom endpoint defaults separated.
-- Session route pins keep long-idle Claude Code conversations on their original provider/model profile across helper restarts.
-- Streaming and shutdown handling are more resilient, with Claude-compatible ping events, idle warnings, bounded request bodies, and graceful drain behavior.
+- Tool definitions and JSON schemas are canonicalized before upstream requests, so Codex, DeepSeek, and custom OpenAI-compatible providers receive stable tool order, stable `required` arrays, and no exact duplicate tools.
+- Codex upstream session state now persists across helper restarts in `codex-session-state.json`, using hashed Claude Code session IDs rather than raw session identifiers.
+- Claude `/clear`, `/reset`, `/new`, and large transcript shrink resets advance the generated Codex upstream session generation durably, preventing old prompt-cache state from leaking into compacted or reset conversations.
+- The new Codex session state file stays local and bounded with hashed session keys, matching the existing route-pin and log-retention privacy model.
 
 ## Compatibility
 
@@ -161,11 +161,13 @@ When the app launches, it discovers your existing `claude` command and installs 
 
 If the app quits, the shim restores or falls back to the original Claude command. If the app is open but the proxy is stopped, new Claude Code launches fail fast instead of silently using the wrong backend.
 
+Normal app launches pass proxy routing through the child process environment and an inline Claude Code settings payload. They do not write `~/.claude/settings.json`.
+
 The app also refuses to start the proxy while Claude Code is already running. Close existing sessions first, then start the proxy and open a new session so routing is consistent from the beginning.
 
-For requests that carry `x-claude-code-session-id`, the proxy persists a bounded route pin so long-idle sessions continue using the provider/profile selected on their first request, even after profile switches or helper restarts. This is route continuity only: the proxy does not replay or resume a partially streamed model response after bytes have already been sent to Claude Code.
+For requests that carry `x-claude-code-session-id`, the proxy persists a bounded route pin so long-idle sessions continue using the provider/profile selected on their first request, even after profile switches or helper restarts. On the Codex route, it also persists a hashed upstream session-state record so generated Codex session IDs and reset generations survive helper restarts without storing raw Claude Code session IDs. This is route/cache continuity only: the proxy does not replay or resume a partially streamed model response after bytes have already been sent to Claude Code.
 
-Advanced users can preview or repair managed Claude Code settings from the app's **Advanced settings.json** section, but this is not part of the normal install flow.
+Advanced users can preview or repair managed Claude Code settings from the app's **Advanced settings.json** section, but this is optional and not part of the normal install flow.
 
 ## CLI Usage
 
@@ -191,6 +193,7 @@ When `serve` starts, it prints the local proxy URL, health URL, log path, and Cl
 | --- | --- |
 | Config, auth, model profiles, admin token | `~/Library/Application Support/CCCodexProxy/` |
 | Session route pins | `~/Library/Application Support/CCCodexProxy/route-pins.json` |
+| Codex upstream session state | `~/Library/Application Support/CCCodexProxy/codex-session-state.json` |
 | DeepSeek API key | `~/Library/Application Support/CCCodexProxy/deepseek-api-key` |
 | Custom OpenAI API key | `~/Library/Application Support/CCCodexProxy/custom-openai-api-key` |
 | Logs | `~/Library/Logs/CCCodexProxy/proxy.log` |
@@ -198,7 +201,7 @@ When `serve` starts, it prints the local proxy URL, health URL, log path, and Cl
 
 `proxy.log` is a single size-capped file. The proxy never creates rotated log archives; when the file would exceed its cap, it truncates the same file and continues writing there. Configure the cap with `log.max_bytes` in `config.json` or `CCP_LOG_MAX_BYTES` in bytes.
 
-Treat auth files, provider API keys, route pins, logs, account identifiers, and Claude Code session details as sensitive when sharing diagnostics.
+Treat auth files, provider API keys, route pins, Codex session state, logs, account identifiers, and Claude Code session details as sensitive when sharing diagnostics.
 
 ## Build From Source
 

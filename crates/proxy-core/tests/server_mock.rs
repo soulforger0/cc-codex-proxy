@@ -1574,6 +1574,7 @@ async fn test_config(upstream: std::net::SocketAddr, path: &str) -> (AppConfig, 
         claude_shim_file: dir.join("config/claude-shim.json"),
         auth_file: dir.join("config/auth.json"),
         route_pins_file: dir.join("config/route-pins.json"),
+        codex_session_state_file: dir.join("config/codex-session-state.json"),
         deepseek_api_key_file: dir.join("config/deepseek-api-key"),
         custom_openai_api_key_file: dir.join("config/custom-openai-api-key"),
     };

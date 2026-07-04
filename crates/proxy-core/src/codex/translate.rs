@@ -1,10 +1,14 @@
 use crate::{
     anthropic::schema::{AnthropicRequest, AnthropicTool},
+    canonical::{
+        canonicalize_anthropic_tools, canonicalize_json_schema, is_hosted_web_search_tool,
+    },
     error::{ProxyError, Result},
     model::ResolvedModel,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 const TOOL_ROUTING_INSTRUCTION: &str = "When calling tools, only call functions explicitly listed in this request's tools array. Match each tool's input schema exactly, and omit optional fields when their value would be an empty string.";
 
@@ -45,7 +49,8 @@ pub fn translate_request(
         .tools
         .as_ref()
         .map(|tools| translate_tools(tools))
-        .transpose()?;
+        .transpose()?
+        .filter(|tools| !tools.is_empty());
     let tool_choice = Some(translate_tool_choice(request.tool_choice.as_ref()));
     let reasoning = reasoning_from_request(request);
     let include = reasoning
@@ -253,29 +258,38 @@ fn tool_result_output(block: &Value) -> String {
 }
 
 fn translate_tools(tools: &[AnthropicTool]) -> Result<Vec<Value>> {
+    let tools = canonicalize_anthropic_tools(tools.to_vec());
     let mut out = Vec::with_capacity(tools.len());
-    for tool in tools {
+    for tool in &tools {
         if is_anthropic_web_search_tool(tool) {
             out.push(translate_web_search_tool(tool));
             continue;
         }
-        out.push(json!({
-            "type": "function",
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.input_schema.clone().unwrap_or_else(|| json!({"type": "object", "properties": {}})),
-            "strict": false
-        }));
+        let mut function = serde_json::Map::new();
+        function.insert("type".into(), json!("function"));
+        function.insert("name".into(), json!(tool.name.clone()));
+        if let Some(description) = tool
+            .description
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            function.insert("description".into(), json!(description));
+        }
+        function.insert(
+            "parameters".into(),
+            tool.input_schema
+                .clone()
+                .map(canonicalize_json_schema)
+                .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+        );
+        function.insert("strict".into(), json!(false));
+        out.push(Value::Object(function));
     }
-    Ok(out)
+    Ok(dedupe_json_values(out))
 }
 
 fn is_anthropic_web_search_tool(tool: &AnthropicTool) -> bool {
-    tool.extra
-        .get("type")
-        .and_then(Value::as_str)
-        .is_some_and(|kind| kind.starts_with("web_search_"))
-        || tool.name.starts_with("web_search_")
+    is_hosted_web_search_tool(tool)
 }
 
 fn translate_web_search_tool(tool: &AnthropicTool) -> Value {
@@ -412,6 +426,18 @@ fn normalize_strict_json_schema(schema: Value) -> Value {
         }
         other => other,
     }
+}
+
+fn dedupe_json_values(values: Vec<Value>) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        let key = serde_json::to_string(&value).unwrap_or_else(|_| value.to_string());
+        if seen.insert(key) {
+            out.push(value);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -669,6 +695,87 @@ mod tests {
         assert!(serialized.get("temperature").is_none());
         assert!(serialized.get("top_p").is_none());
         assert!(serialized.get("metadata").is_none());
+    }
+
+    #[test]
+    fn canonicalizes_tool_order_and_removes_exact_duplicate_translated_tools() {
+        let base_tool = AnthropicTool {
+            name: "Write".into(),
+            description: None,
+            input_schema: Some(json!({
+                "required": ["content", "path"],
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "type": "object"
+            })),
+            extra: Default::default(),
+        };
+        let read_tool = AnthropicTool {
+            name: "Read".into(),
+            description: Some("Read a file".into()),
+            input_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"]
+            })),
+            extra: Default::default(),
+        };
+        let mut req = AnthropicRequest {
+            model: "gpt-5.4".into(),
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: Some(true),
+            system: None,
+            messages: vec![crate::anthropic::schema::AnthropicMessage {
+                role: "user".into(),
+                content: json!("hello"),
+                extra: Default::default(),
+            }],
+            tools: Some(vec![base_tool.clone(), read_tool.clone(), base_tool]),
+            tool_choice: None,
+            metadata: None,
+            output_config: None,
+            thinking: None,
+            extra: Default::default(),
+        };
+
+        let translated = translate_request(&req, &resolved(), None).unwrap();
+        let tools = translated.tools.as_ref().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], "Read");
+        assert_eq!(tools[1]["name"], "Write");
+        assert_eq!(
+            tools[1]["parameters"]["required"],
+            json!(["content", "path"])
+        );
+        assert!(tools[1].get("description").is_none());
+
+        req.tools = Some(vec![
+            read_tool,
+            AnthropicTool {
+                name: "Write".into(),
+                description: None,
+                input_schema: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "content": { "type": "string" },
+                        "path": { "type": "string" }
+                    },
+                    "required": ["path", "content"]
+                })),
+                extra: Default::default(),
+            },
+        ]);
+        let reordered = translate_request(&req, &resolved(), None).unwrap();
+        assert_eq!(
+            serde_json::to_value(translated.tools).unwrap(),
+            serde_json::to_value(reordered.tools).unwrap()
+        );
     }
 
     #[test]
