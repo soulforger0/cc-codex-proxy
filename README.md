@@ -196,6 +196,8 @@ When `serve` starts, it prints the local proxy URL, health URL, log path, and Cl
 | Logs | `~/Library/Logs/CCCodexProxy/proxy.log` |
 | Claude shim state | `~/Library/Application Support/CCCodexProxy/claude-shim.json` |
 
+`proxy.log` is a single size-capped file. The proxy never creates rotated log archives; when the file would exceed its cap, it truncates the same file and continues writing there. Configure the cap with `log.max_bytes` in `config.json` or `CCP_LOG_MAX_BYTES` in bytes.
+
 Treat auth files, provider API keys, route pins, logs, account identifiers, and Claude Code session details as sensitive when sharing diagnostics.
 
 ## Build From Source

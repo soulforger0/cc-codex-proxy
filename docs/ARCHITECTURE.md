@@ -138,7 +138,7 @@ With the default `pinOnFirstRequest` routing policy, a request carrying `x-claud
 - Session route pins: `~/Library/Application Support/CCCodexProxy/route-pins.json`
 - DeepSeek API key: `~/Library/Application Support/CCCodexProxy/deepseek-api-key`
 - Custom OpenAI API key: `~/Library/Application Support/CCCodexProxy/custom-openai-api-key`
-- Logs: `~/Library/Logs/CCCodexProxy/proxy.log`
+- Logs: `~/Library/Logs/CCCodexProxy/proxy.log` — a single size-capped file. The proxy never creates rotated log archives; when the file would exceed `log.max_bytes` / `CCP_LOG_MAX_BYTES`, it truncates the same file and continues writing there.
 
 Model names are intentionally data-driven and provider-scoped. If ChatGPT Codex, DeepSeek, or commonly used custom endpoint model identifiers change, update `model-profiles.json` instead of rebuilding. Custom OpenAI also accepts arbitrary model names after stripping Claude Code's `[1m]` context hint, so local gateways can be used before adding explicit profiles.
 

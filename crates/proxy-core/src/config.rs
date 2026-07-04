@@ -37,6 +37,7 @@ pub const DEFAULT_MESSAGES_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS: u64 = 10_000;
 pub const DEFAULT_SESSION_PIN_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 pub const DEFAULT_MAX_PINNED_SESSIONS: usize = 4_096;
+pub const DEFAULT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -370,11 +371,22 @@ pub fn default_route_profiles() -> Vec<RouteProfileConfig> {
     ]
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
     pub stderr: bool,
     pub verbose: bool,
+    pub max_bytes: u64,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            stderr: false,
+            verbose: false,
+            max_bytes: DEFAULT_LOG_MAX_BYTES,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -477,6 +489,9 @@ impl AppConfig {
         if let Ok(value) = env::var("CCP_LOG_VERBOSE") {
             self.log.verbose = truthy(&value);
         }
+        if let Some(value) = env_u64("CCP_LOG_MAX_BYTES") {
+            self.log.max_bytes = value;
+        }
         if let Ok(value) = env::var("CCP_CODEX_TRANSPORT") {
             self.codex.transport = match value.to_ascii_lowercase().as_str() {
                 "websocket" | "ws" => CodexTransport::WebSocket,
@@ -565,5 +580,21 @@ mod tests {
             config.claude.public_primary_model,
             DEFAULT_PUBLIC_PRIMARY_MODEL
         );
+    }
+
+    #[test]
+    fn log_config_defaults_to_size_cap() {
+        let config = LogConfig::default();
+        assert!(!config.stderr);
+        assert!(!config.verbose);
+        assert_eq!(config.max_bytes, DEFAULT_LOG_MAX_BYTES);
+    }
+
+    #[test]
+    fn log_config_deserializes_missing_size_cap() {
+        let config = serde_json::from_str::<LogConfig>(r#"{"stderr":true}"#).unwrap();
+        assert!(config.stderr);
+        assert!(!config.verbose);
+        assert_eq!(config.max_bytes, DEFAULT_LOG_MAX_BYTES);
     }
 }

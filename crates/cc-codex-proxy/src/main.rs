@@ -250,7 +250,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         args.small_model,
         args.context_window,
     )?;
-    let _guards = logging::init(&paths, config.log.stderr, config.log.verbose)?;
+    let _guards = logging::init(&paths, &config.log)?;
     let active_provider = config.active_provider()?;
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
