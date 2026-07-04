@@ -4,7 +4,6 @@ use crate::{
             message_delta, message_start, message_stop, ping as claude_ping, response_json,
         },
         schema::{AnthropicRequest, AnthropicResponse, AnthropicTool, AnthropicUsage},
-        tokens::estimate_input_tokens,
     },
     auth::AuthManager,
     codex::{
@@ -115,7 +114,9 @@ impl CodexSessionManager {
     fn resolve(
         &self,
         claude_session_id: Option<&str>,
-        request: &AnthropicRequest,
+        message_count: usize,
+        input_tokens: u64,
+        clear_command: bool,
     ) -> CodexSessionResolution {
         let Some(claude_session_id) = claude_session_id else {
             return CodexSessionResolution {
@@ -125,9 +126,6 @@ impl CodexSessionManager {
             };
         };
 
-        let clear_command = is_claude_clear_command_request(request);
-        let message_count = request.messages.len();
-        let input_tokens = estimate_input_tokens(request);
         let mut sessions = self
             .sessions
             .lock()
@@ -139,7 +137,13 @@ impl CodexSessionManager {
         let reset_reason = if clear_command {
             state.generation = state.generation.saturating_add(1);
             Some(CodexSessionResetReason::ClaudeClearCommand)
-        } else if state.initialized && transcript_shrank(state, message_count, input_tokens) {
+        } else if state.initialized
+            && should_reset_upstream_session_after_transcript_shrink(
+                state,
+                message_count,
+                input_tokens,
+            )
+        {
             state.generation = state.generation.saturating_add(1);
             Some(CodexSessionResetReason::TranscriptShrink)
         } else {
@@ -457,24 +461,51 @@ async fn handle_codex_messages(
     request: AnthropicRequest,
     resolved: crate::model::ResolvedModel,
 ) -> Result<Response<Body>> {
-    let codex_session = state
-        .codex_sessions
-        .resolve(session_id.as_deref(), &request);
-    if let Some(reason) = codex_session.reset_reason {
-        info!(
-            %request_id,
-            reason = reason.as_str(),
-            session_generation = codex_session.generation.unwrap_or(0),
-            "started fresh Codex upstream session"
-        );
-        if reason == CodexSessionResetReason::ClaudeClearCommand {
-            return empty_anthropic_response(&request, state.config.claude.downstream_idle_ping_ms);
+    let clear_command = is_claude_clear_command_request(&request);
+    let (codex_session, translated) = if clear_command {
+        let codex_session =
+            state
+                .codex_sessions
+                .resolve(session_id.as_deref(), request.messages.len(), 0, true);
+        if let Some(reason) = codex_session.reset_reason {
+            info!(
+                %request_id,
+                reason = reason.as_str(),
+                session_generation = codex_session.generation.unwrap_or(0),
+                "started fresh Codex upstream session"
+            );
+            if reason == CodexSessionResetReason::ClaudeClearCommand {
+                return empty_anthropic_response(
+                    &request,
+                    state.config.claude.downstream_idle_ping_ms,
+                );
+            }
         }
-    }
+        let translated = translate_request(&request, &resolved, None)?;
+        (codex_session, translated)
+    } else {
+        let translated = translate_request(&request, &resolved, None)?;
+        let input_tokens = count_translated_tokens(&translated);
+        let codex_session = state.codex_sessions.resolve(
+            session_id.as_deref(),
+            request.messages.len(),
+            input_tokens,
+            false,
+        );
+        if let Some(reason) = codex_session.reset_reason {
+            info!(
+                %request_id,
+                reason = reason.as_str(),
+                input_tokens,
+                session_generation = codex_session.generation.unwrap_or(0),
+                "started fresh Codex upstream session"
+            );
+        }
+        (codex_session, translated)
+    };
 
     let tool_catalog = ToolCatalog::from_anthropic_tools(request.tools.as_deref());
     let upstream_session_id = codex_session.upstream_session_id.as_deref();
-    let translated = translate_request(&request, &resolved, upstream_session_id)?;
     info!(
         %request_id,
         upstream_model = %resolved.upstream_model,
@@ -760,7 +791,11 @@ fn claude_session_id(headers: &HeaderMap) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn transcript_shrank(state: &CodexSessionState, message_count: usize, input_tokens: u64) -> bool {
+fn should_reset_upstream_session_after_transcript_shrink(
+    state: &CodexSessionState,
+    message_count: usize,
+    input_tokens: u64,
+) -> bool {
     if message_count < state.last_message_count {
         return true;
     }

@@ -62,7 +62,8 @@ async fn non_streaming_message_accumulates_mock_upstream_sse() {
 
 #[tokio::test]
 async fn count_tokens_is_local() {
-    let upstream = start_mock_upstream(mock_success_app()).await;
+    let state = Arc::new(CodexSessionCaptureState::default());
+    let upstream = start_mock_upstream(mock_codex_session_capture_app(state.clone())).await;
     let (config, paths) = test_config(upstream, "/codex").await;
     let server = serve(config, paths, test_auth()).await.unwrap();
     let client = reqwest::Client::new();
@@ -102,6 +103,7 @@ async fn count_tokens_is_local() {
     let body = response.json::<serde_json::Value>().await.unwrap();
     assert_eq!(body["input_tokens"].as_u64().unwrap(), expected);
     assert!(expected < raw_wrapper_estimate);
+    assert_eq!(state.calls.load(Ordering::SeqCst), 0);
     server.stop().await;
 }
 
@@ -200,7 +202,7 @@ async fn claude_clear_starts_fresh_codex_upstream_session_without_forwarding() {
 }
 
 #[tokio::test]
-async fn transcript_shrink_starts_fresh_codex_upstream_session() {
+async fn already_compacted_transcript_starts_fresh_codex_upstream_session() {
     let state = Arc::new(CodexSessionCaptureState::default());
     let upstream = start_mock_upstream(mock_codex_session_capture_app(state.clone())).await;
     let (config, paths) = test_config(upstream, "/codex").await;
@@ -247,6 +249,65 @@ async fn transcript_shrink_starts_fresh_codex_upstream_session() {
     assert_eq!(after_session, &format!("{first_session}-g1"));
     assert!(first_session.len() <= 64, "{first_session}");
     assert!(after_session.len() <= 64, "{after_session}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn small_translated_count_drop_does_not_reset_codex_upstream_session() {
+    let state = Arc::new(CodexSessionCaptureState::default());
+    let upstream = start_mock_upstream(mock_codex_session_capture_app(state.clone())).await;
+    let (config, paths) = test_config(upstream, "/codex").await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let raw_only_padding = "x".repeat(150_000);
+    let before_text = format!("alpha {}", "beta ".repeat(100));
+
+    let before = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-c")
+        .json(&serde_json::json!({
+            "model": "claude-opus-4-8",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": before_text,
+                    "raw_anthropic_wrapper_only": raw_only_padding
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(before.status(), StatusCode::OK);
+
+    let after = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .header("x-claude-code-session-id", "session-c")
+        .json(&serde_json::json!({
+            "model": "claude-opus-4-8",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": "alpha"
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), StatusCode::OK);
+
+    let session_ids = state.session_ids.lock().unwrap().clone();
+    assert_eq!(session_ids.len(), 2);
+    assert_eq!(session_ids[0], session_ids[1]);
     server.stop().await;
 }
 
