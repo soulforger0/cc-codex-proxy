@@ -3,7 +3,7 @@
 This project ships two Homebrew definitions:
 
 - `Formula/cc-codex-proxy.rb` builds and installs the Rust CLI helper from a tagged source archive.
-- `Casks/cc-codex-proxy-app.rb` installs the prebuilt macOS menu bar app from the release DMG.
+- `Casks/cc-codex-proxy-app.rb` installs the prebuilt Apple Silicon (`arm64`) macOS menu bar app from the release DMG.
 
 The matching files under `packaging/homebrew/` are kept as release-maintained copies for packaging review and tap publication workflows.
 
@@ -15,6 +15,8 @@ Until a dedicated `soulforger0/homebrew-cc-codex-proxy` tap exists, users can ta
 brew tap soulforger0/cc-codex-proxy https://github.com/soulforger0/cc-codex-proxy
 brew install --cask soulforger0/cc-codex-proxy/cc-codex-proxy-app
 ```
+
+The app cask is restricted with `depends_on arch: :arm64` because current release DMGs are native arm64 builds, not universal builds.
 
 The CLI-only helper can be installed with:
 
@@ -42,7 +44,7 @@ scripts/update-homebrew-packaging.sh <version> <source_sha256> <dmg_sha256>
 ```
 
 `source_sha256` is the hash of `https://github.com/soulforger0/cc-codex-proxy/archive/refs/tags/v<version>.tar.gz`.
-`dmg_sha256` is the hash for `CCCodexProxy-<version>-macOS.dmg` from the release `SHA256SUMS`.
+`dmg_sha256` is the hash for the arm64 `CCCodexProxy-<version>-macOS.dmg` from the release `SHA256SUMS`.
 
 Then validate the Ruby files:
 

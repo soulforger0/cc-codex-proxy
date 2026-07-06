@@ -10,6 +10,21 @@ helpers="$contents/Helpers"
 resources="$contents/Resources"
 version="${CCP_VERSION:-}"
 build_number="${CCP_BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-1}}"
+release_arch="${CCP_RELEASE_ARCH:-$(uname -m)}"
+
+case "$release_arch" in
+  arm64 | x86_64) ;;
+  *)
+    printf 'Unsupported release architecture: %s\n' "$release_arch" >&2
+    exit 1
+    ;;
+esac
+
+build_arch="$(uname -m)"
+if [[ "$build_arch" != "$release_arch" ]]; then
+  printf 'scripts/build-app.sh builds native macOS binaries only; CCP_RELEASE_ARCH=%s requires a %s runner, got %s\n' "$release_arch" "$release_arch" "$build_arch" >&2
+  exit 1
+fi
 
 if [[ -z "$version" ]]; then
   version="$(grep -m1 '^version = ' "$repo_root/crates/cc-codex-proxy/Cargo.toml" | cut -d '"' -f2)"
@@ -39,6 +54,20 @@ cp "$repo_root/macos/CCCodexProxy/Info.plist" "$contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$contents/Info.plist"
 
+verify_single_arch() {
+  local binary="$1"
+  local archs
+
+  archs="$(lipo -archs "$binary" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if [[ "$archs" != "$release_arch" ]]; then
+    printf 'Expected %s to contain only %s, got: %s\n' "$binary" "$release_arch" "$archs" >&2
+    exit 1
+  fi
+}
+
+verify_single_arch "$macos/CCCodexProxy"
+verify_single_arch "$helpers/cc-codex-proxy"
+
 codesign --force --sign - "$helpers/cc-codex-proxy"
 codesign --force --deep --sign - "$app_root"
 
@@ -63,6 +92,8 @@ cat > "$manifest_path" <<EOF
   "name": "CC Codex Proxy",
   "version": "$version",
   "build_number": "$build_number",
+  "architecture": "$release_arch",
+  "universal": false,
   "artifacts": [
     "$(basename "$dmg_path")",
     "$(basename "$zip_path")",

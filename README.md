@@ -34,6 +34,8 @@ No manual `ANTHROPIC_*` setup is required for the app flow. Download the DMG, si
 
 ## Quick Start
 
+The prebuilt app DMG is currently Apple Silicon (`arm64`) only. Intel users can install the CLI helper from source with Homebrew or build the app locally until universal app releases are available.
+
 1. Download [CCCodexProxy-macOS.dmg](https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/CCCodexProxy-macOS.dmg).
 2. Open the DMG and drag `CCCodexProxy.app` into Applications.
 3. Launch **CC Codex Proxy**.
@@ -80,18 +82,17 @@ flowchart LR
 | Transport fallback | In `auto` mode, tries Codex WebSocket first and falls back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
-## What's New In 0.4.2
+## What's New In 0.4.3
 
-- Claude Code background agents now work through the managed shim without native Anthropic/Claude auth.
-- The shim starts Claude's background daemon with proxy environment variables, then launches foreground and background sessions with inline proxy settings so respawned jobs stay on CC Codex Proxy.
-- Daemon management commands are passed through without inline settings, avoiding the native daemon hang/login path while preserving normal `claude daemon status` behavior.
-- Background daemon pty host processes are ignored by the live-session guard, so they do not block proxy startup or repair flows.
+- The prebuilt Homebrew app cask is restricted to Apple Silicon (`arm64`) so Intel Macs do not install a non-universal app bundle that cannot launch.
+- Release packaging now verifies DMG integrity, checksums, manifest architecture metadata, app/helper binary architecture, and app cask architecture requirements in one shared script.
+- Release docs now distinguish the arm64 prebuilt app DMG from the source-built CLI formula.
 
 ## Compatibility
 
 | Item | Status |
 | --- | --- |
-| macOS app | Supported. Releases ship as a drag-and-drop DMG. |
+| macOS app | Supported on Apple Silicon (`arm64`). Releases ship as a drag-and-drop DMG. |
 | Claude Code | Supported for new sessions launched after the proxy starts. Existing sessions must be closed first. |
 | Claude Code background agents | Supported for proxy-routed `claude --bg` jobs while the app and local proxy are running. Native Claude auth is not required. |
 | ChatGPT OAuth | Supported through the app or CLI. |
@@ -107,14 +108,14 @@ flowchart LR
 
 ### Homebrew
 
-The app cask installs the same release DMG as the manual download path:
+The app cask installs the same Apple Silicon (`arm64`) release DMG as the manual download path:
 
 ```sh
 brew tap soulforger0/cc-codex-proxy https://github.com/soulforger0/cc-codex-proxy
 brew install --cask soulforger0/cc-codex-proxy/cc-codex-proxy-app
 ```
 
-The CLI-only helper is also available for direct development and diagnostics:
+The CLI-only helper is built from source by Homebrew and is available for direct development and diagnostics:
 
 ```sh
 brew install soulforger0/cc-codex-proxy/cc-codex-proxy
@@ -124,7 +125,7 @@ Because releases are not yet Developer ID signed or notarized, macOS may still s
 
 ### DMG
 
-Download the latest release asset:
+Download the latest Apple Silicon (`arm64`) release asset:
 
 - [CCCodexProxy-macOS.dmg](https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/CCCodexProxy-macOS.dmg)
 - [SHA256SUMS](https://github.com/soulforger0/cc-codex-proxy/releases/latest/download/SHA256SUMS)
@@ -220,6 +221,8 @@ Build the app bundle and release artifacts:
 ```sh
 scripts/build-app.sh
 ```
+
+The build script packages native binaries for the current Mac. Release CI sets `CCP_RELEASE_ARCH=arm64`; until universal app packaging is implemented, the published app cask and DMG are arm64-only.
 
 The script writes:
 

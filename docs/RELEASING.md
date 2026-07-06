@@ -33,6 +33,8 @@ Each release should contain versioned assets plus stable latest aliases:
 
 The versioned assets are the immutable source of truth. The stable aliases exist so the README can link to the latest DMG with a URL that does not change between releases.
 
+Current prebuilt app release assets are native Apple Silicon (`arm64`) builds, not universal builds. Keep the app cask restricted with `depends_on arch: :arm64` until `scripts/build-app.sh` produces either a universal app or separate per-architecture app artifacts.
+
 ## Release workflow
 
 The tag-triggered workflow in `.github/workflows/release.yml` should:
@@ -40,9 +42,9 @@ The tag-triggered workflow in `.github/workflows/release.yml` should:
 1. Validate that the tag version matches package/app metadata.
 2. Run Rust tests.
 3. Build the Swift app.
-4. Build the DMG/ZIP/checksum/manifest artifacts with `scripts/build-app.sh`.
-5. Verify the DMGs with `hdiutil verify`.
-6. Verify checksums with `shasum -a 256 -c SHA256SUMS`.
+4. Build the DMG/ZIP/checksum/manifest artifacts with `CCP_RELEASE_ARCH=arm64 scripts/build-app.sh`.
+5. Verify the DMGs, checksums, manifest architecture, binary architecture, and app cask architecture with `scripts/verify-release-packaging.sh`.
+6. Validate Homebrew metadata syntax.
 7. Generate GitHub artifact attestations with `actions/attest`.
 8. Create a draft GitHub Release, upload all assets, then publish it.
 
@@ -60,10 +62,8 @@ Before tagging, run:
 ```sh
 cargo test --all
 swift build --package-path macos/CCCodexProxy
-CCP_VERSION=<version> CCP_BUILD_NUMBER=1 scripts/build-app.sh
-hdiutil verify dist/CCCodexProxy-<version>-macOS.dmg
-hdiutil verify dist/CCCodexProxy-macOS.dmg
-(cd dist && shasum -a 256 -c SHA256SUMS)
+CCP_VERSION=<version> CCP_BUILD_NUMBER=1 CCP_RELEASE_ARCH=arm64 scripts/build-app.sh
+scripts/verify-release-packaging.sh <version> arm64
 ```
 
 ## Publish a release
@@ -90,6 +90,8 @@ SOURCE_SHA256="$(shasum -a 256 "/tmp/cc-codex-proxy-v$VERSION.tar.gz" | awk '{pr
 DMG_SHA256="$(awk -v artifact="CCCodexProxy-$VERSION-macOS.dmg" '$2 == artifact {print $1}' /tmp/cc-codex-proxy-SHA256SUMS)"
 scripts/update-homebrew-packaging.sh "$VERSION" "$SOURCE_SHA256" "$DMG_SHA256"
 ```
+
+The app cask installs the prebuilt arm64 DMG and must keep `depends_on arch: :arm64`. The CLI formula builds from source and should not inherit that app-only architecture restriction.
 
 Validate the metadata before publishing the Homebrew update:
 

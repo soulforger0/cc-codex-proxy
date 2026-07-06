@@ -34,12 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - run: CCP_VERSION=0.0.0 CCP_BUILD_NUMBER="$GITHUB_RUN_NUMBER" scripts/build-app.sh
-      - run: |
-          test -f dist/RELEASE_MANIFEST.json
-          hdiutil verify dist/CCCodexProxy-0.0.0-macOS.dmg
-          hdiutil verify dist/CCCodexProxy-macOS.dmg
-          (cd dist && shasum -a 256 -c SHA256SUMS)
+      - run: CCP_VERSION=0.0.0 CCP_BUILD_NUMBER="$GITHUB_RUN_NUMBER" CCP_RELEASE_ARCH=arm64 scripts/build-app.sh
+      - run: scripts/verify-release-packaging.sh 0.0.0 arm64
 
   homebrew:
     runs-on: macos-15

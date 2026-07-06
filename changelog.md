@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-06 AEST - v0.4.3 Homebrew app architecture guard
+
+- Restricted the prebuilt Homebrew app cask to Apple Silicon (`arm64`) so Intel Macs cannot install a non-universal DMG that will not launch.
+- Added release packaging checks for app/helper binary architecture, manifest architecture metadata, checksums, DMG verification, and cask architecture requirements.
+- Documented that current prebuilt app DMGs are arm64-only while the CLI formula remains source-built.
+
 ## 2026-07-04 AEST - v0.4.2 background agent proxy routing
 
 - Fixed Claude Code background agents launched through the managed shim so they work without native Anthropic/Claude auth.

@@ -11,7 +11,7 @@ Usage:
 Environment fallbacks:
   SOURCE_SHA256       SHA256 for the GitHub tag source archive
   SOURCE_ARCHIVE      Local archive file to hash when SOURCE_SHA256 is unset
-  DMG_SHA256          SHA256 for CCCodexProxy-<version>-macOS.dmg
+  DMG_SHA256          SHA256 for the arm64 CCCodexProxy-<version>-macOS.dmg
   SHA256SUMS_PATH     Local SHA256SUMS file to read when DMG_SHA256 is unset
 
 Example:
