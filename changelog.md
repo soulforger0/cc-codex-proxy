@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-10 AEST - v0.5.0 startup health, combined logs, and GPT-5.6 defaults
+
+- Added startup preflight diagnostics and `/healthz` polling so the macOS app reports Running only after the bundled proxy helper is ready, and surfaces early exits with actionable status.
+- Added a searchable, newest-first Logs window that combines launcher events from `app.log` with proxy events from `proxy.log`, including source/severity filters and copy/reveal actions.
+- Updated the built-in Codex and custom OpenAI defaults to `gpt-5.6-sol` for primary traffic and `gpt-5.6-luna` for small/subagent traffic, while keeping `gpt-5.6-terra` available for explicit selection.
+- Preserved `max` reasoning effort for GPT-5.6 requests and retained the compatible `xhigh` mapping for older model families.
+- Updated README, architecture notes, package/app versions, and pre-release Homebrew metadata for `v0.5.0`.
+
 ## 2026-07-06 AEST - v0.4.3 Homebrew app architecture guard
 
 - Restricted the prebuilt Homebrew app cask to Apple Silicon (`arm64`) so Intel Macs cannot install a non-universal DMG that will not launch.

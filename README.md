@@ -70,7 +70,7 @@ flowchart LR
 
 | Capability | What it does |
 | --- | --- |
-| Menu bar control | Start, stop, refresh status, and open logs from a native macOS app. |
+| Menu bar control | Start, stop, refresh status, inspect startup health, and search combined launcher/proxy logs from a native macOS app. |
 | ChatGPT OAuth | Sign in from the app; tokens are stored locally under Application Support. |
 | DeepSeek API keys | Store a DeepSeek API key locally or provide `DEEPSEEK_API_KEY`. |
 | Custom OpenAI endpoints | Route to a user-provided OpenAI-compatible base URL with Responses or Chat Completions and an optional API key. |
@@ -82,11 +82,12 @@ flowchart LR
 | Transport fallback | In `auto` mode, tries Codex WebSocket first and falls back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
-## What's New In 0.4.3
+## What's New In 0.5.0
 
-- The prebuilt Homebrew app cask is restricted to Apple Silicon (`arm64`) so Intel Macs do not install a non-universal app bundle that cannot launch.
-- Release packaging now verifies DMG integrity, checksums, manifest architecture metadata, app/helper binary architecture, and app cask architecture requirements in one shared script.
-- Release docs now distinguish the arm64 prebuilt app DMG from the source-built CLI formula.
+- Startup now waits for the bundled helper to pass its `/healthz` check before the app reports **Running**, with clearer status for preflight failures and unexpected helper exits.
+- The **Logs** window combines launcher and proxy events in a searchable, newest-first view with source/severity filters plus copy and reveal actions.
+- Codex and custom OpenAI routes now default to the GPT-5.6 model family: `gpt-5.6-sol` for primary traffic and `gpt-5.6-luna` for small/subagent traffic, with `gpt-5.6-terra` available for explicit selection.
+- GPT-5.6 requests preserve `max` reasoning effort, while older model families continue to receive the compatible `xhigh` value.
 
 ## Compatibility
 
@@ -190,7 +191,7 @@ cc-codex-proxy doctor
 cc-codex-proxy admin status
 ```
 
-When `serve` starts, it prints the local proxy URL, health URL, log path, and Claude Code environment variables for manual sessions. Custom OpenAI-compatible endpoints can also be configured with `CCP_CUSTOM_OPENAI_BASE_URL`, `CCP_CUSTOM_OPENAI_PROTOCOL=responses|chat-completions`, and optional `CUSTOM_OPENAI_API_KEY`.
+When `serve` starts, it prints the local proxy URL, health URL, log path, and Claude Code environment variables for manual sessions. Codex and custom OpenAI profiles default to `gpt-5.6-sol` for primary traffic and `gpt-5.6-luna` for small/subagent traffic; `gpt-5.6-terra` is also available for explicit selection. Custom OpenAI-compatible endpoints can be configured with `CCP_CUSTOM_OPENAI_BASE_URL`, `CCP_CUSTOM_OPENAI_PROTOCOL=responses|chat-completions`, and optional `CUSTOM_OPENAI_API_KEY`.
 
 ## Runtime Files
 
