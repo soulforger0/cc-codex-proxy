@@ -10,6 +10,7 @@ private let defaultOpenAISmallModel = "gpt-5.6-luna[1m]"
 @MainActor
 final class ProxyAppModel: ObservableObject {
     @Published var isRunning = false
+    @Published var isStartingProxy = false
     @Published var isAuthenticated = false
     @Published var isLoggingIn = false
     @Published var isCheckingAuthStatus = false
@@ -41,8 +42,18 @@ final class ProxyAppModel: ObservableObject {
     @Published var smallModel = defaultOpenAISmallModel
     @Published var port = 18765
     @Published var autoCompactWindow = 272_000
+    @Published private(set) var logEntries: [ProxyLogEntry] = []
+    @Published private(set) var isRefreshingLogs = false
+    @Published private(set) var logLoadError: String?
+    @Published private(set) var lastStartupFailure: String?
 
     private var proxyProcess: Process?
+    private var proxyStandardOutput: Pipe?
+    private var proxyStandardError: Pipe?
+    private var outputCaptureProcess: Process?
+    private var expectedTerminationProcess: Process?
+    private var helperOutputBuffer = ""
+    private var logWindow: NSWindow?
 
     func refresh() async {
         await refreshProxyStatus(updateLastMessage: true)
@@ -55,27 +66,30 @@ final class ProxyAppModel: ObservableObject {
     }
 
     private func refreshProxyStatus(updateLastMessage: Bool) async {
-        let healthURL = URL(string: "http://127.0.0.1:\(port)/healthz")!
-
         do {
-            let (_, response) = try await URLSession.shared.data(from: healthURL)
-            let isHealthy = (response as? HTTPURLResponse)?.statusCode == 200
+            let isHealthy = try await proxyIsHealthy()
             isRunning = isHealthy
-            statusText = isHealthy ? "Running on 127.0.0.1:\(port)" : "Stopped"
+            statusText = isHealthy
+                ? "Running on 127.0.0.1:\(port)"
+                : (isStartingProxy ? "Starting on 127.0.0.1:\(port)…" : "Stopped")
             if isHealthy {
                 await refreshTransportStatus()
-            } else {
+            } else if !isStartingProxy {
                 applyStoppedTransportStatus()
             }
             if updateLastMessage {
-                lastMessage = isHealthy ? "Proxy is running." : "Proxy is stopped."
+                lastMessage = isHealthy
+                    ? "Proxy is running."
+                    : (isStartingProxy ? "Proxy is starting…" : "Proxy is stopped.")
             }
         } catch {
             isRunning = false
-            statusText = "Stopped"
-            applyStoppedTransportStatus()
+            statusText = isStartingProxy ? "Starting on 127.0.0.1:\(port)…" : "Stopped"
+            if !isStartingProxy {
+                applyStoppedTransportStatus()
+            }
             if updateLastMessage {
-                lastMessage = "Proxy is stopped."
+                lastMessage = isStartingProxy ? "Proxy is starting…" : "Proxy is stopped."
             }
         }
     }
@@ -98,37 +112,129 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func startProxy() async {
-        guard proxyProcess == nil else { return }
+        if let proxyProcess, proxyProcess.isRunning {
+            lastMessage = "Proxy is already running."
+            return
+        }
+        proxyProcess = nil
+        isStartingProxy = true
+        lastStartupFailure = nil
+        statusText = "Preparing proxy…"
+        lastMessage = "Checking whether the proxy can start…"
+        defer { isStartingProxy = false }
+
         replaceCrossProviderModelDefaults()
         if provider == "custom-openai", customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lastMessage = "Enter a custom OpenAI endpoint URL before starting."
+            recordAppEvent(level: "ERROR", message: "Proxy start rejected", detail: lastMessage)
             return
         }
-        let process = Process()
-        process.arguments = serveArguments
+
         do {
-            process.executableURL = try helperURL()
+            do {
+                let sessionCheck = try await runCLI(["claude", "check-live-sessions"])
+                recordAppEvent(
+                    level: "INFO",
+                    message: "Claude Code session preflight passed",
+                    detail: sessionCheck.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            } catch {
+                let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard detail.localizedCaseInsensitiveContains("Claude Code is already running") else {
+                    throw error
+                }
+                let message = "Close every Claude Code session, then start the proxy again."
+                lastStartupFailure = detail.isEmpty ? message : detail
+                lastMessage = message
+                statusText = "Start blocked"
+                recordAppEvent(level: "ERROR", message: "Proxy start blocked by Claude Code session preflight", detail: detail)
+                showLiveClaudeSessionAlert(detail: detail)
+                return
+            }
+
+            let executableURL = try helperURL()
+            let process = Process()
+            let standardOutput = Pipe()
+            let standardError = Pipe()
+            process.executableURL = executableURL
+            process.arguments = serveArguments
+            process.standardOutput = standardOutput
+            process.standardError = standardError
+            configureOutputCapture(for: process, standardOutput: standardOutput, standardError: standardError)
+
+            recordAppEvent(
+                level: "INFO",
+                message: "Starting proxy helper",
+                detail: "helper=\(executableURL.path) provider=\(provider) model=\(model) small_model=\(smallModel) port=\(port)"
+            )
             try process.run()
             proxyProcess = process
-            isRunning = true
-            statusText = "Running on 127.0.0.1:\(port)"
+            statusText = "Starting on 127.0.0.1:\(port)…"
             transportDetailText = "Waiting for the first Codex request."
             transportBadgeText = "Waiting"
             transportCurrentMethod = nil
-            lastMessage = "Proxy started."
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            lastMessage = "Waiting for the proxy health check…"
+
+            guard await waitForProxyHealth(process: process) else {
+                let detail = helperOutputBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                if process.isRunning {
+                    expectedTerminationProcess = process
+                    process.terminate()
+                }
+                proxyProcess = nil
+                isRunning = false
+                statusText = "Failed to start"
+                applyStoppedTransportStatus()
+                lastStartupFailure = detail.isEmpty
+                    ? "The helper did not pass its health check within 5 seconds."
+                    : detail
+                lastMessage = "Proxy failed to start. Open Logs for diagnostics."
+                recordAppEvent(
+                    level: "ERROR",
+                    message: "Proxy helper failed its startup health check",
+                    detail: lastStartupFailure
+                )
+                return
+            }
+
+            isRunning = true
+            statusText = "Running on 127.0.0.1:\(port)"
+            lastMessage = "Proxy started and passed its health check."
+            recordAppEvent(
+                level: "INFO",
+                message: "Proxy startup health check passed",
+                detail: "http://127.0.0.1:\(port)/healthz"
+            )
             await setActiveRoute(updateLastMessage: false)
             await installClaudeShim(updateLastMessage: false)
             await refreshProxyStatus(updateLastMessage: false)
         } catch {
-            lastMessage = "Failed to start proxy: \(error.localizedDescription)"
+            let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            proxyStandardOutput?.fileHandleForReading.readabilityHandler = nil
+            proxyStandardError?.fileHandleForReading.readabilityHandler = nil
+            proxyStandardOutput = nil
+            proxyStandardError = nil
+            outputCaptureProcess = nil
+            proxyProcess = nil
+            isRunning = false
+            statusText = "Failed to start"
+            applyStoppedTransportStatus()
+            lastStartupFailure = detail
+            lastMessage = "Failed to start proxy: \(detail)"
+            recordAppEvent(level: "ERROR", message: "Failed to launch proxy helper", detail: detail)
         }
     }
 
     func stopProxy() async {
-        proxyProcess?.terminate()
-        proxyProcess = nil
+        recordAppEvent(level: "INFO", message: "Stopping proxy helper")
+        if let process = proxyProcess, process.isRunning {
+            expectedTerminationProcess = process
+            process.terminate()
+        } else {
+            proxyProcess = nil
+        }
         isRunning = false
+        isStartingProxy = false
         statusText = "Stopped"
         applyStoppedTransportStatus()
         lastMessage = "Proxy stopped. New claude launches will show an error while this app remains open."
@@ -250,6 +356,11 @@ final class ProxyAppModel: ObservableObject {
             }
             await refreshProxyStatus(updateLastMessage: false)
         } catch {
+            recordAppEvent(
+                level: "ERROR",
+                message: "Failed to update the active route",
+                detail: error.localizedDescription
+            )
             if updateLastMessage {
                 lastMessage = "Provider switch failed: \(error.localizedDescription)"
             }
@@ -293,6 +404,11 @@ final class ProxyAppModel: ObservableObject {
             }
         } catch {
             claudeShimStatusText = "Claude command shim unavailable"
+            recordAppEvent(
+                level: "ERROR",
+                message: "Failed to install the Claude command shim",
+                detail: error.localizedDescription
+            )
             if updateLastMessage {
                 lastMessage = "Claude shim install failed: \(error.localizedDescription)"
             }
@@ -305,6 +421,7 @@ final class ProxyAppModel: ObservableObject {
         } catch {
             // The app is terminating; leave the crash-safe shim fallback in place.
         }
+        expectedTerminationProcess = proxyProcess
         proxyProcess?.terminate()
         proxyProcess = nil
     }
@@ -341,10 +458,220 @@ final class ProxyAppModel: ObservableObject {
         }
     }
 
+    private func proxyIsHealthy() async throws -> Bool {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/healthz")!)
+        request.timeoutInterval = 0.5
+        let (_, response) = try await URLSession.shared.data(for: request)
+        return (response as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    private func waitForProxyHealth(process: Process) async -> Bool {
+        for _ in 0..<50 {
+            guard process.isRunning else { return false }
+            if (try? await proxyIsHealthy()) == true {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return false
+    }
+
+    private func configureOutputCapture(
+        for process: Process,
+        standardOutput: Pipe,
+        standardError: Pipe
+    ) {
+        helperOutputBuffer = ""
+        proxyStandardOutput = standardOutput
+        proxyStandardError = standardError
+        outputCaptureProcess = process
+
+        standardOutput.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
+            Task { @MainActor [weak self] in
+                self?.captureHelperOutput(output, stream: "stdout")
+            }
+        }
+        standardError.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
+            Task { @MainActor [weak self] in
+                self?.captureHelperOutput(output, stream: "stderr")
+            }
+        }
+        process.terminationHandler = { [weak self] terminatedProcess in
+            Task { @MainActor [weak self] in
+                self?.handleProxyTermination(terminatedProcess)
+            }
+        }
+    }
+
+    private func captureHelperOutput(_ output: String, stream: String) {
+        helperOutputBuffer += output
+        if helperOutputBuffer.count > 24_000 {
+            helperOutputBuffer = String(helperOutputBuffer.suffix(24_000))
+        }
+
+        for line in output.split(whereSeparator: \Character.isNewline) {
+            let message = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !message.isEmpty else { continue }
+            recordAppEvent(
+                level: stream == "stderr" ? "ERROR" : "INFO",
+                message: "Proxy helper \(stream)",
+                detail: message
+            )
+        }
+    }
+
+    private func handleProxyTermination(_ process: Process) {
+        let wasExpected = expectedTerminationProcess === process
+        if wasExpected {
+            expectedTerminationProcess = nil
+        }
+        if outputCaptureProcess === process {
+            proxyStandardOutput?.fileHandleForReading.readabilityHandler = nil
+            proxyStandardError?.fileHandleForReading.readabilityHandler = nil
+            proxyStandardOutput = nil
+            proxyStandardError = nil
+            outputCaptureProcess = nil
+        }
+        if proxyProcess === process {
+            proxyProcess = nil
+        }
+
+        let reason = process.terminationReason == .uncaughtSignal ? "signal" : "exit"
+        let summary = "status=\(process.terminationStatus) reason=\(reason)"
+        if wasExpected {
+            recordAppEvent(level: "INFO", message: "Proxy helper stopped", detail: summary)
+            return
+        }
+
+        isRunning = false
+        isStartingProxy = false
+        statusText = "Proxy exited"
+        applyStoppedTransportStatus()
+        let output = helperOutputBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        lastStartupFailure = output.isEmpty ? summary : "\(summary)\n\(output)"
+        lastMessage = "Proxy exited unexpectedly (\(summary)). Open Logs for diagnostics."
+        recordAppEvent(
+            level: "ERROR",
+            message: "Proxy helper exited unexpectedly",
+            detail: lastStartupFailure
+        )
+    }
+
     func openLogs() {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/CCCodexProxy/proxy.log")
-        NSWorkspace.shared.open(url)
+        Task { await refreshLogs() }
+
+        if logWindow == nil {
+            let rootView = LogViewerView().environmentObject(self)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 920, height: 620),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "CC Codex Proxy Logs"
+            window.contentViewController = NSHostingController(rootView: rootView)
+            window.titlebarSeparatorStyle = .line
+            window.isReleasedWhenClosed = false
+            window.setFrameAutosaveName("CCCodexProxyLogViewer")
+            window.center()
+            logWindow = window
+        }
+
+        logWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func refreshLogs() async {
+        isRefreshingLogs = true
+        defer { isRefreshingLogs = false }
+        let appLogURL = appLogURL
+        let proxyLogURL = proxyLogURL
+
+        do {
+            let entries = try await Task.detached(priority: .userInitiated) {
+                try loadProxyLogEntries(appLogURL: appLogURL, proxyLogURL: proxyLogURL)
+            }.value
+            logEntries = entries
+            logLoadError = nil
+        } catch {
+            logLoadError = error.localizedDescription
+        }
+    }
+
+    func revealLogsInFinder() {
+        ensureLogsDirectoryExists()
+        let existingLogs = [appLogURL, proxyLogURL].filter {
+            FileManager.default.fileExists(atPath: $0.path)
+        }
+        if existingLogs.isEmpty {
+            NSWorkspace.shared.open(logsDirectoryURL)
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting(existingLogs)
+        }
+    }
+
+    private var logsDirectoryURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/CCCodexProxy", isDirectory: true)
+    }
+
+    private var proxyLogURL: URL {
+        logsDirectoryURL.appendingPathComponent("proxy.log")
+    }
+
+    private var appLogURL: URL {
+        logsDirectoryURL.appendingPathComponent("app.log")
+    }
+
+    private func ensureLogsDirectoryExists() {
+        try? FileManager.default.createDirectory(
+            at: logsDirectoryURL,
+            withIntermediateDirectories: true
+        )
+    }
+
+    private func recordAppEvent(level: String, message: String, detail: String? = nil) {
+        ensureLogsDirectoryExists()
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        var fields: [String: Any] = ["message": message]
+        if let detail, !detail.isEmpty {
+            fields["detail"] = detail
+        }
+        let object: [String: Any] = [
+            "timestamp": timestamp,
+            "level": level,
+            "fields": fields,
+            "target": "CCCodexProxy.app"
+        ]
+
+        guard var data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            return
+        }
+        data.append(0x0A)
+
+        do {
+            if !FileManager.default.fileExists(atPath: appLogURL.path) {
+                FileManager.default.createFile(atPath: appLogURL.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: appLogURL)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.close()
+        } catch {
+            logLoadError = "Unable to write app log: \(error.localizedDescription)"
+        }
+
+        if let line = String(data: data, encoding: .utf8),
+           let entry = ProxyLogEntry.parse(line: line, source: .app, sequence: logEntries.count) {
+            logEntries.append(entry)
+            if logEntries.count > 2_000 {
+                logEntries.removeFirst(logEntries.count - 2_000)
+            }
+        }
     }
 
     func openProjectPage() {

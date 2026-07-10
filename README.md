@@ -201,10 +201,11 @@ When `serve` starts, it prints the local proxy URL, health URL, log path, and Cl
 | Codex upstream session state | `~/Library/Application Support/CCCodexProxy/codex-session-state.json` |
 | DeepSeek API key | `~/Library/Application Support/CCCodexProxy/deepseek-api-key` |
 | Custom OpenAI API key | `~/Library/Application Support/CCCodexProxy/custom-openai-api-key` |
-| Logs | `~/Library/Logs/CCCodexProxy/proxy.log` |
+| Proxy runtime log | `~/Library/Logs/CCCodexProxy/proxy.log` |
+| macOS launcher log | `~/Library/Logs/CCCodexProxy/app.log` |
 | Claude shim state | `~/Library/Application Support/CCCodexProxy/claude-shim.json` |
 
-`proxy.log` is a single size-capped file. The proxy never creates rotated log archives; when the file would exceed its cap, it truncates the same file and continues writing there. Configure the cap with `log.max_bytes` in `config.json` or `CCP_LOG_MAX_BYTES` in bytes.
+The app's **Logs** button opens a searchable viewer that combines launcher/startup events from `app.log` with runtime events from `proxy.log`, with source and severity filters plus copy/reveal actions. `proxy.log` is a single size-capped file. The proxy never creates rotated log archives; when the file would exceed its cap, it truncates the same file and continues writing there. Configure the cap with `log.max_bytes` in `config.json` or `CCP_LOG_MAX_BYTES` in bytes.
 
 Treat auth files, provider API keys, route pins, Codex session state, logs, account identifiers, and Claude Code session details as sensitive when sharing diagnostics.
 

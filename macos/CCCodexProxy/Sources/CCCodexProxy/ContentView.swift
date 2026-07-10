@@ -23,6 +23,7 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(AppTheme.motion, value: model.isRunning)
+        .animation(AppTheme.motion, value: model.isStartingProxy)
         .animation(AppTheme.motion, value: model.isAuthenticated)
         .animation(AppTheme.motion, value: model.isLoggingIn)
         .animation(AppTheme.motion, value: model.isCheckingAuthStatus)
@@ -43,7 +44,7 @@ struct ContentView: View {
                     .fill(.thinMaterial)
                 Circle()
                     .stroke(AppTheme.hairline, lineWidth: 1)
-                Image(systemName: model.isRunning ? "bolt.horizontal.fill" : "bolt.horizontal")
+                Image(systemName: model.isStartingProxy ? "hourglass" : (model.isRunning ? "bolt.horizontal.fill" : "bolt.horizontal"))
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(statusColor)
                     .accessibilityHidden(true)
@@ -85,7 +86,7 @@ struct ContentView: View {
                 .stroke(AppTheme.hairline, lineWidth: 1)
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(model.isRunning ? "CC Codex Proxy running" : "CC Codex Proxy stopped")
+        .accessibilityLabel(model.isStartingProxy ? "CC Codex Proxy starting" : (model.isRunning ? "CC Codex Proxy running" : "CC Codex Proxy stopped"))
     }
 
     private var statusPill: some View {
@@ -93,14 +94,14 @@ struct ContentView: View {
             Circle()
                 .fill(statusColor)
                 .frame(width: 6, height: 6)
-            Text(model.isRunning ? "Running" : "Stopped")
+            Text(model.isStartingProxy ? "Starting" : (model.isRunning ? "Running" : "Stopped"))
                 .font(.caption2.weight(.semibold))
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(Capsule().fill(AppTheme.subtleFill))
         .overlay(
-            Capsule().stroke(statusColor.opacity(model.isRunning ? 0.28 : 0.16), lineWidth: 1)
+            Capsule().stroke(statusColor.opacity(model.isRunning || model.isStartingProxy ? 0.28 : 0.16), lineWidth: 1)
         )
         .foregroundStyle(statusColor)
     }
@@ -130,11 +131,11 @@ struct ContentView: View {
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 10) {
                 GridRow {
                     actionButton(
-                        title: "Start",
-                        detail: "Begin proxy",
-                        systemImage: "play.fill",
+                        title: model.isStartingProxy ? "Starting…" : "Start",
+                        detail: model.isStartingProxy ? "Checking health" : "Begin proxy",
+                        systemImage: model.isStartingProxy ? "hourglass" : "play.fill",
                         tint: AppTheme.success,
-                        isDisabled: model.isRunning
+                        isDisabled: model.isRunning || model.isStartingProxy
                     ) {
                         Task { await model.startProxy() }
                     }
@@ -161,13 +162,34 @@ struct ContentView: View {
 
                     actionButton(
                         title: "Logs",
-                        detail: "Open file",
+                        detail: "Inspect events",
                         systemImage: "doc.text.magnifyingglass",
                         tint: AppTheme.accent
                     ) {
                         model.openLogs()
                     }
                 }
+            }
+
+            if !model.lastMessage.isEmpty {
+                Label(
+                    model.lastMessage,
+                    systemImage: model.lastStartupFailure == nil ? "info.circle" : "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(model.lastStartupFailure == nil ? Color.secondary : AppTheme.danger)
+                .lineLimit(4)
+                .textSelection(.enabled)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+                        .fill(AppTheme.insetSurface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+                        .stroke(model.lastStartupFailure == nil ? AppTheme.hairline : AppTheme.danger.opacity(0.18), lineWidth: 1)
+                )
             }
         }
     }
@@ -829,11 +851,11 @@ struct ContentView: View {
     }
 
     private var statusColor: Color {
-        model.isRunning ? AppTheme.success : AppTheme.muted
+        model.isStartingProxy ? AppTheme.accent : (model.isRunning ? AppTheme.success : AppTheme.muted)
     }
 }
 
-private enum AppTheme {
+enum AppTheme {
     static let outerPadding: CGFloat = 16
     static let sectionSpacing: CGFloat = 14
     static let largeRadius: CGFloat = 14
@@ -874,7 +896,7 @@ private enum AppTheme {
     }
 }
 
-private struct PanelCard: ViewModifier {
+struct PanelCard: ViewModifier {
     let tint: Color?
 
     func body(content: Content) -> some View {
@@ -904,13 +926,13 @@ private struct PanelCard: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     func panelCard(tint: Color? = nil) -> some View {
         modifier(PanelCard(tint: tint))
     }
 }
 
-private struct AppPressButtonStyle: ButtonStyle {
+struct AppPressButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
 
     let tint: Color

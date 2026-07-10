@@ -13,7 +13,11 @@ let package = Package(
         .executableTarget(
             name: "CCCodexProxy",
             path: "Sources/CCCodexProxy"
+        ),
+        .testTarget(
+            name: "CCCodexProxyTests",
+            dependencies: ["CCCodexProxy"],
+            path: "Tests/CCCodexProxyTests"
         )
     ]
 )
-

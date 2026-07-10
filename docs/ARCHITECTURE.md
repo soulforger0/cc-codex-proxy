@@ -15,6 +15,8 @@ Provider selection is explicit through app/CLI config as `codex`, `deepseek`, or
 - On launch, the app temporarily replaces the shell-resolved `claude` command with a managed shim. The shim applies proxy environment variables only when the app PID is alive and `/healthz` succeeds; otherwise it either falls back to the original Claude command or reports that the proxy is stopped.
 - For Claude Code background agents, the shim ensures Claude's background daemon is reachable with managed proxy environment variables before launching the session. Daemon subcommands are passed through without inline settings, while foreground and background sessions receive inline proxy settings so daemon-respawned jobs continue using CC Codex Proxy without native Claude auth.
 - Proxy startup is blocked while existing Claude Code processes are running, so active sessions do not silently switch backend assumptions mid-session.
+- The macOS launcher captures helper stdout/stderr before the Rust tracing layer is available, records startup diagnostics in `app.log`, and only reports Running after `/healthz` returns HTTP 200. Unexpected helper exits clear the running state and surface their exit status in the app.
+- The app's Logs window combines `app.log` and `proxy.log` into a newest-first, searchable event view with source/severity filters. Raw files remain available through the Reveal action.
 - `cc-codex-proxy serve` binds only to `127.0.0.1`.
 - `/v1/messages` streams Anthropic SSE back to Claude Code without buffering the full upstream response. Streaming responses include Claude-compatible `ping` keepalives and anti-buffering headers; the Messages endpoints also have an explicit bounded JSON body limit for large-but-controlled Claude Code transcripts.
 - Codex non-streaming requests are accumulated only after the upstream stream completes; DeepSeek non-streaming responses are passed through as JSON. Custom OpenAI non-streaming responses are translated back into Anthropic JSON.
@@ -144,7 +146,8 @@ With the default `pinOnFirstRequest` routing policy, a request carrying `x-claud
 - Codex upstream session state: `~/Library/Application Support/CCCodexProxy/codex-session-state.json` — a bounded, 30-day, 512-entry cache of hashed Claude Code session IDs and Codex session generations. Raw Claude Code session IDs are not stored here.
 - DeepSeek API key: `~/Library/Application Support/CCCodexProxy/deepseek-api-key`
 - Custom OpenAI API key: `~/Library/Application Support/CCCodexProxy/custom-openai-api-key`
-- Logs: `~/Library/Logs/CCCodexProxy/proxy.log` — a single size-capped file. The proxy never creates rotated log archives; when the file would exceed `log.max_bytes` / `CCP_LOG_MAX_BYTES`, it truncates the same file and continues writing there.
+- Proxy runtime log: `~/Library/Logs/CCCodexProxy/proxy.log` — a single size-capped file. The proxy never creates rotated log archives; when the file would exceed `log.max_bytes` / `CCP_LOG_MAX_BYTES`, it truncates the same file and continues writing there.
+- macOS launcher log: `~/Library/Logs/CCCodexProxy/app.log` — process launch, preflight, captured stderr/stdout, health-check, and termination events needed to diagnose failures that occur before proxy runtime logging initializes.
 
 Model names are intentionally data-driven and provider-scoped. If ChatGPT Codex, DeepSeek, or commonly used custom endpoint model identifiers change, update `model-profiles.json` instead of rebuilding. Custom OpenAI also accepts arbitrary model names after stripping Claude Code's `[1m]` context hint, so local gateways can be used before adding explicit profiles.
 
