@@ -65,6 +65,7 @@ Recommended setup: leave app users on `http`; use `auto` only for controlled rel
 ## Translation
 
 - Claude Code messages, system prompts, tools, tool calls, tool results, images, JSON output formats, and reasoning effort are translated into the Codex Responses request shape.
+- The built-in Codex and custom OpenAI route defaults use `gpt-5.6-sol` for primary traffic and `gpt-5.6-luna` for small/subagent traffic. Opus and Sonnet aliases share the primary slot, Haiku uses the small slot, and `gpt-5.6-terra` remains available for explicit selection. GPT-5.6 is a limited-preview family, so the proxy surfaces upstream access errors and does not silently fall back to older models.
 - Tool definitions are canonicalized before provider handoff: exact duplicates are removed, hosted web-search tools sort ahead of function tools, object keys are stable, and JSON Schema `required` arrays are sorted while order-sensitive arrays such as `enum` remain unchanged.
 - Custom OpenAI Responses mode reuses the same Responses request translation and stream reducer as Codex, but uses static bearer-token-or-no-auth HTTP instead of ChatGPT OAuth/WebSocket transport.
 - Custom OpenAI Chat Completions mode maps Anthropic messages into `chat/completions` messages, translates tools into OpenAI function tools, maps tool calls/results, and converts OpenAI chat responses or stream deltas back into Anthropic content blocks.
@@ -92,11 +93,13 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 | `max_tokens` | omitted | The Codex backend rejects explicit output-limit parameters; Claude Code's field is not forwarded upstream. |
 | `temperature`, `top_p` | omitted | The ChatGPT Codex backend is stricter than the public Responses API and rejects these sampling parameters on this path. |
 | `metadata` | omitted | Anthropic request metadata is local client metadata; it is not forwarded as Responses `metadata` or `client_metadata`. |
-| `output_config.effort` | `reasoning.effort` | `auto` omits the field; `max`/`ultracode` map to `xhigh`; `none`, `minimal`, `low`, `medium`, `high`, and `xhigh` are forwarded. Unknown values are omitted. |
+| `output_config.effort` | `reasoning.effort` | `auto` omits the field. `none`, `minimal`, `low`, `medium`, `high`, and `xhigh` are forwarded. For GPT-5.6, `max` and defensive literal `ultracode` inputs map to `max`; older models map them to `xhigh`. Unknown values, including `ultra`, are omitted. |
 | non-auto reasoning effort | `include: ["reasoning.encrypted_content"]` | Matches the Codex backend request shape used for reasoning continuity. |
 | `thinking.budget_tokens` | `reasoning.effort` | Deprecated Claude fixed thinking budgets are mapped as a fallback: `0` -> `none`, up to 4k -> `low`, up to 32k -> `medium`, above 32k -> `high`. |
 | `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting with `strict: true`; object schemas are normalized so all properties are required. |
 | `x-claude-code-session-id` | upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. The upstream session header uses a compact hash of the Claude session id so backend prompt-cache keys stay within length limits. It also keys local route pins so an idle session keeps using the provider/profile selected on its first request. The hashed Codex session-state record persists separately so upstream session generations survive helper restarts. The proxy does not send `prompt_cache_key` in the body on the ChatGPT Codex path. |
+
+Claude Code ultracode is client-side dynamic-workflow orchestration, not a Responses reasoning-effort value. Modern Claude Code serializes plain ultracode turns as `xhigh`, which is indistinguishable from an explicitly selected xhigh turn at the proxy boundary. To combine those client-side workflows with GPT-5.6 max reasoning, activate ultracode in Claude Code while explicitly selecting `max`; the proxy forwards that `max` value and never sends `reasoning.effort: "ultra"`.
 
 ### DeepSeek Mapping
 

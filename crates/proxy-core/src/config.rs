@@ -23,6 +23,8 @@ pub const CUSTOM_OPENAI_API_KEY_ENV: &str = "CUSTOM_OPENAI_API_KEY";
 pub const DEFAULT_PUBLIC_PRIMARY_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_PUBLIC_SONNET_MODEL: &str = "claude-sonnet-4-5";
 pub const DEFAULT_PUBLIC_SMALL_MODEL: &str = "claude-haiku-4-5";
+pub const DEFAULT_CODEX_PRIMARY_MODEL: &str = "gpt-5.6-sol";
+pub const DEFAULT_CODEX_SMALL_MODEL: &str = "gpt-5.6-luna";
 pub const DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL: &str = DEFAULT_PUBLIC_PRIMARY_MODEL;
 pub const DEFAULT_DEEPSEEK_PUBLIC_SMALL_MODEL: &str = DEFAULT_PUBLIC_SMALL_MODEL;
 pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 15_000;
@@ -292,8 +294,8 @@ impl Default for RouteProfileConfig {
         Self {
             id: "codex".into(),
             provider: Provider::Codex,
-            primary_model: "gpt-5.5".into(),
-            small_model: "gpt-5.4-mini".into(),
+            primary_model: DEFAULT_CODEX_PRIMARY_MODEL.into(),
+            small_model: DEFAULT_CODEX_SMALL_MODEL.into(),
             context_window: 272_000,
         }
     }
@@ -352,8 +354,8 @@ pub fn default_route_profiles() -> Vec<RouteProfileConfig> {
         RouteProfileConfig {
             id: "codex".into(),
             provider: Provider::Codex,
-            primary_model: "gpt-5.5".into(),
-            small_model: "gpt-5.4-mini".into(),
+            primary_model: DEFAULT_CODEX_PRIMARY_MODEL.into(),
+            small_model: DEFAULT_CODEX_SMALL_MODEL.into(),
             context_window: 272_000,
         },
         RouteProfileConfig {
@@ -366,8 +368,8 @@ pub fn default_route_profiles() -> Vec<RouteProfileConfig> {
         RouteProfileConfig {
             id: "custom-openai".into(),
             provider: Provider::CustomOpenAI,
-            primary_model: "gpt-5.5".into(),
-            small_model: "gpt-5.4-mini".into(),
+            primary_model: DEFAULT_CODEX_PRIMARY_MODEL.into(),
+            small_model: DEFAULT_CODEX_SMALL_MODEL.into(),
             context_window: 128_000,
         },
     ]
@@ -573,11 +575,36 @@ mod tests {
     fn default_routing_uses_stable_profiles() {
         let config = AppConfig::default();
         assert_eq!(config.routing.active_profile, "codex");
-        assert!(config
+        let codex = config
             .routing
             .profiles
             .iter()
-            .any(|profile| profile.id == "deepseek" && profile.provider == Provider::DeepSeek));
+            .find(|profile| profile.id == "codex")
+            .unwrap();
+        assert_eq!(codex.primary_model, DEFAULT_CODEX_PRIMARY_MODEL);
+        assert_eq!(codex.small_model, DEFAULT_CODEX_SMALL_MODEL);
+        assert_eq!(codex.context_window, 272_000);
+
+        let custom_openai = config
+            .routing
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "custom-openai")
+            .unwrap();
+        assert_eq!(custom_openai.primary_model, DEFAULT_CODEX_PRIMARY_MODEL);
+        assert_eq!(custom_openai.small_model, DEFAULT_CODEX_SMALL_MODEL);
+        assert_eq!(custom_openai.context_window, 128_000);
+
+        let deepseek = config
+            .routing
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "deepseek")
+            .unwrap();
+        assert_eq!(deepseek.provider, Provider::DeepSeek);
+        assert_eq!(deepseek.primary_model, "deepseek-v4-pro");
+        assert_eq!(deepseek.small_model, "deepseek-v4-flash");
+        assert_eq!(deepseek.context_window, 1_000_000);
         assert_eq!(
             config.claude.public_primary_model,
             DEFAULT_PUBLIC_PRIMARY_MODEL

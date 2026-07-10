@@ -52,7 +52,7 @@ pub fn translate_request(
         .transpose()?
         .filter(|tools| !tools.is_empty());
     let tool_choice = Some(translate_tool_choice(request.tool_choice.as_ref()));
-    let reasoning = reasoning_from_request(request);
+    let reasoning = reasoning_from_request(request, resolved);
     let include = reasoning
         .as_ref()
         .map(|_| vec!["reasoning.encrypted_content".to_string()]);
@@ -346,13 +346,13 @@ fn translate_tool_choice(choice: Option<&Value>) -> Value {
     }
 }
 
-fn reasoning_from_request(request: &AnthropicRequest) -> Option<Value> {
+fn reasoning_from_request(request: &AnthropicRequest, resolved: &ResolvedModel) -> Option<Value> {
     let effort = request
         .output_config
         .as_ref()
         .and_then(|value| value.get("effort"))
         .and_then(Value::as_str)
-        .and_then(map_effort)
+        .and_then(|effort| map_effort(effort, &resolved.upstream_model))
         .or_else(|| {
             request
                 .thinking
@@ -364,9 +364,10 @@ fn reasoning_from_request(request: &AnthropicRequest) -> Option<Value> {
     effort.map(|effort| json!({ "effort": effort }))
 }
 
-fn map_effort(effort: &str) -> Option<&'static str> {
+fn map_effort(effort: &str, upstream_model: &str) -> Option<&'static str> {
     match effort {
         "auto" => None,
+        "max" | "ultracode" if upstream_model.starts_with("gpt-5.6-") => Some("max"),
         "max" | "ultracode" => Some("xhigh"),
         "none" => Some("none"),
         "minimal" => Some("minimal"),
@@ -445,15 +446,19 @@ mod tests {
     use super::*;
     use crate::{config::Provider, model::ResolvedModel};
 
-    fn resolved() -> ResolvedModel {
+    fn resolved_for(model: &str) -> ResolvedModel {
         ResolvedModel {
             provider: Provider::Codex,
-            requested: "gpt-5.4".into(),
-            public_id: "gpt-5.4".into(),
-            upstream_model: "gpt-5.4".into(),
+            requested: model.into(),
+            public_id: model.into(),
+            upstream_model: model.into(),
             service_tier: None,
             context_window: 272_000,
         }
+    }
+
+    fn resolved() -> ResolvedModel {
+        resolved_for("gpt-5.4")
     }
 
     #[test]
@@ -781,7 +786,7 @@ mod tests {
     #[test]
     fn translates_reasoning_effort_values() {
         let mut req = AnthropicRequest {
-            model: "gpt-5.4".into(),
+            model: "gpt-5.6-sol".into(),
             max_tokens: Some(100),
             temperature: None,
             top_p: None,
@@ -795,26 +800,66 @@ mod tests {
             tools: None,
             tool_choice: None,
             metadata: None,
-            output_config: Some(json!({ "effort": "max" })),
+            output_config: None,
             thinking: None,
             extra: Default::default(),
         };
 
-        let translated = translate_request(&req, &resolved(), None).unwrap();
-        assert_eq!(translated.reasoning.as_ref().unwrap()["effort"], "xhigh");
-        assert_eq!(
-            translated.include.as_ref().unwrap(),
-            &vec!["reasoning.encrypted_content".to_string()]
-        );
+        for (input, expected) in [
+            ("auto", None),
+            ("none", Some("none")),
+            ("minimal", Some("minimal")),
+            ("low", Some("low")),
+            ("medium", Some("medium")),
+            ("high", Some("high")),
+            ("xhigh", Some("xhigh")),
+            ("max", Some("max")),
+            ("ultracode", Some("max")),
+            ("ultra", None),
+            ("unknown", None),
+        ] {
+            req.output_config = Some(json!({ "effort": input }));
+            let translated = translate_request(&req, &resolved_for("gpt-5.6-sol"), None).unwrap();
 
-        req.output_config = Some(json!({ "effort": "auto" }));
-        let translated = translate_request(&req, &resolved(), None).unwrap();
-        assert!(translated.reasoning.is_none());
-        assert!(translated.include.is_none());
+            assert_eq!(
+                translated
+                    .reasoning
+                    .as_ref()
+                    .and_then(|reasoning| reasoning.get("effort"))
+                    .and_then(Value::as_str),
+                expected,
+                "input effort {input}"
+            );
+            assert_eq!(
+                translated.include.is_some(),
+                expected.is_some(),
+                "reasoning continuity for {input}"
+            );
+        }
+
+        for input in ["max", "ultracode"] {
+            req.output_config = Some(json!({ "effort": input }));
+            let translated = translate_request(&req, &resolved_for("gpt-5.5"), None).unwrap();
+            assert_eq!(
+                translated.reasoning.as_ref().unwrap()["effort"],
+                "xhigh",
+                "legacy input effort {input}"
+            );
+        }
+
+        for model in ["gpt-5.6-terra", "gpt-5.6-luna"] {
+            req.output_config = Some(json!({ "effort": "max" }));
+            let translated = translate_request(&req, &resolved_for(model), None).unwrap();
+            assert_eq!(
+                translated.reasoning.as_ref().unwrap()["effort"],
+                "max",
+                "GPT-5.6 family model {model}"
+            );
+        }
 
         req.output_config = None;
         req.thinking = Some(json!({ "type": "enabled", "budget_tokens": 4096 }));
-        let translated = translate_request(&req, &resolved(), None).unwrap();
+        let translated = translate_request(&req, &resolved_for("gpt-5.6-sol"), None).unwrap();
         assert_eq!(translated.reasoning.as_ref().unwrap()["effort"], "low");
     }
 

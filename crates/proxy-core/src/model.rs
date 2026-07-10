@@ -1,5 +1,8 @@
 use crate::{
-    config::{Provider, DEFAULT_PUBLIC_PRIMARY_MODEL, DEFAULT_PUBLIC_SMALL_MODEL},
+    config::{
+        Provider, DEFAULT_CODEX_PRIMARY_MODEL, DEFAULT_CODEX_SMALL_MODEL,
+        DEFAULT_PUBLIC_PRIMARY_MODEL, DEFAULT_PUBLIC_SMALL_MODEL,
+    },
     error::{ProxyError, Result},
     routing::RouteSnapshot,
 };
@@ -200,7 +203,7 @@ impl ModelRegistry {
         if provider != Provider::DeepSeek || !model.starts_with("gpt-") {
             return None;
         }
-        let target = if model.contains("mini") {
+        let target = if model.contains("mini") || model == DEFAULT_CODEX_SMALL_MODEL {
             "deepseek-v4-flash"
         } else {
             "deepseek-v4-pro"
@@ -224,15 +227,29 @@ impl ModelRegistry {
     }
 
     pub fn default_small_fast(&self, provider: Provider) -> Option<&ModelProfile> {
-        self.profiles
-            .iter()
-            .find(|profile| profile.provider == provider && profile.default_small_fast)
+        let preferred = if provider == Provider::Codex {
+            self.find_profile(provider, DEFAULT_CODEX_SMALL_MODEL)
+        } else {
+            None
+        };
+        preferred.or_else(|| {
+            self.profiles
+                .iter()
+                .find(|profile| profile.provider == provider && profile.default_small_fast)
+        })
     }
 
     fn default_primary(&self, provider: Provider) -> Option<&ModelProfile> {
-        self.profiles
-            .iter()
-            .find(|profile| profile.provider == provider && !profile.default_small_fast)
+        let preferred = if provider == Provider::Codex {
+            self.find_profile(provider, DEFAULT_CODEX_PRIMARY_MODEL)
+        } else {
+            None
+        };
+        preferred.or_else(|| {
+            self.profiles
+                .iter()
+                .find(|profile| profile.provider == provider && !profile.default_small_fast)
+        })
     }
 }
 
@@ -272,6 +289,30 @@ pub fn default_profiles() -> Vec<ModelProfile> {
     vec![
         ModelProfile {
             provider: Provider::Codex,
+            id: "gpt-5.6-sol".into(),
+            upstream_model: "gpt-5.6-sol".into(),
+            context_window: 272_000,
+            supports_fast: true,
+            default_small_fast: false,
+        },
+        ModelProfile {
+            provider: Provider::Codex,
+            id: "gpt-5.6-terra".into(),
+            upstream_model: "gpt-5.6-terra".into(),
+            context_window: 272_000,
+            supports_fast: true,
+            default_small_fast: false,
+        },
+        ModelProfile {
+            provider: Provider::Codex,
+            id: "gpt-5.6-luna".into(),
+            upstream_model: "gpt-5.6-luna".into(),
+            context_window: 272_000,
+            supports_fast: true,
+            default_small_fast: true,
+        },
+        ModelProfile {
+            provider: Provider::Codex,
             id: "gpt-5.5".into(),
             upstream_model: "gpt-5.5".into(),
             context_window: 272_000,
@@ -292,7 +333,7 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             upstream_model: "gpt-5.4-mini".into(),
             context_window: 272_000,
             supports_fast: true,
-            default_small_fast: true,
+            default_small_fast: false,
         },
         ModelProfile {
             provider: Provider::Codex,
@@ -376,15 +417,15 @@ mod tests {
     fn resolves_context_hint_and_fast_suffix() {
         let registry = ModelRegistry::from_profiles(default_profiles());
         let resolved = registry
-            .resolve(Provider::Codex, "gpt-5.4-fast[1m]")
+            .resolve(Provider::Codex, "gpt-5.6-terra-fast[1m]")
             .unwrap();
-        assert_eq!(resolved.upstream_model, "gpt-5.4");
+        assert_eq!(resolved.upstream_model, "gpt-5.6-terra");
         assert_eq!(resolved.service_tier.as_deref(), Some("priority"));
     }
 
     #[test]
     fn strips_context_hint() {
-        assert_eq!(strip_context_hint("gpt-5.4[1m]"), "gpt-5.4");
+        assert_eq!(strip_context_hint("gpt-5.6-sol[1m]"), "gpt-5.6-sol");
     }
 
     #[test]
@@ -405,15 +446,22 @@ mod tests {
     fn deepseek_accepts_stale_codex_model_defaults() {
         let registry = ModelRegistry::from_profiles(default_profiles());
 
-        let primary = registry.resolve(Provider::DeepSeek, "gpt-5.5[1m]").unwrap();
+        let primary = registry
+            .resolve(Provider::DeepSeek, "gpt-5.6-sol[1m]")
+            .unwrap();
         assert_eq!(primary.upstream_model, "deepseek-v4-pro");
         assert_eq!(primary.public_id, "deepseek-v4-pro");
 
         let small = registry
-            .resolve(Provider::DeepSeek, "gpt-5.4-mini[1m]")
+            .resolve(Provider::DeepSeek, "gpt-5.6-luna[1m]")
             .unwrap();
         assert_eq!(small.upstream_model, "deepseek-v4-flash");
         assert_eq!(small.public_id, "deepseek-v4-flash");
+
+        let legacy_small = registry
+            .resolve(Provider::DeepSeek, "gpt-5.4-mini[1m]")
+            .unwrap();
+        assert_eq!(legacy_small.upstream_model, "deepseek-v4-flash");
     }
 
     #[test]
@@ -423,7 +471,7 @@ mod tests {
         let codex = registry
             .resolve(Provider::Codex, DEFAULT_PUBLIC_PRIMARY_MODEL)
             .unwrap();
-        assert_eq!(codex.upstream_model, "gpt-5.5");
+        assert_eq!(codex.upstream_model, DEFAULT_CODEX_PRIMARY_MODEL);
 
         let deepseek = registry
             .resolve(Provider::DeepSeek, DEFAULT_PUBLIC_SMALL_MODEL)
@@ -470,8 +518,8 @@ mod tests {
         let route = RouteSnapshot {
             id: "codex".into(),
             provider: Provider::Codex,
-            primary_model: "gpt-5.5".into(),
-            small_model: "gpt-5.4-mini".into(),
+            primary_model: DEFAULT_CODEX_PRIMARY_MODEL.into(),
+            small_model: DEFAULT_CODEX_SMALL_MODEL.into(),
             context_window: 272_000,
         };
 
@@ -483,7 +531,7 @@ mod tests {
                 "claude-opus-4-8",
             )
             .unwrap();
-        assert_eq!(opus.upstream_model, "gpt-5.5");
+        assert_eq!(opus.upstream_model, DEFAULT_CODEX_PRIMARY_MODEL);
 
         let sonnet = registry
             .resolve_for_route(
@@ -493,7 +541,7 @@ mod tests {
                 "claude-sonnet-4-5",
             )
             .unwrap();
-        assert_eq!(sonnet.upstream_model, "gpt-5.5");
+        assert_eq!(sonnet.upstream_model, DEFAULT_CODEX_PRIMARY_MODEL);
 
         let haiku = registry
             .resolve_for_route(
@@ -503,7 +551,42 @@ mod tests {
                 "claude-haiku-4-5",
             )
             .unwrap();
-        assert_eq!(haiku.upstream_model, "gpt-5.4-mini");
+        assert_eq!(haiku.upstream_model, DEFAULT_CODEX_SMALL_MODEL);
+
+        let opus_fast = registry
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                "claude-opus-4-8-fast[1m]",
+            )
+            .unwrap();
+        assert_eq!(opus_fast.upstream_model, DEFAULT_CODEX_PRIMARY_MODEL);
+        assert_eq!(opus_fast.service_tier.as_deref(), Some("priority"));
+
+        let haiku_fast = registry
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                "claude-haiku-4-5-fast[1m]",
+            )
+            .unwrap();
+        assert_eq!(haiku_fast.upstream_model, DEFAULT_CODEX_SMALL_MODEL);
+        assert_eq!(haiku_fast.service_tier.as_deref(), Some("priority"));
+    }
+
+    #[test]
+    fn exposes_all_gpt_5_6_family_models() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+
+        for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let resolved = registry.resolve(Provider::Codex, model).unwrap();
+            assert_eq!(resolved.upstream_model, model);
+            assert!(registry
+                .supported_models(Provider::Codex)
+                .contains(&format!("{model}-fast")));
+        }
     }
 
     #[test]
@@ -549,6 +632,27 @@ mod tests {
         assert!(profiles
             .iter()
             .any(|profile| profile.provider == Provider::Codex && profile.id == "custom"));
+    }
+
+    #[test]
+    fn merged_legacy_registry_prefers_gpt_5_6_alias_defaults() {
+        let mut profiles = default_profiles()
+            .into_iter()
+            .filter(|profile| !profile.id.starts_with("gpt-5.6-"))
+            .collect::<Vec<_>>();
+
+        assert!(merge_missing_default_profiles(&mut profiles));
+        let registry = ModelRegistry::from_profiles(profiles);
+
+        let primary = registry
+            .resolve(Provider::Codex, DEFAULT_PUBLIC_PRIMARY_MODEL)
+            .unwrap();
+        assert_eq!(primary.upstream_model, DEFAULT_CODEX_PRIMARY_MODEL);
+
+        let small = registry
+            .resolve(Provider::Codex, DEFAULT_PUBLIC_SMALL_MODEL)
+            .unwrap();
+        assert_eq!(small.upstream_model, DEFAULT_CODEX_SMALL_MODEL);
     }
 
     #[test]

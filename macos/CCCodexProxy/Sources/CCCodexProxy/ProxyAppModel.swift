@@ -4,6 +4,8 @@ import SwiftUI
 
 private let claudePublicPrimaryModel = "claude-opus-4-8"
 private let claudePublicSmallModel = "claude-haiku-4-5"
+private let defaultOpenAIPrimaryModel = "gpt-5.6-sol[1m]"
+private let defaultOpenAISmallModel = "gpt-5.6-luna[1m]"
 
 @MainActor
 final class ProxyAppModel: ObservableObject {
@@ -35,8 +37,8 @@ final class ProxyAppModel: ObservableObject {
     @Published var customOpenAIBaseURL = ""
     @Published var customOpenAIAPIKey = ""
     @Published var customOpenAIProtocol = "responses"
-    @Published var model = "gpt-5.5[1m]"
-    @Published var smallModel = "gpt-5.4-mini[1m]"
+    @Published var model = defaultOpenAIPrimaryModel
+    @Published var smallModel = defaultOpenAISmallModel
     @Published var port = 18765
     @Published var autoCompactWindow = 272_000
 
@@ -553,12 +555,12 @@ final class ProxyAppModel: ObservableObject {
             smallModel = "deepseek-v4-flash"
             autoCompactWindow = 1_000_000
         } else if provider == "custom-openai" {
-            model = "gpt-5.5[1m]"
-            smallModel = "gpt-5.4-mini[1m]"
+            model = defaultOpenAIPrimaryModel
+            smallModel = defaultOpenAISmallModel
             autoCompactWindow = 128_000
         } else {
-            model = "gpt-5.5[1m]"
-            smallModel = "gpt-5.4-mini[1m]"
+            model = defaultOpenAIPrimaryModel
+            smallModel = defaultOpenAISmallModel
             autoCompactWindow = 272_000
         }
     }
@@ -579,20 +581,20 @@ final class ProxyAppModel: ObservableObject {
             }
         } else if provider == "custom-openai" {
             if primary.hasPrefix("deepseek-") {
-                model = "gpt-5.5[1m]"
+                model = defaultOpenAIPrimaryModel
             }
             if small.hasPrefix("deepseek-") {
-                smallModel = "gpt-5.4-mini[1m]"
+                smallModel = defaultOpenAISmallModel
             }
             if autoCompactWindow == 272_000 || autoCompactWindow == 1_000_000 {
                 autoCompactWindow = 128_000
             }
         } else {
             if primary.hasPrefix("deepseek-") {
-                model = "gpt-5.5[1m]"
+                model = defaultOpenAIPrimaryModel
             }
             if small.hasPrefix("deepseek-") {
-                smallModel = "gpt-5.4-mini[1m]"
+                smallModel = defaultOpenAISmallModel
             }
             if autoCompactWindow == 1_000_000 || autoCompactWindow == 128_000 {
                 autoCompactWindow = 272_000
