@@ -1,8 +1,8 @@
 class CcCodexProxy < Formula
   desc "Local Claude Code proxy for ChatGPT Codex, DeepSeek, and custom OpenAI endpoints"
   homepage "https://github.com/soulforger0/cc-codex-proxy"
-  url "https://github.com/soulforger0/cc-codex-proxy/archive/refs/tags/v0.5.0.tar.gz"
-  sha256 "ad17d0ff610202103d91035ed917db8df7410594caeeacde4162adb97aef1589"
+  url "https://github.com/soulforger0/cc-codex-proxy/archive/refs/tags/v0.5.1.tar.gz"
+  sha256 "PLACEHOLDER"
   license "MIT"
 
   depends_on "rust" => :build

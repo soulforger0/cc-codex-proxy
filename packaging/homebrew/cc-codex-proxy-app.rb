@@ -1,6 +1,6 @@
 cask "cc-codex-proxy-app" do
-  version "0.5.0"
-  sha256 "94b10d5a7b1090f029c548131d8a5eb35f2e0efdf48140bf0d38cad41c71e7af"
+  version "0.5.1"
+  sha256 "PLACEHOLDER"
 
   url "https://github.com/soulforger0/cc-codex-proxy/releases/download/v#{version}/CCCodexProxy-#{version}-macOS.dmg"
   name "CC Codex Proxy"

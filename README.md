@@ -82,12 +82,10 @@ flowchart LR
 | Transport fallback | In `auto` mode, tries Codex WebSocket first and falls back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
-## What's New In 0.5.0
+## What's New In 0.5.1
 
-- Startup now waits for the bundled helper to pass its `/healthz` check before the app reports **Running**, with clearer status for preflight failures and unexpected helper exits.
-- The **Logs** window combines launcher and proxy events in a searchable, newest-first view with source/severity filters plus copy and reveal actions.
-- Codex and custom OpenAI routes now default to the GPT-5.6 model family: `gpt-5.6-sol` for primary traffic and `gpt-5.6-luna` for small/subagent traffic, with `gpt-5.6-terra` available for explicit selection.
-- GPT-5.6 requests preserve `max` reasoning effort, while older model families continue to receive the compatible `xhigh` value.
+- Proxy startup and shim-repair checks now ignore Claude Code background pty hosts, spare background workers, and daemon processes instead of treating them as active interactive sessions.
+- Real foreground Claude Code sessions still block startup and repair, preserving the guard against switching backend assumptions mid-session.
 
 ## Compatibility
 
@@ -169,7 +167,7 @@ Normal app launches pass proxy routing through the child process environment and
 
 For Claude Code background agents, the shim first ensures Claude's background daemon is reachable using only managed proxy environment variables. Actual foreground and background sessions still receive inline proxy settings, which lets daemon-respawned jobs keep routing through CC Codex Proxy instead of falling back to native Claude auth.
 
-The app also refuses to start the proxy while Claude Code is already running. Close existing sessions first, then start the proxy and open a new session so routing is consistent from the beginning.
+The app also refuses to start the proxy while an interactive Claude Code session is already running. Managed background pty hosts, spare workers, and Claude's daemon process are excluded from this check so they do not block startup or shim repair. Close existing interactive sessions first, then start the proxy and open a new session so routing is consistent from the beginning.
 
 For requests that carry `x-claude-code-session-id`, the proxy persists a bounded route pin so long-idle sessions continue using the provider/profile selected on their first request, even after profile switches or helper restarts. On the Codex route, it also persists a hashed upstream session-state record so generated Codex session IDs and reset generations survive helper restarts without storing raw Claude Code session IDs. This is route/cache continuity only: the proxy does not replay or resume a partially streamed model response after bytes have already been sent to Claude Code.
 

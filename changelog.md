@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-12 AEST - v0.5.1 background helper session detection
+
+- Excluded Claude Code background pty hosts, spare background workers, and daemon processes from live-session detection so they no longer block proxy startup or shim repair.
+- Kept the startup guard for real foreground Claude Code sessions so active sessions cannot silently switch backend assumptions.
+- Updated README, architecture notes, package/app versions, and pre-release Homebrew metadata for `v0.5.1`.
+
 ## 2026-07-10 AEST - v0.5.0 startup health, combined logs, and GPT-5.6 defaults
 
 - Added startup preflight diagnostics and `/healthz` polling so the macOS app reports Running only after the bundled proxy helper is ready, and surfaces early exits with actionable status.
