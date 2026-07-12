@@ -609,7 +609,8 @@ fn parse_live_claude_sessions(ps_output: &str, current_pid: u32) -> Vec<LiveClau
 }
 
 fn is_live_claude_code_session(command: &str) -> bool {
-    let Some(program) = command.split_whitespace().next() else {
+    let mut parts = command.split_whitespace();
+    let Some(program) = parts.next() else {
         return false;
     };
     let Some(file_name) = Path::new(program)
@@ -618,13 +619,18 @@ fn is_live_claude_code_session(command: &str) -> bool {
     else {
         return false;
     };
-    matches!(
+    let is_claude = matches!(
         file_name.to_ascii_lowercase().as_str(),
         "claude" | "claude.exe"
-    ) && !command
-        .split_whitespace()
-        .skip(1)
-        .any(|arg| arg == "--bg-pty-host")
+    );
+    if !is_claude {
+        return false;
+    }
+
+    let args = parts.collect::<Vec<_>>();
+    !args
+        .iter()
+        .any(|arg| matches!(*arg, "--bg-pty-host" | "--bg-spare"))
 }
 
 fn truncate_command(command: &str) -> String {
@@ -960,11 +966,12 @@ mod tests {
     }
 
     #[test]
-    fn live_session_parser_ignores_claude_background_pty_hosts() {
+    fn live_session_parser_ignores_claude_background_helpers() {
         let output = r#"
           10 /Users/me/.local/bin/claude
           11 /Users/me/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude --bg-pty-host /tmp/cc-daemon-501/session/pty.sock 162 66
           12 /Users/me/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --continue
+          13 /Users/me/.local/bin/claude bg-spare --bg-spare /tmp/cc-daemon-501/bb6ac682/spare/74f016fa.claim.sock
         "#;
 
         let sessions = parse_live_claude_sessions(output, 99);
