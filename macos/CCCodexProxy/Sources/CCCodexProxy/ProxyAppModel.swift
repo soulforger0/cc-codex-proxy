@@ -46,6 +46,7 @@ final class ProxyAppModel: ObservableObject {
     @Published var autoCompactWindow = 372_000
     @Published private(set) var logEntries: [ProxyLogEntry] = []
     @Published private(set) var isRefreshingLogs = false
+    @Published private(set) var isRefreshing = false
     @Published private(set) var logLoadError: String?
     @Published private(set) var lastStartupFailure: String?
 
@@ -58,6 +59,9 @@ final class ProxyAppModel: ObservableObject {
     private var logWindow: NSWindow?
 
     func refresh() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
         await refreshProxyStatus(updateLastMessage: true)
         await checkAuthStatus()
         await refreshClaudeSettingsPreview()
@@ -114,6 +118,7 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func startProxy() async {
+        guard !isStartingProxy else { return }
         if let proxyProcess, proxyProcess.isRunning {
             lastMessage = "Proxy is already running."
             return
@@ -149,6 +154,7 @@ final class ProxyAppModel: ObservableObject {
                 lastStartupFailure = detail.isEmpty ? message : detail
                 lastMessage = message
                 statusText = "Start blocked"
+                announceAccessibility("Proxy failed to start. Close Claude Code sessions and try again.")
                 recordAppEvent(level: "ERROR", message: "Proxy start blocked by Claude Code session preflight", detail: detail)
                 showLiveClaudeSessionAlert(detail: detail)
                 return
@@ -191,6 +197,7 @@ final class ProxyAppModel: ObservableObject {
                     ? "The helper did not pass its health check within 5 seconds."
                     : detail
                 lastMessage = "Proxy failed to start. Open Logs for diagnostics."
+                announceAccessibility("Proxy failed to start")
                 recordAppEvent(
                     level: "ERROR",
                     message: "Proxy helper failed its startup health check",
@@ -202,6 +209,7 @@ final class ProxyAppModel: ObservableObject {
             isRunning = true
             statusText = "Running on 127.0.0.1:\(port)"
             lastMessage = "Proxy started and passed its health check."
+            announceAccessibility("Proxy started")
             recordAppEvent(
                 level: "INFO",
                 message: "Proxy startup health check passed",
@@ -223,6 +231,7 @@ final class ProxyAppModel: ObservableObject {
             applyStoppedTransportStatus()
             lastStartupFailure = detail
             lastMessage = "Failed to start proxy: \(detail)"
+            announceAccessibility("Proxy failed to start")
             recordAppEvent(level: "ERROR", message: "Failed to launch proxy helper", detail: detail)
         }
     }
@@ -240,6 +249,7 @@ final class ProxyAppModel: ObservableObject {
         statusText = "Stopped"
         applyStoppedTransportStatus()
         lastMessage = "Proxy stopped. New claude launches will show an error while this app remains open."
+        announceAccessibility("Proxy stopped")
     }
 
     func login() async {
@@ -258,9 +268,11 @@ final class ProxyAppModel: ObservableObject {
             let output = try await runCLI(["auth", "login"])
             applyAuthStatus(from: output, authenticated: true)
             lastMessage = successMessage(from: output)
+            announceAccessibility("Login successful")
             await refreshProxyStatus(updateLastMessage: false)
         } catch {
             lastMessage = "Login failed: \(error.localizedDescription)"
+            announceAccessibility("Login failed")
             isAuthenticated = false
             authStatusText = "OAuth not verified"
             authDetailText = "Login did not complete. The local auth file was not updated."
@@ -283,9 +295,11 @@ final class ProxyAppModel: ObservableObject {
             )
             deepSeekAPIKey = ""
             lastMessage = "DeepSeek API key saved."
+            announceAccessibility("API key saved")
             await checkAuthStatus()
         } catch {
             lastMessage = "DeepSeek key save failed: \(error.localizedDescription)"
+            announceAccessibility("API key save failed")
             await checkAuthStatus()
         }
     }
@@ -306,9 +320,11 @@ final class ProxyAppModel: ObservableObject {
             )
             customOpenAIAPIKey = ""
             lastMessage = "Custom OpenAI API key saved."
+            announceAccessibility("API key saved")
             await checkAuthStatus()
         } catch {
             lastMessage = "Custom OpenAI key save failed: \(error.localizedDescription)"
+            announceAccessibility("API key save failed")
             await checkAuthStatus()
         }
     }
@@ -373,6 +389,7 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func installClaudeSettings() async {
+        guard !isInstallingClaudeSettings, !isRestoringClaudeSettings else { return }
         replaceCrossProviderModelDefaults()
         isInstallingClaudeSettings = true
         defer { isInstallingClaudeSettings = false }
@@ -382,9 +399,11 @@ final class ProxyAppModel: ObservableObject {
                 "claude",
                 "install-settings"
             ] + claudeSettingsArguments)
+            announceAccessibility("Settings installed")
             await refreshClaudeSettingsPreview()
         } catch {
             lastMessage = "Settings install failed: \(error.localizedDescription)"
+            announceAccessibility("Settings install failed")
             await refreshClaudeSettingsPreview()
         }
     }
@@ -403,6 +422,9 @@ final class ProxyAppModel: ObservableObject {
             ] + claudeSettingsArguments)
             let message = output.trimmingCharacters(in: .whitespacesAndNewlines)
             claudeShimStatusText = firstLine(from: message) ?? "Claude command shim installed."
+            if updateLastMessage {
+                announceAccessibility("Claude command shim repaired")
+            }
             if updateLastMessage {
                 lastMessage = message
             }
@@ -431,14 +453,17 @@ final class ProxyAppModel: ObservableObject {
     }
 
     func restoreClaudeSettings() async {
+        guard !isInstallingClaudeSettings, !isRestoringClaudeSettings else { return }
         isRestoringClaudeSettings = true
         defer { isRestoringClaudeSettings = false }
 
         do {
             lastMessage = try await runCLI(["claude", "restore-settings"])
+            announceAccessibility("Settings restored")
             await refreshClaudeSettingsPreview()
         } catch {
             lastMessage = "Settings restore failed: \(error.localizedDescription)"
+            announceAccessibility("Settings restore failed")
             await refreshClaudeSettingsPreview()
         }
     }

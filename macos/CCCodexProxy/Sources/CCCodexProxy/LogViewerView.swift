@@ -3,10 +3,16 @@ import SwiftUI
 
 struct LogViewerView: View {
     @EnvironmentObject private var model: ProxyAppModel
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
     @State private var query = ""
     @State private var source: ProxyLogSource = .all
     @State private var level: LogLevelFilter = .all
     @State private var copied = false
+
+    private var codeSurface: Color {
+        reduceTransparency ? Color(nsColor: .textBackgroundColor) : AppTheme.codeSurface
+    }
 
     private var filteredEntries: [ProxyLogEntry] {
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -40,7 +46,7 @@ struct LogViewerView: View {
     private var header: some View {
         HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: AppTheme.radiusIconTile, style: .continuous)
                     .fill(AppTheme.subtleFill)
                 Image(systemName: "doc.text.magnifyingglass")
                     .font(.system(size: 17, weight: .semibold))
@@ -83,7 +89,11 @@ struct LogViewerView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
-        .background(.regularMaterial)
+        .background(
+            reduceTransparency
+                ? AnyShapeStyle(Color(nsColor: .windowBackgroundColor))
+                : AnyShapeStyle(.regularMaterial)
+        )
     }
 
     private var statusPill: some View {
@@ -102,52 +112,43 @@ struct LogViewerView: View {
     }
 
     private var filters: some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search messages, details, or targets", text: $query)
-                    .textFieldStyle(.plain)
-                if !query.isEmpty {
-                    Button {
-                        query = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Clear search")
-                }
+        ViewThatFits(in: .horizontal) {
+            filterRow
+            VStack(alignment: .leading, spacing: 8) {
+                searchField.frame(maxWidth: .infinity)
+                HStack(spacing: 8) { sourcePicker; levelPicker }
             }
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(AppTheme.insetSurface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(AppTheme.hairline, lineWidth: 1)
-            )
-
-            Picker("Source", selection: $source) {
-                ForEach(ProxyLogSource.allCases) { source in
-                    Text(source.rawValue).tag(source)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 190)
-
-            Picker("Level", selection: $level) {
-                ForEach(LogLevelFilter.allCases) { level in
-                    Text(level.rawValue).tag(level)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 255)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Search messages, details, or targets", text: $query).textFieldStyle(.plain)
+            if !query.isEmpty {
+                Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(.plain).accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 10).frame(height: 30)
+        .background(RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous).fill(AppTheme.insetSurface))
+        .overlay(RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous).stroke(AppTheme.hairline, lineWidth: 1))
+    }
+
+    private var sourcePicker: some View {
+        Picker("Source", selection: $source) { ForEach(ProxyLogSource.allCases) { source in Text(source.rawValue).tag(source) } }
+            .pickerStyle(.segmented).frame(minWidth: 150, idealWidth: 190, maxWidth: .infinity)
+    }
+
+    private var levelPicker: some View {
+        Picker("Level", selection: $level) { ForEach(LogLevelFilter.allCases) { level in Text(level.rawValue).tag(level) } }
+            .pickerStyle(.segmented).frame(minWidth: 180, idealWidth: 255, maxWidth: .infinity)
+    }
+
+    private var filterRow: some View {
+        HStack(spacing: 12) { searchField; sourcePicker; levelPicker }
     }
 
     @ViewBuilder
@@ -188,11 +189,11 @@ struct LogViewerView: View {
         }
         .padding(10)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.radiusControl, style: .continuous)
                 .fill(tint.opacity(0.07))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.radiusControl, style: .continuous)
                 .stroke(tint.opacity(0.18), lineWidth: 1)
         )
         .padding(.horizontal, 18)
@@ -233,7 +234,7 @@ struct LogViewerView: View {
                 }
             }
         }
-        .background(AppTheme.codeSurface)
+        .background(codeSurface)
         .overlay(
             Rectangle()
                 .stroke(AppTheme.hairline, lineWidth: 1)
@@ -272,6 +273,7 @@ struct LogViewerView: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        announceAccessibility("Logs copied")
         copied = true
         Task {
             try? await Task.sleep(nanoseconds: 1_400_000_000)
@@ -281,6 +283,7 @@ struct LogViewerView: View {
 }
 
 private struct LogEntryRow: View {
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
     let entry: ProxyLogEntry
 
     var body: some View {
@@ -290,8 +293,16 @@ private struct LogEntryRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 62, alignment: .leading)
 
-            Text(entry.level)
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
+            HStack(spacing: 3) {
+                if differentiateWithoutColor {
+                    Image(systemName: levelSymbol)
+                        .accessibilityHidden(true)
+                }
+                Text(entry.level)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(entry.level)
+                .font(.caption2.monospaced().weight(.bold))
                 .foregroundStyle(levelColor)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
@@ -313,7 +324,7 @@ private struct LogEntryRow: View {
                 }
                 if !entry.detail.isEmpty {
                     Text(entry.detail)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                         .lineLimit(8)
                         .textSelection(.enabled)
@@ -329,6 +340,13 @@ private struct LogEntryRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
+    }
+
+    private var levelSymbol: String {
+        if entry.level.contains("ERROR") { return "exclamationmark.circle.fill" }
+        if entry.level.contains("WARN") { return "exclamationmark.triangle.fill" }
+        if entry.level.contains("DEBUG") || entry.level.contains("TRACE") { return "ladybug.fill" }
+        return "info.circle.fill"
     }
 
     private var levelColor: Color {

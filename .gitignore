@@ -4,6 +4,7 @@
 /.swiftpm/
 /macos/CCCodexProxy/.build/
 /dist/
+/.claude/worktrees/
 *.xcuserstate
 *.xccheckout
 *.moved-aside

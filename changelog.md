@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-07-12 AEST - v1.1.0 macOS UI and accessibility polish
+
+- Refined the native menu bar app with adaptive settings and log layouts, semantic typography, cohesive materials, and consistent design tokens.
+- Scoped motion to purposeful disclosures, made preview navigation immediate, improved button press response, and added Reduce Motion and Reduce Transparency behavior.
+- Added VoiceOver announcements for meaningful operation outcomes and strengthened state differentiation for accessibility preferences.
+- Prevented duplicate or conflicting asynchronous actions and added contextual startup recovery with direct Retry and Open Logs actions.
+
 ## 2026-07-12 AEST - v1.0.0 unified GPT-5.6 Responses
 
 - Added unified Sol/Terra/Luna routing for Opus, Sonnet, and Haiku/subagents across ChatGPT Codex and custom OpenAI endpoints.

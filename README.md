@@ -82,12 +82,12 @@ flowchart LR
 | Transport fallback | In `auto` mode, both OpenAI-backed providers try WebSocket first and fall back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
-## What's New In 1.0.0
+## What's New In 1.1.0
 
-- Added three-tier routing: Opus uses `gpt-5.6-sol`, Sonnet uses `gpt-5.6-terra`, and Haiku/subagents use `gpt-5.6-luna` for both OpenAI-backed providers.
-- Updated GPT-5.6 traffic to the current Codex Responses Lite HTTP/WebSocket contract.
-- Unified Codex and custom OpenAI transport, translation, stream, and error behavior.
-- Removed custom Chat Completions support. Existing users must configure a Responses-compatible URL and remove the obsolete protocol setting.
+- Polished the native macOS interface with adaptive settings and log layouts, semantic typography, and a more cohesive material and spacing system.
+- Added accessibility-aware motion, transparency, contrast, and VoiceOver feedback while keeping frequent interactions immediate.
+- Prevented overlapping startup, refresh, install, and restore operations and added direct recovery actions when startup fails.
+- Refined button response and disclosure motion while preserving a crisp, native developer-tool feel.
 
 ## Compatibility
 

@@ -1,9 +1,39 @@
 import SwiftUI
+import AppKit
+
+@MainActor
+func announceAccessibility(_ message: String) {
+    let message = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !message.isEmpty else { return }
+    NSAccessibility.post(
+        element: NSApplication.shared,
+        notification: .announcementRequested,
+        userInfo: [NSAccessibility.NotificationUserInfoKey.announcement: message]
+    )
+}
 
 struct ContentView: View {
     @EnvironmentObject private var model: ProxyAppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var settingsPreviewTab = ClaudeSettingsPreviewTab.changes
     @State private var showAdvancedClaudeSettings = false
+
+    private var disclosureTransition: AnyTransition {
+        reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top))
+    }
+
+    private var keyEditorAnimation: Animation {
+        AppTheme.disclosureMotion
+    }
+
+    private var insetSurface: Color {
+        reduceTransparency ? Color(nsColor: .textBackgroundColor) : AppTheme.insetSurface
+    }
+
+    private var codeSurface: Color {
+        reduceTransparency ? Color(nsColor: .textBackgroundColor) : AppTheme.codeSurface
+    }
 
     var body: some View {
         ZStack {
@@ -22,19 +52,6 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(AppTheme.motion, value: model.isRunning)
-        .animation(AppTheme.motion, value: model.isStartingProxy)
-        .animation(AppTheme.motion, value: model.isAuthenticated)
-        .animation(AppTheme.motion, value: model.isLoggingIn)
-        .animation(AppTheme.motion, value: model.isCheckingAuthStatus)
-        .animation(AppTheme.motion, value: model.isInstallingClaudeShim)
-        .animation(AppTheme.motion, value: model.isSavingDeepSeekAPIKey)
-        .animation(AppTheme.motion, value: model.isSavingCustomOpenAIAPIKey)
-        .animation(AppTheme.motion, value: model.isDeepSeekKeyInputExpanded)
-        .animation(AppTheme.motion, value: model.isCustomOpenAIKeyInputExpanded)
-        .animation(AppTheme.motion, value: model.provider)
-        .animation(AppTheme.motion, value: settingsPreviewTab)
-        .animation(AppTheme.motion, value: showAdvancedClaudeSettings)
     }
 
     private var header: some View {
@@ -73,16 +90,18 @@ struct ContentView: View {
         }
         .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.largeRadius, style: .continuous)
-                .fill(.regularMaterial)
+            RoundedRectangle(cornerRadius: AppTheme.radiusHero, style: .continuous)
+                .fill(reduceTransparency ? AnyShapeStyle(Color(nsColor: .windowBackgroundColor)) : AnyShapeStyle(.regularMaterial))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.largeRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.radiusHero, style: .continuous)
                 .fill(AppTheme.panelHighlight)
                 .blendMode(.plusLighter)
+                .opacity(reduceTransparency ? 0 : 1)
+                .allowsHitTesting(false)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.largeRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.radiusHero, style: .continuous)
                 .stroke(AppTheme.hairline, lineWidth: 1)
         )
         .accessibilityElement(children: .combine)
@@ -153,9 +172,10 @@ struct ContentView: View {
                 GridRow {
                     actionButton(
                         title: "Refresh",
-                        detail: "Check status",
-                        systemImage: "arrow.clockwise",
-                        tint: AppTheme.accent
+                        detail: model.isRefreshing ? "Checking status" : "Check status",
+                        systemImage: model.isRefreshing ? "hourglass" : "arrow.clockwise",
+                        tint: AppTheme.accent,
+                        isDisabled: model.isRefreshing
                     ) {
                         Task { await model.refresh() }
                     }
@@ -171,25 +191,53 @@ struct ContentView: View {
                 }
             }
 
-            if !model.lastMessage.isEmpty {
-                Label(
-                    model.lastMessage,
-                    systemImage: model.lastStartupFailure == nil ? "info.circle" : "exclamationmark.triangle.fill"
-                )
-                .font(.caption)
-                .foregroundStyle(model.lastStartupFailure == nil ? Color.secondary : AppTheme.danger)
-                .lineLimit(4)
-                .textSelection(.enabled)
+            if model.lastStartupFailure == nil {
+                if !model.lastMessage.isEmpty {
+                    Label(model.lastMessage, systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(Color.secondary)
+                        .lineLimit(4)
+                        .textSelection(.enabled)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous).fill(insetSurface))
+                        .overlay(RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous).stroke(AppTheme.hairline, lineWidth: 1))
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Proxy failed to start", systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AppTheme.danger)
+                    Text(model.lastMessage)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                    Text(model.lastStartupFailure ?? "")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(4)
+                        .truncationMode(.tail)
+                        .textSelection(.enabled)
+                        .help(model.lastStartupFailure ?? "")
+                    HStack(spacing: 8) {
+                        Button {
+                            Task { await model.startProxy() }
+                        } label: {
+                            Label("Try Again", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(AppPressButtonStyle(tint: AppTheme.danger, compact: true))
+                        .disabled(model.isRunning || model.isStartingProxy)
+                        Button {
+                            model.openLogs()
+                        } label: {
+                            Label("Open Logs", systemImage: "doc.text.magnifyingglass")
+                        }
+                        .buttonStyle(AppPressButtonStyle(tint: AppTheme.accent, compact: true))
+                    }
+                }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                        .fill(AppTheme.insetSurface)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                        .stroke(model.lastStartupFailure == nil ? AppTheme.hairline : AppTheme.danger.opacity(0.18), lineWidth: 1)
-                )
+                .background(RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous).fill(AppTheme.danger.opacity(0.07)))
+                .overlay(RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous).stroke(AppTheme.danger.opacity(0.22), lineWidth: 1))
             }
         }
     }
@@ -206,7 +254,7 @@ struct ContentView: View {
                         Text("Custom").tag("custom-openai")
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 300)
+                    .frame(minWidth: 180, idealWidth: 300, maxWidth: .infinity)
                     .onChange(of: model.provider) { _ in
                         Task { await model.applyProviderChange() }
                     }
@@ -231,7 +279,7 @@ struct ContentView: View {
                             Text("HTTP").tag("http")
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 300)
+                        .frame(minWidth: 180, idealWidth: 300, maxWidth: .infinity)
                         .onChange(of: model.customOpenAITransport) { _ in
                             Task { await model.refreshRuntimeStatus() }
                         }
@@ -249,7 +297,8 @@ struct ContentView: View {
             DisclosureGroup(isExpanded: $showAdvancedClaudeSettings) {
                 claudeSettingsStatus
                     .padding(.top, 8)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(disclosureTransition)
+                    .animation(keyEditorAnimation, value: showAdvancedClaudeSettings)
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "doc.badge.gearshape")
@@ -269,6 +318,14 @@ struct ContentView: View {
         }
     }
 
+    private var deepSeekKeyEditorVisible: Bool {
+        model.provider == "deepseek" && (model.isDeepSeekKeyInputExpanded || !model.isAuthenticated)
+    }
+
+    private var customOpenAIKeyEditorVisible: Bool {
+        model.provider == "custom-openai" && (model.isCustomOpenAIKeyInputExpanded || !model.isAuthenticated)
+    }
+
     private var authStatus: some View {
         VStack(alignment: .leading, spacing: 8) {
             statusCard(
@@ -281,13 +338,15 @@ struct ContentView: View {
                 authAccessory
             }
 
-            if model.provider == "deepseek", model.isDeepSeekKeyInputExpanded || !model.isAuthenticated {
+            if deepSeekKeyEditorVisible {
                 deepSeekKeyInput
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(disclosureTransition)
+                    .animation(keyEditorAnimation, value: deepSeekKeyEditorVisible)
             }
-            if model.provider == "custom-openai", model.isCustomOpenAIKeyInputExpanded || !model.isAuthenticated {
+            if customOpenAIKeyEditorVisible {
                 customOpenAIKeyInput
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(disclosureTransition)
+                    .animation(keyEditorAnimation, value: customOpenAIKeyEditorVisible)
             }
         }
     }
@@ -353,11 +412,11 @@ struct ContentView: View {
         }
         .padding(10)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                .fill(AppTheme.insetSurface)
+            RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous)
+                .fill(insetSurface)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous)
                 .stroke(AppTheme.hairline, lineWidth: 1)
         )
     }
@@ -380,11 +439,11 @@ struct ContentView: View {
         }
         .padding(10)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                .fill(AppTheme.insetSurface)
+            RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous)
+                .fill(insetSurface)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous)
                 .stroke(AppTheme.hairline, lineWidth: 1)
         )
     }
@@ -535,7 +594,6 @@ struct ContentView: View {
                     .pickerStyle(.segmented)
 
                     settingsPreviewContent(preview)
-                        .transition(.opacity)
 
                     HStack(spacing: 10) {
                         Button {
@@ -543,14 +601,14 @@ struct ContentView: View {
                         } label: {
                             Label("Install Settings", systemImage: "square.and.arrow.down")
                         }
-                        .disabled(model.isInstallingClaudeSettings)
+                        .disabled(model.isInstallingClaudeSettings || model.isRestoringClaudeSettings)
 
                         Button {
                             Task { await model.restoreClaudeSettings() }
                         } label: {
                             Label("Restore", systemImage: "arrow.uturn.backward")
                         }
-                        .disabled(!preview.canRestore || model.isRestoringClaudeSettings)
+                        .disabled(!preview.canRestore || model.isInstallingClaudeSettings || model.isRestoringClaudeSettings)
                     }
                     .buttonStyle(AppPressButtonStyle(tint: AppTheme.accent, compact: true))
                 } else if let error = model.claudeSettingsPreviewError {
@@ -568,7 +626,7 @@ struct ContentView: View {
             settingsInputRow(title: "Port", detail: "Local Anthropic-compatible endpoint") {
                 TextField("Port", value: $model.port, formatter: NumberFormatter())
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 96)
+                    .frame(minWidth: 64, idealWidth: 96, maxWidth: 120)
                     .onSubmit {
                         Task {
                             await model.refreshClaudeSettingsPreview()
@@ -587,7 +645,9 @@ struct ContentView: View {
         TextField(title, text: text)
             .textFieldStyle(.roundedBorder)
             .font(.system(.body, design: .monospaced))
-            .frame(width: title == "https://host.example" ? 300 : 210)
+            .frame(minWidth: title == "https://host.example" ? 220 : 160,
+                   idealWidth: title == "https://host.example" ? 300 : 210,
+                   maxWidth: .infinity)
             .onSubmit {
                 Task {
                     if updatesRoute {
@@ -605,19 +665,22 @@ struct ContentView: View {
         detail: String? = nil,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                if let detail {
-                    Text(detail)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.caption.weight(.semibold))
+                    if let detail { Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
                 }
+                Spacer(minLength: 10)
+                content()
             }
-            Spacer(minLength: 10)
-            content()
+            VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.caption.weight(.semibold))
+                    if let detail { Text(detail).font(.caption2).foregroundStyle(.secondary) }
+                }
+                content().frame(maxWidth: .infinity)
+            }
         }
     }
 
@@ -646,8 +709,8 @@ struct ContentView: View {
         }
         .padding(10)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                .fill(AppTheme.insetSurface)
+            RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous)
+                .fill(insetSurface)
         )
         .font(.caption)
     }
@@ -694,8 +757,8 @@ struct ContentView: View {
             }
             .padding(10)
             .background(
-                RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                    .fill(AppTheme.insetSurface)
+                RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous)
+                    .fill(insetSurface)
             )
         case .current:
             codePreview(preview.currentSettings)
@@ -720,11 +783,11 @@ struct ContentView: View {
         }
         .frame(maxHeight: 176)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                .fill(AppTheme.codeSurface)
+            RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous)
+                .fill(codeSurface)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous)
                 .stroke(AppTheme.hairline, lineWidth: 1)
         )
     }
@@ -845,11 +908,11 @@ struct ContentView: View {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
-                    .fill(AppTheme.insetSurface)
+                RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous)
+                    .fill(insetSurface)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.smallRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: AppTheme.radiusInset, style: .continuous)
                     .stroke(tint == AppTheme.muted ? AppTheme.hairline : tint.opacity(0.18), lineWidth: 1)
             )
     }
@@ -862,10 +925,15 @@ struct ContentView: View {
 enum AppTheme {
     static let outerPadding: CGFloat = 16
     static let sectionSpacing: CGFloat = 14
-    static let largeRadius: CGFloat = 14
-    static let cardRadius: CGFloat = 12
-    static let smallRadius: CGFloat = 8
-    static let motion = Animation.easeOut(duration: 0.18)
+    static let radiusHero: CGFloat = 14
+    static let radiusCard: CGFloat = 12
+    static let radiusIconTile: CGFloat = 10
+    static let radiusControl: CGFloat = 9
+    static let radiusInset: CGFloat = 8
+    static let radiusCompactControl: CGFloat = 7
+    static let disclosureMotion = Animation.easeOut(duration: 0.18)
+    static let pressInMotion = Animation.easeOut(duration: 0.12)
+    static let pressOutMotion = Animation.easeOut(duration: 0.08)
 
     static let accent = Color(nsColor: .controlAccentColor)
     static let success = Color(nsColor: .systemGreen)
@@ -901,28 +969,31 @@ enum AppTheme {
 }
 
 struct PanelCard: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
     let tint: Color?
 
     func body(content: Content) -> some View {
         content
             .padding(12)
             .background(
-                RoundedRectangle(cornerRadius: AppTheme.cardRadius, style: .continuous)
-                    .fill(.regularMaterial)
+                RoundedRectangle(cornerRadius: AppTheme.radiusCard, style: .continuous)
+                    .fill(reduceTransparency ? AnyShapeStyle(Color(nsColor: .windowBackgroundColor)) : AnyShapeStyle(.regularMaterial))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.cardRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: AppTheme.radiusCard, style: .continuous)
                     .fill(AppTheme.panelHighlight)
                     .blendMode(.plusLighter)
+                    .opacity(reduceTransparency ? 0 : 1)
                     .allowsHitTesting(false)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.cardRadius, style: .continuous)
-                    .stroke(AppTheme.hairline, lineWidth: 1)
+                RoundedRectangle(cornerRadius: AppTheme.radiusCard, style: .continuous)
+                    .stroke(AppTheme.hairline.opacity(reduceTransparency || differentiateWithoutColor ? 1 : 0.7), lineWidth: 1)
                     .allowsHitTesting(false)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.cardRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: AppTheme.radiusCard, style: .continuous)
                     .stroke((tint ?? Color.clear).opacity(tint == nil ? 0 : 0.14), lineWidth: 1)
                     .allowsHitTesting(false)
             )
@@ -938,6 +1009,7 @@ extension View {
 
 struct AppPressButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let tint: Color
     var compact = false
@@ -949,17 +1021,20 @@ struct AppPressButtonStyle: ButtonStyle {
             .padding(.vertical, iconOnly ? 0 : (compact ? 5 : 7))
             .frame(width: iconOnly ? 28 : nil, height: iconOnly ? 28 : nil)
             .background(
-                RoundedRectangle(cornerRadius: compact || iconOnly ? 7 : 9, style: .continuous)
+                RoundedRectangle(cornerRadius: compact || iconOnly ? AppTheme.radiusCompactControl : AppTheme.radiusControl, style: .continuous)
                     .fill(backgroundFill(isPressed: configuration.isPressed))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: compact || iconOnly ? 7 : 9, style: .continuous)
+                RoundedRectangle(cornerRadius: compact || iconOnly ? AppTheme.radiusCompactControl : AppTheme.radiusControl, style: .continuous)
                     .stroke(tint.opacity(isEnabled ? 0.22 : 0.10), lineWidth: 1)
             )
             .foregroundStyle(tint.opacity(isEnabled ? 0.92 : 0.42))
-            .scaleEffect(configuration.isPressed && isEnabled ? 0.97 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-            .animation(.easeOut(duration: 0.12), value: isEnabled)
+            .scaleEffect(configuration.isPressed && isEnabled && !reduceMotion ? 0.97 : 1)
+            .animation(
+                reduceMotion ? nil : (configuration.isPressed ? AppTheme.pressInMotion : AppTheme.pressOutMotion),
+                value: configuration.isPressed
+            )
+            .animation(nil, value: isEnabled)
     }
 
     private func backgroundFill(isPressed: Bool) -> Color {

@@ -53,7 +53,8 @@ final class StatusItemController: NSObject {
         popover.contentViewController = NSHostingController(
             rootView: ContentView()
                 .environmentObject(model)
-                .frame(width: 440, height: 660)
+                .frame(minWidth: 400, idealWidth: 440, maxWidth: .infinity,
+                       minHeight: 520, idealHeight: 660, maxHeight: .infinity)
         )
     }
 
@@ -132,7 +133,7 @@ final class StatusItemController: NSObject {
             title: "Start",
             systemImage: "play.fill",
             action: #selector(startProxyFromMenu),
-            isEnabled: !model.isRunning
+            isEnabled: !model.isRunning && !model.isStartingProxy
         ))
         menu.addItem(contextMenuItem(
             title: "Stop",
