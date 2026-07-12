@@ -8,16 +8,13 @@ use crate::{
     auth::AuthManager,
     canonical::{canonicalize_anthropic_request, full_session_hash},
     codex::{
-        client::{CodexClient, CodexTransportMethod},
+        client::{CodexTransportMethod, OpenAIResponsesClient},
         count_tokens::count_translated_tokens,
         stream::{accumulate_response, translate_stream, ToolCatalog},
         translate::{translate_request, ResponsesRequest},
     },
-    config::{AppConfig, AppPaths, CodexTransport, CustomOpenAIProtocol, Provider},
-    custom_openai::{
-        accumulate_chat_response, translate_chat_request, translate_chat_stream,
-        translate_responses_request, CustomOpenAIClient,
-    },
+    config::{AppConfig, AppPaths, CodexTransport, Provider},
+    custom_openai,
     deepseek::DeepSeekClient,
     error::{ProxyError, Result},
     model::ModelRegistry,
@@ -64,9 +61,9 @@ struct AppState {
     config: AppConfig,
     paths: AppPaths,
     auth: AuthManager,
-    codex: CodexClient,
+    codex: OpenAIResponsesClient,
     deepseek: DeepSeekClient,
-    custom_openai: CustomOpenAIClient,
+    custom_openai: OpenAIResponsesClient,
     registry: ModelRegistry,
     routes: RouteManager,
     codex_sessions: CodexSessionManager,
@@ -171,9 +168,7 @@ impl CodexSessionManager {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             evict_expired_codex_sessions(&mut sessions, now_ms);
-            let state = sessions
-                .entry(session_hash.clone())
-                .or_insert_with(CodexSessionState::default);
+            let state = sessions.entry(session_hash.clone()).or_default();
 
             let reset_reason = if clear_command {
                 state.generation = state.generation.saturating_add(1);
@@ -368,6 +363,7 @@ fn now_millis() -> u64 {
 struct RouteUpdateRequest {
     active_profile: String,
     primary_model: Option<String>,
+    sonnet_model: Option<String>,
     small_model: Option<String>,
     context_window: Option<u32>,
 }
@@ -405,10 +401,10 @@ pub async fn serve(config: AppConfig, paths: AppPaths, auth: AuthManager) -> Res
     let routes =
         RouteManager::from_config_and_store(&config.routing, paths.route_pins_file.clone())?;
     let codex_sessions = CodexSessionManager::with_store(paths.codex_session_state_file.clone());
-    let codex = CodexClient::new(config.codex.clone(), auth.clone())?;
+    let codex = OpenAIResponsesClient::new_codex(config.codex.clone(), auth.clone())?;
     let deepseek =
         DeepSeekClient::new(config.deepseek.clone(), paths.deepseek_api_key_file.clone())?;
-    let custom_openai = CustomOpenAIClient::new(
+    let custom_openai = OpenAIResponsesClient::new_custom(
         config.custom_openai.clone(),
         paths.custom_openai_api_key_file.clone(),
     )?;
@@ -489,6 +485,7 @@ async fn admin_status(
         "baseUrl": format!("http://127.0.0.1:{}", state.config.port),
         "publicModels": {
             "primary": state.config.claude.public_primary_model,
+            "sonnet": state.config.claude.public_sonnet_model,
             "small": state.config.claude.public_small_model,
         },
         "port": state.config.port,
@@ -500,9 +497,9 @@ async fn admin_status(
             "apiKey": state.deepseek.api_key_status(),
         },
         "customOpenAI": {
-            "apiKey": state.custom_openai.api_key_status(),
+            "apiKey": custom_openai::api_key_status(&state.paths.custom_openai_api_key_file),
             "baseUrlConfigured": state.custom_openai.base_url_configured(),
-            "protocol": custom_openai_protocol_name(&state.custom_openai.protocol()),
+            "protocol": "responses",
         },
         "auth": auth.map(|auth| json!({
             "accountId": auth.account_id,
@@ -542,6 +539,7 @@ async fn update_admin_route(
         .set_active_profile_config(
             &request.active_profile,
             request.primary_model,
+            request.sonnet_model,
             request.small_model,
             request.context_window,
         )
@@ -550,6 +548,7 @@ async fn update_admin_route(
         active_profile = %route.id,
         provider = route.provider.as_str(),
         primary_model = %route.primary_model,
+        sonnet_model = %route.sonnet_model,
         small_model = %route.small_model,
         "active route updated"
     );
@@ -575,6 +574,7 @@ async fn count_tokens(
     let resolved = state.registry.resolve_for_route(
         &route,
         &state.config.claude.public_primary_model,
+        &state.config.claude.public_sonnet_model,
         &state.config.claude.public_small_model,
         &request.model,
     )?;
@@ -612,6 +612,7 @@ async fn messages(
     let resolved = match state.registry.resolve_for_route(
         &route,
         &state.config.claude.public_primary_model,
+        &state.config.claude.public_sonnet_model,
         &state.config.claude.public_small_model,
         &request.model,
     ) {
@@ -640,7 +641,7 @@ async fn handle_codex_messages(
     resolved: crate::model::ResolvedModel,
 ) -> Result<Response<Body>> {
     let clear_command = is_claude_clear_command_request(&request);
-    let (codex_session, translated) = if clear_command {
+    let (codex_session, mut translated) = if clear_command {
         let codex_session =
             state
                 .codex_sessions
@@ -659,10 +660,10 @@ async fn handle_codex_messages(
                 );
             }
         }
-        let translated = translate_request(&request, &resolved, None)?;
+        let translated = translate_request(&request, &resolved, session_id.as_deref())?;
         (codex_session, translated)
     } else {
-        let translated = translate_request(&request, &resolved, None)?;
+        let translated = translate_request(&request, &resolved, session_id.as_deref())?;
         let input_tokens = count_translated_tokens(&translated);
         let codex_session = state.codex_sessions.resolve(
             session_id.as_deref(),
@@ -684,6 +685,7 @@ async fn handle_codex_messages(
 
     let tool_catalog = ToolCatalog::from_anthropic_tools(request.tools.as_deref());
     let upstream_session_id = codex_session.upstream_session_id.as_deref();
+    translated.set_session_metadata(upstream_session_id);
     info!(
         %request_id,
         upstream_model = %resolved.upstream_model,
@@ -771,25 +773,31 @@ async fn handle_custom_openai_messages(
     request: AnthropicRequest,
     resolved: crate::model::ResolvedModel,
 ) -> Result<Response<Body>> {
-    match state.custom_openai.protocol() {
-        CustomOpenAIProtocol::Responses => {
-            handle_custom_openai_responses(state, request_id, session_id, request, resolved).await
+    let clear_command = is_claude_clear_command_request(&request);
+    let (openai_session, mut translated) = if clear_command {
+        let openai_session =
+            state
+                .codex_sessions
+                .resolve(session_id.as_deref(), request.messages.len(), 0, true);
+        if openai_session.reset_reason == Some(CodexSessionResetReason::ClaudeClearCommand) {
+            return empty_anthropic_response(&request, state.config.claude.downstream_idle_ping_ms);
         }
-        CustomOpenAIProtocol::ChatCompletions => {
-            handle_custom_openai_chat(state, request_id, request, resolved).await
-        }
-    }
-}
-
-async fn handle_custom_openai_responses(
-    state: Arc<AppState>,
-    request_id: String,
-    session_id: Option<String>,
-    request: AnthropicRequest,
-    resolved: crate::model::ResolvedModel,
-) -> Result<Response<Body>> {
+        let translated = translate_request(&request, &resolved, session_id.as_deref())?;
+        (openai_session, translated)
+    } else {
+        let translated = translate_request(&request, &resolved, session_id.as_deref())?;
+        let input_tokens = count_translated_tokens(&translated);
+        let openai_session = state.codex_sessions.resolve(
+            session_id.as_deref(),
+            request.messages.len(),
+            input_tokens,
+            false,
+        );
+        (openai_session, translated)
+    };
+    let upstream_session_id = openai_session.upstream_session_id.as_deref();
+    translated.set_session_metadata(upstream_session_id);
     let tool_catalog = ToolCatalog::from_anthropic_tools(request.tools.as_deref());
-    let translated = translate_responses_request(&request, &resolved, session_id.as_deref())?;
     info!(
         %request_id,
         upstream_model = %resolved.upstream_model,
@@ -798,7 +806,11 @@ async fn handle_custom_openai_responses(
         custom_openai_body_keys = %codex_request_keys(&translated),
         "translated request for custom OpenAI Responses"
     );
-    let upstream = match state.custom_openai.post_responses(&translated).await {
+    let upstream = match state
+        .custom_openai
+        .post(&translated, upstream_session_id)
+        .await
+    {
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(%request_id, error = %err, "custom OpenAI Responses upstream request failed");
@@ -829,44 +841,6 @@ async fn handle_custom_openai_responses(
             .map_err(|err| {
                 ProxyError::Transport(format!(
                     "failed to build custom OpenAI Responses response: {err}"
-                ))
-            })
-    }
-}
-
-async fn handle_custom_openai_chat(
-    state: Arc<AppState>,
-    request_id: String,
-    request: AnthropicRequest,
-    resolved: crate::model::ResolvedModel,
-) -> Result<Response<Body>> {
-    let translated = translate_chat_request(&request, &resolved)?;
-    let upstream = match state.custom_openai.post_chat(&translated).await {
-        Ok(upstream) => upstream,
-        Err(err) => {
-            warn!(%request_id, error = %err, "custom OpenAI Chat Completions upstream request failed");
-            return Err(err);
-        }
-    };
-    info!(
-        %request_id,
-        status = %upstream.status,
-        upstream_model = %resolved.upstream_model,
-        "custom OpenAI Chat Completions upstream response opened"
-    );
-
-    if request.wants_stream() {
-        let stream = translate_chat_stream(upstream.body, request.model.clone(), Some(request_id));
-        sse_response(stream, state.config.claude.downstream_idle_ping_ms)
-    } else {
-        let response = accumulate_chat_response(upstream.body, request.model.clone()).await?;
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(response_json(response).to_string()))
-            .map_err(|err| {
-                ProxyError::Transport(format!(
-                    "failed to build custom OpenAI chat response: {err}"
                 ))
             })
     }
@@ -1120,17 +1094,10 @@ fn transport_status_json(state: &AppState, provider: Provider) -> serde_json::Va
             "websocketCooldownMs": null,
         }),
         Provider::CustomOpenAI => json!({
-            "configured": custom_openai_protocol_name(&state.custom_openai.protocol()),
-            "currentMethod": "http-sse",
-            "websocketCooldownMs": null,
+            "configured": configured_transport_name(&state.config.custom_openai.transport),
+            "currentMethod": state.custom_openai.transport_status().current_method.map(transport_method_name),
+            "websocketCooldownMs": state.custom_openai.transport_status().websocket_cooldown_remaining.map(duration_millis_u64),
         }),
-    }
-}
-
-fn custom_openai_protocol_name(protocol: &CustomOpenAIProtocol) -> &'static str {
-    match protocol {
-        CustomOpenAIProtocol::Responses => "responses",
-        CustomOpenAIProtocol::ChatCompletions => "chat-completions",
     }
 }
 

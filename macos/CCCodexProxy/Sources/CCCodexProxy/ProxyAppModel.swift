@@ -5,6 +5,7 @@ import SwiftUI
 private let claudePublicPrimaryModel = "claude-opus-4-8"
 private let claudePublicSmallModel = "claude-haiku-4-5"
 private let defaultOpenAIPrimaryModel = "gpt-5.6-sol[1m]"
+private let defaultOpenAISonnetModel = "gpt-5.6-terra[1m]"
 private let defaultOpenAISmallModel = "gpt-5.6-luna[1m]"
 
 @MainActor
@@ -37,11 +38,12 @@ final class ProxyAppModel: ObservableObject {
     @Published var deepSeekAPIKey = ""
     @Published var customOpenAIBaseURL = ""
     @Published var customOpenAIAPIKey = ""
-    @Published var customOpenAIProtocol = "responses"
+    @Published var customOpenAITransport = "auto"
     @Published var model = defaultOpenAIPrimaryModel
+    @Published var sonnetModel = defaultOpenAISonnetModel
     @Published var smallModel = defaultOpenAISmallModel
     @Published var port = 18765
-    @Published var autoCompactWindow = 272_000
+    @Published var autoCompactWindow = 372_000
     @Published private(set) var logEntries: [ProxyLogEntry] = []
     @Published private(set) var isRefreshingLogs = false
     @Published private(set) var logLoadError: String?
@@ -165,7 +167,7 @@ final class ProxyAppModel: ObservableObject {
             recordAppEvent(
                 level: "INFO",
                 message: "Starting proxy helper",
-                detail: "helper=\(executableURL.path) provider=\(provider) model=\(model) small_model=\(smallModel) port=\(port)"
+                detail: "helper=\(executableURL.path) provider=\(provider) model=\(model) sonnet_model=\(sonnetModel) small_model=\(smallModel) port=\(port)"
             )
             try process.run()
             proxyProcess = process
@@ -346,6 +348,8 @@ final class ProxyAppModel: ObservableObject {
                 "\(port)",
                 "--model",
                 model,
+                "--sonnet-model",
+                sonnetModel,
                 "--small-model",
                 smallModel,
                 "--context-window",
@@ -746,6 +750,8 @@ final class ProxyAppModel: ObservableObject {
             "\(port)",
             "--model",
             model,
+            "--sonnet-model",
+            sonnetModel,
             "--small-model",
             smallModel,
             "--context-window",
@@ -756,7 +762,7 @@ final class ProxyAppModel: ObservableObject {
             if !trimmedBaseURL.isEmpty {
                 arguments += ["--custom-openai-base-url", trimmedBaseURL]
             }
-            arguments += ["--custom-openai-protocol", customOpenAIProtocol]
+            arguments += ["--custom-openai-transport", customOpenAITransport]
         }
         return arguments
     }
@@ -879,52 +885,65 @@ final class ProxyAppModel: ObservableObject {
     private func applyProviderDefaults() {
         if provider == "deepseek" {
             model = "deepseek-v4-pro[1m]"
+            sonnetModel = "deepseek-v4-pro[1m]"
             smallModel = "deepseek-v4-flash"
             autoCompactWindow = 1_000_000
         } else if provider == "custom-openai" {
             model = defaultOpenAIPrimaryModel
+            sonnetModel = defaultOpenAISonnetModel
             smallModel = defaultOpenAISmallModel
-            autoCompactWindow = 128_000
+            autoCompactWindow = 372_000
         } else {
             model = defaultOpenAIPrimaryModel
+            sonnetModel = defaultOpenAISonnetModel
             smallModel = defaultOpenAISmallModel
-            autoCompactWindow = 272_000
+            autoCompactWindow = 372_000
         }
     }
 
     private func replaceCrossProviderModelDefaults() {
         let primary = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sonnet = sonnetModel.trimmingCharacters(in: .whitespacesAndNewlines)
         let small = smallModel.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if provider == "deepseek" {
             if primary.hasPrefix("gpt-") {
                 model = "deepseek-v4-pro[1m]"
             }
+            if sonnet.hasPrefix("gpt-") {
+                sonnetModel = "deepseek-v4-pro[1m]"
+            }
             if small.hasPrefix("gpt-") {
                 smallModel = "deepseek-v4-flash"
             }
-            if autoCompactWindow == 272_000 || autoCompactWindow == 128_000 {
+            if autoCompactWindow == 372_000 || autoCompactWindow == 272_000 || autoCompactWindow == 128_000 {
                 autoCompactWindow = 1_000_000
             }
         } else if provider == "custom-openai" {
             if primary.hasPrefix("deepseek-") {
                 model = defaultOpenAIPrimaryModel
             }
+            if sonnet.hasPrefix("deepseek-") {
+                sonnetModel = defaultOpenAISonnetModel
+            }
             if small.hasPrefix("deepseek-") {
                 smallModel = defaultOpenAISmallModel
             }
-            if autoCompactWindow == 272_000 || autoCompactWindow == 1_000_000 {
-                autoCompactWindow = 128_000
+            if autoCompactWindow == 272_000 || autoCompactWindow == 128_000 || autoCompactWindow == 1_000_000 {
+                autoCompactWindow = 372_000
             }
         } else {
             if primary.hasPrefix("deepseek-") {
                 model = defaultOpenAIPrimaryModel
             }
+            if sonnet.hasPrefix("deepseek-") {
+                sonnetModel = defaultOpenAISonnetModel
+            }
             if small.hasPrefix("deepseek-") {
                 smallModel = defaultOpenAISmallModel
             }
-            if autoCompactWindow == 1_000_000 || autoCompactWindow == 128_000 {
-                autoCompactWindow = 272_000
+            if autoCompactWindow == 1_000_000 || autoCompactWindow == 128_000 || autoCompactWindow == 272_000 {
+                autoCompactWindow = 372_000
             }
         }
     }

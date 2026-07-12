@@ -360,9 +360,13 @@ mod tests {
             instructions: None,
             tools: None,
             tool_choice: None,
+            parallel_tool_calls: None,
             reasoning: None,
             include: None,
             text: None,
+            service_tier: None,
+            prompt_cache_key: None,
+            client_metadata: None,
             stream: true,
         };
         let unknown = ResponsesRequest {

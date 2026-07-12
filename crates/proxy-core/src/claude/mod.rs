@@ -50,7 +50,7 @@ impl Default for ClaudeSettingsOptions {
             port: DEFAULT_PORT,
             model: DEFAULT_PUBLIC_PRIMARY_MODEL.into(),
             small_fast_model: DEFAULT_PUBLIC_SMALL_MODEL.into(),
-            auto_compact_window: 272_000,
+            auto_compact_window: 372_000,
         }
     }
 }

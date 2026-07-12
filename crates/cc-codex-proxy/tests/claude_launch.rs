@@ -66,7 +66,7 @@ fn launch_sets_proxy_env_when_app_pid_is_alive_and_health_is_ok() {
     assert!(stdout.contains(&format!("base=http://127.0.0.1:{port}\n")));
     assert!(stdout.contains("model=claude-opus-4-8\n"));
     assert!(stdout.contains("small=claude-haiku-4-5\n"));
-    assert!(stdout.contains("compact=272000\n"));
+    assert!(stdout.contains("compact=372000\n"));
 }
 
 #[test]

@@ -4,7 +4,7 @@ CC Codex Proxy has three supported upstream paths:
 
 - Claude Code -> `127.0.0.1` Anthropic-compatible proxy -> ChatGPT subscription Codex Responses backend.
 - Claude Code -> `127.0.0.1` Anthropic-compatible proxy -> DeepSeek Anthropic-compatible API.
-- Claude Code -> `127.0.0.1` Anthropic-compatible proxy -> Custom OpenAI-compatible Responses or Chat Completions API.
+- Claude Code -> `127.0.0.1` Anthropic-compatible proxy -> Custom OpenAI-compatible Responses API.
 
 Provider selection is explicit through app/CLI config as `codex`, `deepseek`, or `custom-openai`. The proxy keeps small internal module boundaries for auth, request translation, upstream transport, stream handling, and Claude settings so each part can be tested in isolation.
 
@@ -41,18 +41,18 @@ Both upstream modes are reduced into the same internal byte stream and then tran
 
 DeepSeek uses HTTPS only. It forwards Anthropic-shaped requests to `deepseek.base_url` plus `/v1/messages`; there is no WebSocket mode or transport fallback for DeepSeek.
 
-Custom OpenAI-compatible endpoints use HTTPS or HTTP only. `custom_openai.base_url` may point at either a server root (for example `http://127.0.0.1:8000`), a `/v1` base, or the full endpoint path. `custom_openai.protocol` selects either `/v1/responses` (`responses`) or `/v1/chat/completions` (`chat-completions`). There is no WebSocket mode or transport fallback for custom endpoints.
+Custom OpenAI-compatible endpoints use the same Responses HTTP/WebSocket client as Codex. `custom_openai.base_url` may point at a server root (for example `http://127.0.0.1:8000`), a `/v1` base, or a complete `/responses` endpoint. `custom_openai.transport` and `CCP_CUSTOM_OPENAI_TRANSPORT` select `auto`, `websocket`, or `http`; `auto` tries the corresponding WebSocket URL before falling back to HTTP SSE.
 
 ## Fallback Strategy
 
 - Transport fallback: `auto` demotes WebSocket to HTTP SSE for a short cooldown after setup failure or a silent first-event timeout. This avoids a per-request WebSocket timeout tax when a network, proxy, or upstream deployment rejects upgrades or accepts the socket without producing response events.
 - Auth fallback: a Codex 401 forces one token refresh and one retry.
 - DeepSeek auth and capacity errors are not retried. The proxy surfaces upstream `401`, `402`, `422`, `429`, `500`, `503`, and `Retry-After` directly to Claude Code.
-- Custom OpenAI auth is optional. When configured, the proxy sends `Authorization: Bearer <key>`; when absent, requests are sent without an authorization header for local or unauthenticated gateways. Custom endpoint upstream errors and `Retry-After` are surfaced directly.
+- Custom OpenAI auth is optional. When configured, the proxy sends `Authorization: Bearer <key>`; when absent, requests are sent without an authorization header for local or unauthenticated gateways. Custom 401 responses are surfaced directly and never invoke ChatGPT OAuth refresh.
 - Launch fallback: the managed `claude` shim only injects proxy environment variables while the app PID is alive and `/healthz` succeeds. If the app is gone, it launches the original Claude command without proxy variables. If the app is alive but the helper is unhealthy, it fails fast so new sessions do not start with inconsistent routing. Background-agent daemon management uses environment-only proxy settings; actual sessions use inline settings so persisted daemon respawn flags do not fall back to native Claude auth.
 - Capacity fallback: 429, 403, 400, and `Retry-After` are passed through to Claude Code. The proxy does not queue, fan out, or retry rate-limited work because that would hide subscription limits and can amplify load.
 
-Recommended setup: leave app users on `http`; use `auto` only for controlled reliability tests; use `websocket` only when validating WebSocket behavior directly.
+Recommended setup: leave app users on `auto`; use `http` for restricted networks or diagnostics, and forced `websocket` when hard failure is preferred over fallback.
 
 ## Auth
 
@@ -67,10 +67,10 @@ Recommended setup: leave app users on `http`; use `auto` only for controlled rel
 ## Translation
 
 - Claude Code messages, system prompts, tools, tool calls, tool results, images, JSON output formats, and reasoning effort are translated into the Codex Responses request shape.
-- The built-in Codex and custom OpenAI route defaults use `gpt-5.6-sol` for primary traffic and `gpt-5.6-luna` for small/subagent traffic. Opus and Sonnet aliases share the primary slot, Haiku uses the small slot, and `gpt-5.6-terra` remains available for explicit selection. GPT-5.6 is a limited-preview family, so the proxy surfaces upstream access errors and does not silently fall back to older models.
+- The built-in Codex and custom OpenAI route defaults use `gpt-5.6-sol` for primary/Opus traffic, `gpt-5.6-terra` for Sonnet, and `gpt-5.6-luna` for small/Haiku/subagent traffic. GPT-5.6 access errors are surfaced without model downgrade.
 - Tool definitions are canonicalized before provider handoff: exact duplicates are removed, hosted web-search tools sort ahead of function tools, object keys are stable, and JSON Schema `required` arrays are sorted while order-sensitive arrays such as `enum` remain unchanged.
-- Custom OpenAI Responses mode reuses the same Responses request translation and stream reducer as Codex, but uses static bearer-token-or-no-auth HTTP instead of ChatGPT OAuth/WebSocket transport.
-- Custom OpenAI Chat Completions mode maps Anthropic messages into `chat/completions` messages, translates tools into OpenAI function tools, maps tool calls/results, and converts OpenAI chat responses or stream deltas back into Anthropic content blocks.
+- Custom OpenAI uses the same Responses request translation, HTTP/WebSocket transports, stream reducer, retry classification, and error parsing as Codex. Only the URL and bearer-token-or-no-auth credential source differ.
+- GPT-5.6 models use Responses Lite: tools are a leading `additional_tools` developer item, base instructions are a developer message, reasoning defaults to `medium` with `context: all_turns`, top-level tools are omitted, parallel tool calls are disabled, and encrypted reasoning, cache, service-tier, and session metadata are forwarded.
 - Hosted web search maps to Codex `web_search`.
 - Unsupported reasoning stream events are dropped.
 - Image blocks inside tool results become text placeholders because this proxy serializes function outputs as text for Codex compatibility.
@@ -82,24 +82,24 @@ The proxy intentionally implements the subset of Anthropic Messages semantics th
 
 | Claude Code / Anthropic field | Codex Responses field | Notes |
 | --- | --- | --- |
-| `model` | `model` | Claude-facing aliases such as `claude-opus-4-8` and `claude-haiku-4-5` resolve to the active route's configured upstream model. Claude `[1m]` and proxy `-fast` hints are stripped before upstream. |
-| top-level `system` | `instructions` | String and text-block arrays are joined into one instruction string. |
+| `model` | `model` | Opus resolves to primary, Sonnet to the Sonnet slot, and Haiku to small. Claude `[1m]` and proxy `-fast` hints are stripped before upstream; `-fast` sends `service_tier: "priority"`. |
+| top-level `system` | developer input message | GPT-5.6 Responses Lite sends empty top-level `instructions` and prepends the joined instructions as a developer message. |
 | message role `system` | developer `input[]` message | Mid-conversation system messages are preserved as Responses developer messages; they are not sent as role `system`. |
 | user/assistant text blocks | `input[].content[].input_text` / `output_text` | Assistant history is preserved as Responses input items. |
 | image blocks | `input_image.image_url` | Supports base64 data URLs and URL images. |
 | `tool_use` | `function_call` | Preserves call id, tool name, and JSON arguments. |
 | `tool_result` | `function_call_output` | Text is forwarded; image results become placeholders. |
-| `tools[]` | `tools[]` with `type: "function"` | Anthropic `input_schema` becomes Responses `parameters`; exact duplicate tools are removed, schemas are canonicalized, empty descriptions are omitted, and `strict` is disabled for Claude Code compatibility. |
+| `tools[]` | leading `additional_tools` developer item | GPT-5.6 Responses Lite omits top-level `tools`; Anthropic schemas are canonicalized and embedded in the input item. |
 | `type: web_search_*`, `name: web_search` | `web_search` | Hosted web-search bridge. Sends `external_web_access: false`, `search_content_types: ["text", "image"]`, and non-empty `allowed_domains`/`blocked_domains` as `filters`. Anthropic `max_uses`, `response_inclusion`, `user_location`, and `search_context_size` are not forwarded. |
 | `tool_choice` | `tool_choice` | `auto`, `none`, `any`, forced function tools, and forced `web_search` map to Responses equivalents. |
 | `max_tokens` | omitted | The Codex backend rejects explicit output-limit parameters; Claude Code's field is not forwarded upstream. |
 | `temperature`, `top_p` | omitted | The ChatGPT Codex backend is stricter than the public Responses API and rejects these sampling parameters on this path. |
-| `metadata` | omitted | Anthropic request metadata is local client metadata; it is not forwarded as Responses `metadata` or `client_metadata`. |
-| `output_config.effort` | `reasoning.effort` | `auto` omits the field. `none`, `minimal`, `low`, `medium`, `high`, and `xhigh` are forwarded. For GPT-5.6, `max` and defensive literal `ultracode` inputs map to `max`; older models map them to `xhigh`. Unknown values, including `ultra`, are omitted. |
+| `metadata` | omitted | Anthropic metadata is not forwarded as API `metadata`; the proxy adds its own session/thread `client_metadata` for Responses Lite. |
+| `output_config.effort` | `reasoning.effort` | GPT-5.6 defaults missing, `auto`, or unknown effort to `medium`; `max` and defensive `ultracode` map to `max`. Responses Lite also sends `reasoning.context: "all_turns"`. |
 | non-auto reasoning effort | `include: ["reasoning.encrypted_content"]` | Matches the Codex backend request shape used for reasoning continuity. |
 | `thinking.budget_tokens` | `reasoning.effort` | Deprecated Claude fixed thinking budgets are mapped as a fallback: `0` -> `none`, up to 4k -> `low`, up to 32k -> `medium`, above 32k -> `high`. |
 | `output_config.format.type=json_schema` | `text.format` | JSON schema output formatting with `strict: true`; object schemas are normalized so all properties are required. |
-| `x-claude-code-session-id` | upstream session headers | Used to keep Codex cache/session behavior stable across a Claude Code conversation. The upstream session header uses a compact hash of the Claude session id so backend prompt-cache keys stay within length limits. It also keys local route pins so an idle session keeps using the provider/profile selected on its first request. The hashed Codex session-state record persists separately so upstream session generations survive helper restarts. The proxy does not send `prompt_cache_key` in the body on the ChatGPT Codex path. |
+| `x-claude-code-session-id` | session/thread headers and body metadata | Sends current `session-id` and `thread-id`, retains legacy session headers during migration, and supplies a bounded `prompt_cache_key` plus session/thread `client_metadata`. |
 
 Claude Code ultracode is client-side dynamic-workflow orchestration, not a Responses reasoning-effort value. Modern Claude Code serializes plain ultracode turns as `xhigh`, which is indistinguishable from an explicitly selected xhigh turn at the proxy boundary. To combine those client-side workflows with GPT-5.6 max reasoning, activate ultracode in Claude Code while explicitly selecting `max`; the proxy forwards that `max` value and never sends `reasoning.effort: "ultra"`.
 

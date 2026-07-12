@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-12 AEST - v1.0.0 unified GPT-5.6 Responses
+
+- Added unified Sol/Terra/Luna routing for Opus, Sonnet, and Haiku/subagents across ChatGPT Codex and custom OpenAI endpoints.
+- Updated GPT-5.6 requests to the current Responses Lite HTTP/WebSocket contract and pinned compatibility to Codex `0.144.0-alpha.4`, with `CCP_CODEX_COMPAT_VERSION` as an emergency override.
+- Replaced the separate custom Responses client with the shared OpenAI Responses transport, including optional bearer auth and custom `auto|websocket|http` selection.
+- Removed custom Chat Completions support and added targeted migration errors for legacy configuration.
+- Raised the default OpenAI-backed context window to 372,000 tokens and added Sonnet model controls to config, admin, CLI, and the macOS app.
+
 ## 2026-07-12 AEST - v0.5.1 background helper session detection
 
 - Excluded Claude Code background pty hosts, spare background workers, and daemon processes from live-session detection so they no longer block proxy startup or shim repair.

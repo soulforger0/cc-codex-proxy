@@ -42,7 +42,7 @@ The prebuilt app DMG is currently Apple Silicon (`arm64`) only. Intel users can 
 4. Choose a provider:
    - **Codex**: click **Login** and complete ChatGPT OAuth in your browser.
    - **DeepSeek**: choose **DeepSeek**, paste your API key, and click **Save Key**.
-   - **Custom**: choose **Custom**, enter an OpenAI-compatible endpoint URL, choose **Responses** or **Chat**, and optionally save an API key.
+   - **Custom**: choose **Custom**, enter a Responses-compatible endpoint URL, choose an `Auto`, `WebSocket`, or `HTTP` transport, and optionally save an API key.
 5. Close any currently running Claude Code sessions.
 6. Click **Start** in the menu bar app.
 7. Open a new Claude Code session normally:
@@ -55,7 +55,7 @@ The app manages a temporary `claude` shim. New Claude Code sessions route throug
 
 ## Why This Exists
 
-Claude Code speaks Anthropic's Messages API. For ChatGPT Codex and custom OpenAI-compatible Responses endpoints, CC Codex Proxy translates that Anthropic request/stream shape into the Responses API shape. For custom Chat Completions endpoints, it translates into OpenAI chat/completions and maps responses back to Anthropic messages. For DeepSeek, it forwards Anthropic-shaped requests to DeepSeek's Anthropic-compatible API after local model and request validation.
+Claude Code speaks Anthropic's Messages API. For ChatGPT Codex and custom OpenAI-compatible endpoints, CC Codex Proxy translates that Anthropic request/stream shape into the current Responses API shape. For DeepSeek, it forwards Anthropic-shaped requests to DeepSeek's Anthropic-compatible API after local model and request validation.
 
 ```mermaid
 flowchart LR
@@ -73,19 +73,21 @@ flowchart LR
 | Menu bar control | Start, stop, refresh status, inspect startup health, and search combined launcher/proxy logs from a native macOS app. |
 | ChatGPT OAuth | Sign in from the app; tokens are stored locally under Application Support. |
 | DeepSeek API keys | Store a DeepSeek API key locally or provide `DEEPSEEK_API_KEY`. |
-| Custom OpenAI endpoints | Route to a user-provided OpenAI-compatible base URL with Responses or Chat Completions and an optional API key. |
+| Custom OpenAI endpoints | Route to a user-provided Responses-compatible base URL with the same request and transport contract as Codex, plus an optional API key. |
 | Temporary Claude routing | A managed shim injects proxy environment variables only when the app is alive and healthy. |
 | Background agents | Claude Code background agents route through the proxy without requiring native Anthropic/Claude auth. |
 | Local-only server | The proxy binds to `127.0.0.1` and does not expose a remote service. |
 | Anthropic-compatible endpoints | Implements `/v1/messages` and `/v1/messages/count_tokens` for Claude Code. |
 | Streaming translation | Streams Anthropic SSE back to Claude Code without buffering the full upstream response. |
-| Transport fallback | In `auto` mode, tries Codex WebSocket first and falls back to HTTP SSE when needed. |
+| Transport fallback | In `auto` mode, both OpenAI-backed providers try WebSocket first and fall back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
-## What's New In 0.5.1
+## What's New In 1.0.0
 
-- Proxy startup and shim-repair checks now ignore Claude Code background pty hosts, spare background workers, and daemon processes instead of treating them as active interactive sessions.
-- Real foreground Claude Code sessions still block startup and repair, preserving the guard against switching backend assumptions mid-session.
+- Added three-tier routing: Opus uses `gpt-5.6-sol`, Sonnet uses `gpt-5.6-terra`, and Haiku/subagents use `gpt-5.6-luna` for both OpenAI-backed providers.
+- Updated GPT-5.6 traffic to the current Codex Responses Lite HTTP/WebSocket contract.
+- Unified Codex and custom OpenAI transport, translation, stream, and error behavior.
+- Removed custom Chat Completions support. Existing users must configure a Responses-compatible URL and remove the obsolete protocol setting.
 
 ## Compatibility
 
@@ -96,7 +98,7 @@ flowchart LR
 | Claude Code background agents | Supported for proxy-routed `claude --bg` jobs while the app and local proxy are running. Native Claude auth is not required. |
 | ChatGPT OAuth | Supported through the app or CLI. |
 | DeepSeek API | Supported through app key storage, `DEEPSEEK_API_KEY`, or CLI key setup. |
-| Custom OpenAI-compatible API | Supported with a configured base URL, `responses` or `chat-completions`, and optional `CUSTOM_OPENAI_API_KEY`. |
+| Custom OpenAI-compatible API | Supported with a Responses-compatible base URL, optional `CUSTOM_OPENAI_API_KEY`, and `auto`, `websocket`, or `http` transport. |
 | Non-macOS desktop app | Not currently supported. |
 | Developer ID signing / notarization | Not yet. Releases are currently ad-hoc signed. |
 
@@ -183,13 +185,17 @@ cc-codex-proxy auth status
 printf '%s' "$DEEPSEEK_API_KEY" | cc-codex-proxy auth set-api-key --provider deepseek --stdin
 printf '%s' "$CUSTOM_OPENAI_API_KEY" | cc-codex-proxy auth set-api-key --provider custom-openai --stdin
 cc-codex-proxy serve --provider deepseek
-cc-codex-proxy serve --provider custom-openai --custom-openai-base-url http://127.0.0.1:8000 --custom-openai-protocol chat-completions
+cc-codex-proxy serve --provider custom-openai --custom-openai-base-url http://127.0.0.1:8000 --custom-openai-transport auto
 cc-codex-proxy serve
 cc-codex-proxy doctor
 cc-codex-proxy admin status
 ```
 
-When `serve` starts, it prints the local proxy URL, health URL, log path, and Claude Code environment variables for manual sessions. Codex and custom OpenAI profiles default to `gpt-5.6-sol` for primary traffic and `gpt-5.6-luna` for small/subagent traffic; `gpt-5.6-terra` is also available for explicit selection. Custom OpenAI-compatible endpoints can be configured with `CCP_CUSTOM_OPENAI_BASE_URL`, `CCP_CUSTOM_OPENAI_PROTOCOL=responses|chat-completions`, and optional `CUSTOM_OPENAI_API_KEY`.
+When `serve` starts, it prints the local proxy URL, health URL, log path, and Claude Code environment variables for manual sessions. Codex and custom OpenAI profiles default to `gpt-5.6-sol` for primary/Opus traffic, `gpt-5.6-terra` for Sonnet, and `gpt-5.6-luna` for small/Haiku/subagent traffic. Custom endpoints use `CCP_CUSTOM_OPENAI_BASE_URL`, optional `CUSTOM_OPENAI_API_KEY`, and `CCP_CUSTOM_OPENAI_TRANSPORT=auto|websocket|http`.
+
+### v1.0 migration
+
+Custom OpenAI is Responses-only. Remove `custom_openai.protocol`, `CCP_CUSTOM_OPENAI_PROTOCOL`, and `--custom-openai-protocol`; point the base URL at a Responses-compatible server root, `/v1` base, or complete `/responses` endpoint. A legacy `chat-completions` config or protocol environment variable stops startup with migration guidance instead of silently switching protocols.
 
 ## Runtime Files
 

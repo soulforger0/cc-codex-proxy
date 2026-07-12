@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use axum::{
     body::Body,
-    extract::State,
+    extract::{
+        ws::{Message as AxumWebSocketMessage, WebSocket, WebSocketUpgrade},
+        State,
+    },
     http::{header, HeaderMap, Response, StatusCode},
     routing::{get, post},
     Json, Router,
@@ -12,7 +15,7 @@ use proxy_core::{
     anthropic::schema::AnthropicRequest,
     auth::{AuthManager, MemoryTokenStore, StoredAuth, TokenRefreshClient, TokenResponse},
     codex::{count_tokens::count_translated_tokens, translate::translate_request},
-    config::{AppConfig, AppPaths, CodexConfig, CodexTransport, CustomOpenAIProtocol, Provider},
+    config::{AppConfig, AppPaths, CodexConfig, CodexTransport, Provider},
     custom_openai::store_api_key as store_custom_openai_api_key,
     deepseek::store_api_key,
     model::ResolvedModel,
@@ -34,6 +37,24 @@ struct NoRefresh;
 impl TokenRefreshClient for NoRefresh {
     async fn refresh(&self, _: &str) -> proxy_core::error::Result<TokenResponse> {
         unreachable!("test token is not expiring")
+    }
+}
+
+struct CountingRefresh {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl TokenRefreshClient for CountingRefresh {
+    async fn refresh(&self, _: &str) -> proxy_core::error::Result<TokenResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(TokenResponse {
+            access_token: "refreshed-access".into(),
+            refresh_token: Some("refreshed-refresh".into()),
+            expires_in: Some(3_600),
+            id_token: None,
+            extra: Default::default(),
+        })
     }
 }
 
@@ -194,10 +215,12 @@ async fn claude_clear_starts_fresh_codex_upstream_session_without_forwarding() {
     assert!(first_session.len() <= 64, "{first_session}");
     assert!(after_session.len() <= 64, "{after_session}");
 
-    let bodies = state.bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 2);
-    assert_eq!(bodies[0]["input"][0]["content"][0]["text"], "before clear");
-    assert_eq!(bodies[1]["input"][0]["content"][0]["text"], "after clear");
+    {
+        let bodies = state.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0]["input"][2]["content"][0]["text"], "before clear");
+        assert_eq!(bodies[1]["input"][2]["content"][0]["text"], "after clear");
+    }
     server.stop().await;
 }
 
@@ -693,8 +716,7 @@ async fn deepseek_upstream_errors_are_preserved() {
 async fn custom_openai_responses_request_uses_configured_url_and_optional_key() {
     let state = Arc::new(CustomOpenAIMockState::default());
     let upstream = start_mock_upstream(mock_custom_openai_responses_app(state.clone())).await;
-    let (config, paths) =
-        test_custom_openai_config(upstream, CustomOpenAIProtocol::Responses, false).await;
+    let (config, paths) = test_custom_openai_config(upstream, false).await;
     let server = serve(config, paths, test_auth()).await.unwrap();
     let client = reqwest::Client::new();
     let response = client
@@ -724,8 +746,7 @@ async fn custom_openai_responses_request_uses_configured_url_and_optional_key() 
 async fn custom_openai_responses_request_sends_authorization_when_key_saved() {
     let state = Arc::new(CustomOpenAIMockState::default());
     let upstream = start_mock_upstream(mock_custom_openai_responses_app(state.clone())).await;
-    let (config, paths) =
-        test_custom_openai_config(upstream, CustomOpenAIProtocol::Responses, true).await;
+    let (config, paths) = test_custom_openai_config(upstream, true).await;
     let server = serve(config, paths, test_auth()).await.unwrap();
     let client = reqwest::Client::new();
     let response = client
@@ -748,11 +769,59 @@ async fn custom_openai_responses_request_sends_authorization_when_key_saved() {
 }
 
 #[tokio::test]
+async fn codex_retries_one_401_after_oauth_refresh_but_custom_does_not_refresh() {
+    let state = Arc::new(AuthRetryState::default());
+    let upstream = start_mock_upstream(mock_auth_retry_app(state.clone())).await;
+
+    let refresh = Arc::new(CountingRefresh {
+        calls: AtomicUsize::new(0),
+    });
+    let auth = AuthManager::new(
+        Arc::new(MemoryTokenStore::with(StoredAuth {
+            access: "old-access".into(),
+            refresh: "refresh".into(),
+            expires_at_ms: i64::MAX,
+            account_id: Some("acct".into()),
+        })),
+        refresh.clone(),
+    );
+    let (codex_config, codex_paths) = test_config(upstream, "/codex").await;
+    let codex = serve(codex_config, codex_paths, auth).await.unwrap();
+    let response = send_basic_message(codex.addr, "gpt-5.6-sol").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(state.codex_calls.load(Ordering::SeqCst), 2);
+    codex.stop().await;
+
+    let (custom_config, custom_paths) = test_custom_openai_config(upstream, true).await;
+    let custom = serve(custom_config, custom_paths, test_auth())
+        .await
+        .unwrap();
+    let response = send_basic_message(custom.addr, "gpt-5.6-sol").await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(state.custom_calls.load(Ordering::SeqCst), 1);
+    custom.stop().await;
+}
+
+async fn send_basic_message(proxy: std::net::SocketAddr, model: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{proxy}/v1/messages"))
+        .json(&serde_json::json!({
+            "model": model,
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
 async fn admin_route_model_override_maps_claude_aliases_to_configured_upstream() {
     let state = Arc::new(CustomOpenAIMockState::default());
     let upstream = start_mock_upstream(mock_custom_openai_responses_app(state.clone())).await;
-    let (config, paths) =
-        test_custom_openai_config(upstream, CustomOpenAIProtocol::Responses, false).await;
+    let (config, paths) = test_custom_openai_config(upstream, false).await;
     let server = serve(config, paths, test_auth()).await.unwrap();
     let client = reqwest::Client::new();
 
@@ -760,6 +829,7 @@ async fn admin_route_model_override_maps_claude_aliases_to_configured_upstream()
         server.addr,
         "custom-openai",
         "llama-3.3-70b",
+        "llama-3.1-8b",
         "llama-3.2-3b",
         128_000,
     )
@@ -782,6 +852,23 @@ async fn admin_route_model_override_maps_claude_aliases_to_configured_upstream()
         Some("llama-3.3-70b")
     );
 
+    let sonnet = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "sonnet"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sonnet.status(), StatusCode::OK);
+    assert_eq!(
+        state.last_model.lock().unwrap().as_deref(),
+        Some("llama-3.1-8b")
+    );
+
     let small = client
         .post(format!("http://{}/v1/messages", server.addr))
         .json(&serde_json::json!({
@@ -802,48 +889,17 @@ async fn admin_route_model_override_maps_claude_aliases_to_configured_upstream()
 }
 
 #[tokio::test]
-async fn custom_openai_chat_completions_non_streaming_is_translated() {
-    let state = Arc::new(CustomOpenAIMockState::default());
-    let upstream = start_mock_upstream(mock_custom_openai_chat_app(state.clone())).await;
-    let (config, paths) =
-        test_custom_openai_config(upstream, CustomOpenAIProtocol::ChatCompletions, false).await;
-    let server = serve(config, paths, test_auth()).await.unwrap();
-    let client = reqwest::Client::new();
-    let response = client
-        .post(format!("http://{}/v1/messages", server.addr))
-        .json(&serde_json::json!({
-            "model": "local-model[1m]",
-            "max_tokens": 64,
-            "stream": false,
-            "messages": [{"role": "user", "content": "hello"}]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.json::<serde_json::Value>().await.unwrap();
-    assert_eq!(body["content"][0]["text"], "hello from custom chat");
-    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        state.last_model.lock().unwrap().as_deref(),
-        Some("local-model")
-    );
-    server.stop().await;
-}
-
-#[tokio::test]
 async fn custom_openai_admin_status_reports_protocol() {
     let state = Arc::new(CustomOpenAIMockState::default());
-    let upstream = start_mock_upstream(mock_custom_openai_chat_app(state)).await;
-    let (config, paths) =
-        test_custom_openai_config(upstream, CustomOpenAIProtocol::ChatCompletions, false).await;
+    let upstream = start_mock_upstream(mock_custom_openai_responses_app(state)).await;
+    let (config, paths) = test_custom_openai_config(upstream, false).await;
     let server = serve(config, paths, test_auth()).await.unwrap();
 
     let status = admin_status(server.addr).await;
     assert_eq!(status["provider"], "custom-openai");
-    assert_eq!(status["transport"]["configured"], "chat-completions");
-    assert_eq!(status["transport"]["currentMethod"], "http-sse");
-    assert_eq!(status["customOpenAI"]["protocol"], "chat-completions");
+    assert_eq!(status["transport"]["configured"], "http-sse");
+    assert!(status["transport"]["currentMethod"].is_null());
+    assert_eq!(status["customOpenAI"]["protocol"], "responses");
     assert_eq!(status["customOpenAI"]["apiKey"]["configured"], false);
     server.stop().await;
 }
@@ -918,6 +974,88 @@ async fn auto_transport_falls_back_to_http_and_cools_down_websocket() {
     assert_eq!(status["transport"]["currentMethod"], "http-sse");
     assert!(status["transport"]["websocketCooldownMs"].as_u64().unwrap() > 0);
     server.stop().await;
+}
+
+#[tokio::test]
+async fn custom_openai_auto_transport_falls_back_to_http_and_cools_down_websocket() {
+    let state = Arc::new(HttpOnlyState::default());
+    let upstream = start_mock_upstream(mock_http_only_app(state.clone())).await;
+    let (mut config, paths) = test_custom_openai_config(upstream, false).await;
+    config.custom_openai.transport = CodexTransport::Auto;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+
+    for _ in 0..2 {
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/v1/messages", server.addr))
+            .json(&serde_json::json!({
+                "model": "gpt-5.6-luna",
+                "max_tokens": 64,
+                "stream": false,
+                "messages": [{"role": "user", "content": "hello"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    assert!(state.websocket_attempts.load(Ordering::SeqCst) <= 1);
+    assert_eq!(state.http_posts.load(Ordering::SeqCst), 2);
+    let status = admin_status(server.addr).await;
+    assert_eq!(status["transport"]["configured"], "auto");
+    assert_eq!(status["transport"]["currentMethod"], "http-sse");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn forced_websocket_works_for_codex_and_custom_openai() {
+    let upstream = start_mock_upstream(mock_websocket_responses_app()).await;
+
+    let (mut codex_config, codex_paths) = test_config(upstream, "/codex").await;
+    codex_config.codex.transport = CodexTransport::WebSocket;
+    let codex = serve(codex_config, codex_paths, test_auth()).await.unwrap();
+    assert_websocket_response(codex.addr).await;
+    codex.stop().await;
+
+    let (mut custom_config, custom_paths) = test_custom_openai_config(upstream, false).await;
+    custom_config.custom_openai.transport = CodexTransport::WebSocket;
+    let custom = serve(custom_config, custom_paths, test_auth())
+        .await
+        .unwrap();
+    assert_websocket_response(custom.addr).await;
+    custom.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_metadata_is_buffered_until_model_errors_can_set_http_status() {
+    let upstream = start_mock_upstream(mock_websocket_error_after_metadata_app()).await;
+    let (mut config, paths) = test_config(upstream, "/ws-error").await;
+    config.codex.transport = CodexTransport::WebSocket;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+
+    let response = send_basic_message(server.addr, "gpt-5.6-luna").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("model_not_found"));
+    assert!(body.contains("gpt-5.6-luna"));
+    server.stop().await;
+}
+
+async fn assert_websocket_response(proxy: std::net::SocketAddr) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{proxy}/v1/messages"))
+        .json(&serde_json::json!({
+            "model": "gpt-5.6-luna",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["content"][0]["text"], "hello from websocket");
 }
 
 #[tokio::test]
@@ -1157,48 +1295,6 @@ async fn mock_custom_openai_responses_response(
         .unwrap()
 }
 
-fn mock_custom_openai_chat_app(state: Arc<CustomOpenAIMockState>) -> Router {
-    Router::new()
-        .route(
-            "/openai/v1/chat/completions",
-            post(mock_custom_openai_chat_response),
-        )
-        .with_state(state)
-}
-
-async fn mock_custom_openai_chat_response(
-    State(state): State<Arc<CustomOpenAIMockState>>,
-    headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> Response<Body> {
-    state.calls.fetch_add(1, Ordering::SeqCst);
-    *state.last_model.lock().unwrap() = body
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned);
-    *state.last_authorization.lock().unwrap() = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            serde_json::json!({
-                "id": "chatcmpl_custom",
-                "object": "chat.completion",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "hello from custom chat"},
-                    "finish_reason": "stop"
-                }],
-                "usage": {"prompt_tokens": 3, "completion_tokens": 4}
-            })
-            .to_string(),
-        ))
-        .unwrap()
-}
-
 fn mock_deepseek_json_app(state: Arc<DeepSeekMockState>) -> Router {
     Router::new()
         .route("/anthropic/v1/messages", post(mock_deepseek_json_response))
@@ -1288,13 +1384,159 @@ struct HttpOnlyState {
     http_posts: AtomicUsize,
 }
 
+#[derive(Default)]
+struct AuthRetryState {
+    codex_calls: AtomicUsize,
+    custom_calls: AtomicUsize,
+}
+
+fn mock_auth_retry_app(state: Arc<AuthRetryState>) -> Router {
+    Router::new()
+        .route("/codex", post(mock_codex_auth_retry_response))
+        .route(
+            "/openai/v1/responses",
+            post(mock_custom_auth_retry_response),
+        )
+        .with_state(state)
+}
+
+async fn mock_codex_auth_retry_response(
+    State(state): State<Arc<AuthRetryState>>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    state.codex_calls.fetch_add(1, Ordering::SeqCst);
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some("Bearer refreshed-access")
+    {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::from("expired"))
+            .unwrap();
+    }
+    mock_success_sse_body()
+}
+
+async fn mock_custom_auth_retry_response(
+    State(state): State<Arc<AuthRetryState>>,
+) -> Response<Body> {
+    state.custom_calls.fetch_add(1, Ordering::SeqCst);
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .body(Body::from("custom unauthorized"))
+        .unwrap()
+}
+
+fn mock_success_sse_body() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
+             data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n",
+        ))
+        .unwrap()
+}
+
 fn mock_http_only_app(state: Arc<HttpOnlyState>) -> Router {
     Router::new()
         .route(
             "/codex",
             get(mock_http_only_websocket_attempt).post(mock_http_only_response),
         )
+        .route(
+            "/openai/v1/responses",
+            get(mock_http_only_websocket_attempt).post(mock_http_only_response),
+        )
         .with_state(state)
+}
+
+fn mock_websocket_responses_app() -> Router {
+    Router::new()
+        .route("/codex", get(mock_websocket_responses_upgrade))
+        .route(
+            "/openai/v1/responses",
+            get(mock_websocket_responses_upgrade),
+        )
+}
+
+fn mock_websocket_error_after_metadata_app() -> Router {
+    Router::new().route(
+        "/ws-error",
+        get(mock_websocket_error_after_metadata_upgrade),
+    )
+}
+
+async fn mock_websocket_error_after_metadata_upgrade(
+    ws: WebSocketUpgrade,
+) -> impl axum::response::IntoResponse {
+    ws.on_upgrade(mock_websocket_error_after_metadata_stream)
+}
+
+async fn mock_websocket_error_after_metadata_stream(mut socket: WebSocket) {
+    let Some(Ok(AxumWebSocketMessage::Text(_))) = socket.recv().await else {
+        return;
+    };
+    socket
+        .send(AxumWebSocketMessage::Text(
+            serde_json::json!({"type": "response.rate_limits"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(AxumWebSocketMessage::Text(
+            serde_json::json!({
+                "type": "error",
+                "status": 404,
+                "error": {
+                    "type": "model_not_found",
+                    "message": "gpt-5.6-luna was not found"
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+}
+
+async fn mock_websocket_responses_upgrade(
+    ws: WebSocketUpgrade,
+) -> impl axum::response::IntoResponse {
+    ws.on_upgrade(mock_websocket_responses_stream)
+}
+
+async fn mock_websocket_responses_stream(mut socket: WebSocket) {
+    let Some(Ok(AxumWebSocketMessage::Text(request))) = socket.recv().await else {
+        return;
+    };
+    let request = serde_json::from_str::<serde_json::Value>(&request).unwrap();
+    assert_eq!(request["type"], "response.create");
+    assert_eq!(request["model"], "gpt-5.6-luna");
+    assert_eq!(
+        request["client_metadata"]["ws_request_header_x_openai_internal_codex_responses_lite"],
+        "true"
+    );
+    socket
+        .send(AxumWebSocketMessage::Text(
+            serde_json::json!({
+                "type": "response.output_text.delta",
+                "delta": "hello from websocket"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(AxumWebSocketMessage::Text(
+            serde_json::json!({
+                "type": "response.completed",
+                "usage": {"input_tokens": 3, "output_tokens": 3}
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
 }
 
 async fn mock_http_only_websocket_attempt(
@@ -1544,6 +1786,7 @@ async fn admin_set_route_models(
     addr: std::net::SocketAddr,
     active_profile: &str,
     primary_model: &str,
+    sonnet_model: &str,
     small_model: &str,
     context_window: u32,
 ) -> serde_json::Value {
@@ -1553,6 +1796,7 @@ async fn admin_set_route_models(
         .json(&serde_json::json!({
             "activeProfile": active_profile,
             "primaryModel": primary_model,
+            "sonnetModel": sonnet_model,
             "smallModel": small_model,
             "contextWindow": context_window
         }))
@@ -1602,14 +1846,13 @@ async fn test_deepseek_config(upstream: std::net::SocketAddr) -> (AppConfig, App
 
 async fn test_custom_openai_config(
     upstream: std::net::SocketAddr,
-    protocol: CustomOpenAIProtocol,
     with_key: bool,
 ) -> (AppConfig, AppPaths) {
     let (mut config, paths) = test_config(upstream, "/unused").await;
     config.provider = Provider::CustomOpenAI;
     config.routing.active_profile = "custom-openai".into();
     config.custom_openai.base_url = format!("http://{upstream}/openai");
-    config.custom_openai.protocol = protocol;
+    config.custom_openai.transport = CodexTransport::Http;
     if with_key {
         store_custom_openai_api_key(&paths.custom_openai_api_key_file, "custom-secret").unwrap();
     }

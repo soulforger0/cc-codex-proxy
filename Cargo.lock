@@ -130,6 +130,7 @@ dependencies = [
  "async-trait",
  "axum-core",
  "axum-macros",
+ "base64",
  "bytes",
  "futures-util",
  "http",
@@ -148,8 +149,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -239,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "cc-codex-proxy"
-version = "0.5.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1063,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-core"
-version = "0.5.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-stream",

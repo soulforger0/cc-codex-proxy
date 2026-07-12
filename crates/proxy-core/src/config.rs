@@ -15,7 +15,10 @@ pub const DEFAULT_DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com/anthropic"
 pub const DEFAULT_CUSTOM_OPENAI_ENDPOINT: &str = "";
 pub const DEFAULT_OAUTH_ISSUER: &str = "https://auth.openai.com";
 pub const DEFAULT_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-pub const DEFAULT_ORIGINATOR: &str = "cc-codex-proxy";
+pub const DEFAULT_ORIGINATOR: &str = "codex_cli_rs";
+pub const DEFAULT_PROXY_USER_AGENT_PRODUCT: &str = "cc-codex-proxy";
+pub const DEFAULT_CODEX_COMPAT_VERSION: &str = "0.144.0-alpha.4";
+pub const CODEX_COMPAT_VERSION_ENV: &str = "CCP_CODEX_COMPAT_VERSION";
 pub const OAUTH_CALLBACK_PORT: u16 = 1455;
 pub const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 pub const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
@@ -24,6 +27,7 @@ pub const DEFAULT_PUBLIC_PRIMARY_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_PUBLIC_SONNET_MODEL: &str = "claude-sonnet-4-5";
 pub const DEFAULT_PUBLIC_SMALL_MODEL: &str = "claude-haiku-4-5";
 pub const DEFAULT_CODEX_PRIMARY_MODEL: &str = "gpt-5.6-sol";
+pub const DEFAULT_CODEX_SONNET_MODEL: &str = "gpt-5.6-terra";
 pub const DEFAULT_CODEX_SMALL_MODEL: &str = "gpt-5.6-luna";
 pub const DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL: &str = DEFAULT_PUBLIC_PRIMARY_MODEL;
 pub const DEFAULT_DEEPSEEK_PUBLIC_SMALL_MODEL: &str = DEFAULT_PUBLIC_SMALL_MODEL;
@@ -136,6 +140,21 @@ pub enum CodexTransport {
     Http,
 }
 
+impl FromStr for CodexTransport {
+    type Err = ProxyError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "websocket" | "ws" => Ok(Self::WebSocket),
+            "http" | "http-sse" | "sse" => Ok(Self::Http),
+            other => Err(ProxyError::Config(format!(
+                "unsupported OpenAI transport \"{other}\"; expected auto, websocket, or http"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexConfig {
@@ -162,7 +181,7 @@ impl Default for CodexConfig {
             oauth_issuer: DEFAULT_OAUTH_ISSUER.to_string(),
             oauth_client_id: DEFAULT_CODEX_CLIENT_ID.to_string(),
             originator: DEFAULT_ORIGINATOR.to_string(),
-            user_agent: format!("{DEFAULT_ORIGINATOR}/{}", env!("CARGO_PKG_VERSION")),
+            user_agent: compatible_openai_user_agent(),
             transport: CodexTransport::default(),
             previous_response_id: false,
             header_timeout_ms: DEFAULT_HEADER_TIMEOUT_MS,
@@ -194,7 +213,10 @@ impl Default for DeepSeekConfig {
     fn default() -> Self {
         Self {
             base_url: DEFAULT_DEEPSEEK_ENDPOINT.to_string(),
-            user_agent: format!("{DEFAULT_ORIGINATOR}/{}", env!("CARGO_PKG_VERSION")),
+            user_agent: format!(
+                "{DEFAULT_PROXY_USER_AGENT_PRODUCT}/{}",
+                env!("CARGO_PKG_VERSION")
+            ),
             header_timeout_ms: DEFAULT_HEADER_TIMEOUT_MS,
             connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
             pool_idle_timeout_ms: DEFAULT_POOL_IDLE_TIMEOUT_MS,
@@ -206,46 +228,13 @@ impl Default for DeepSeekConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CustomOpenAIProtocol {
-    #[default]
-    Responses,
-    ChatCompletions,
-}
-
-impl CustomOpenAIProtocol {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            CustomOpenAIProtocol::Responses => "responses",
-            CustomOpenAIProtocol::ChatCompletions => "chat-completions",
-        }
-    }
-}
-
-impl FromStr for CustomOpenAIProtocol {
-    type Err = ProxyError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        match value.to_ascii_lowercase().as_str() {
-            "responses" | "response" => Ok(Self::Responses),
-            "chat" | "chat-completions" | "chat_completions" | "completions" => {
-                Ok(Self::ChatCompletions)
-            }
-            other => Err(ProxyError::Config(format!(
-                "unsupported custom OpenAI protocol \"{other}\"; expected responses or chat-completions"
-            ))),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CustomOpenAIConfig {
     pub base_url: String,
     pub user_agent: String,
     pub header_timeout_ms: u64,
-    pub protocol: CustomOpenAIProtocol,
+    pub transport: CodexTransport,
     pub connect_timeout_ms: u64,
     pub pool_idle_timeout_ms: u64,
     pub pool_max_idle_per_host: usize,
@@ -258,9 +247,9 @@ impl Default for CustomOpenAIConfig {
     fn default() -> Self {
         Self {
             base_url: DEFAULT_CUSTOM_OPENAI_ENDPOINT.to_string(),
-            user_agent: format!("{DEFAULT_ORIGINATOR}/{}", env!("CARGO_PKG_VERSION")),
+            user_agent: compatible_openai_user_agent(),
             header_timeout_ms: DEFAULT_HEADER_TIMEOUT_MS,
-            protocol: CustomOpenAIProtocol::Responses,
+            transport: CodexTransport::default(),
             connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
             pool_idle_timeout_ms: DEFAULT_POOL_IDLE_TIMEOUT_MS,
             pool_max_idle_per_host: DEFAULT_POOL_MAX_IDLE_PER_HOST,
@@ -285,6 +274,8 @@ pub struct RouteProfileConfig {
     pub id: String,
     pub provider: Provider,
     pub primary_model: String,
+    #[serde(default)]
+    pub sonnet_model: Option<String>,
     pub small_model: String,
     pub context_window: u32,
 }
@@ -295,8 +286,9 @@ impl Default for RouteProfileConfig {
             id: "codex".into(),
             provider: Provider::Codex,
             primary_model: DEFAULT_CODEX_PRIMARY_MODEL.into(),
+            sonnet_model: Some(DEFAULT_CODEX_SONNET_MODEL.into()),
             small_model: DEFAULT_CODEX_SMALL_MODEL.into(),
-            context_window: 272_000,
+            context_window: 372_000,
         }
     }
 }
@@ -331,6 +323,7 @@ pub struct ClaudeProxyConfig {
     pub stable_host: String,
     pub stable_port: u16,
     pub public_primary_model: String,
+    pub public_sonnet_model: String,
     pub public_small_model: String,
     pub auto_compact_window: u32,
     pub downstream_idle_ping_ms: u64,
@@ -342,8 +335,9 @@ impl Default for ClaudeProxyConfig {
             stable_host: "127.0.0.1".into(),
             stable_port: DEFAULT_PORT,
             public_primary_model: DEFAULT_PUBLIC_PRIMARY_MODEL.into(),
+            public_sonnet_model: DEFAULT_PUBLIC_SONNET_MODEL.into(),
             public_small_model: DEFAULT_PUBLIC_SMALL_MODEL.into(),
-            auto_compact_window: 272_000,
+            auto_compact_window: 372_000,
             downstream_idle_ping_ms: DEFAULT_CLAUDE_COMPAT_DOWNSTREAM_IDLE_PING_MS,
         }
     }
@@ -355,13 +349,15 @@ pub fn default_route_profiles() -> Vec<RouteProfileConfig> {
             id: "codex".into(),
             provider: Provider::Codex,
             primary_model: DEFAULT_CODEX_PRIMARY_MODEL.into(),
+            sonnet_model: Some(DEFAULT_CODEX_SONNET_MODEL.into()),
             small_model: DEFAULT_CODEX_SMALL_MODEL.into(),
-            context_window: 272_000,
+            context_window: 372_000,
         },
         RouteProfileConfig {
             id: "deepseek".into(),
             provider: Provider::DeepSeek,
             primary_model: "deepseek-v4-pro".into(),
+            sonnet_model: Some("deepseek-v4-pro".into()),
             small_model: "deepseek-v4-flash".into(),
             context_window: 1_000_000,
         },
@@ -369,8 +365,9 @@ pub fn default_route_profiles() -> Vec<RouteProfileConfig> {
             id: "custom-openai".into(),
             provider: Provider::CustomOpenAI,
             primary_model: DEFAULT_CODEX_PRIMARY_MODEL.into(),
+            sonnet_model: Some(DEFAULT_CODEX_SONNET_MODEL.into()),
             small_model: DEFAULT_CODEX_SMALL_MODEL.into(),
-            context_window: 128_000,
+            context_window: 372_000,
         },
     ]
 }
@@ -431,11 +428,17 @@ impl AppConfig {
     pub fn load(paths: &AppPaths) -> Result<Self> {
         paths.ensure()?;
         let mut cfg = match fs::read_to_string(&paths.config_file) {
-            Ok(raw) => serde_json::from_str::<AppConfig>(&raw)?,
+            Ok(raw) => {
+                reject_legacy_custom_openai_protocol(&raw)?;
+                serde_json::from_str::<AppConfig>(&raw)?
+            }
             Err(err) if err.kind() == ErrorKind::NotFound => AppConfig::default(),
             Err(err) => return Err(err.into()),
         };
-        cfg.apply_env();
+        cfg.apply_env()?;
+        cfg.codex.originator = DEFAULT_ORIGINATOR.into();
+        cfg.codex.user_agent = compatible_openai_user_agent();
+        cfg.custom_openai.user_agent = compatible_openai_user_agent();
         cfg.admin_token = ensure_admin_token(&paths.admin_token_file)?;
         Ok(cfg)
     }
@@ -460,7 +463,7 @@ impl AppConfig {
             })
     }
 
-    fn apply_env(&mut self) {
+    fn apply_env(&mut self) -> Result<()> {
         if let Ok(port) = env::var("PORT") {
             if let Ok(port) = port.parse::<u16>() {
                 self.port = port;
@@ -482,10 +485,8 @@ impl AppConfig {
         if let Ok(url) = env::var("CCP_CUSTOM_OPENAI_BASE_URL") {
             self.custom_openai.base_url = url;
         }
-        if let Ok(protocol) = env::var("CCP_CUSTOM_OPENAI_PROTOCOL") {
-            if let Ok(protocol) = protocol.parse::<CustomOpenAIProtocol>() {
-                self.custom_openai.protocol = protocol;
-            }
+        if env::var_os("CCP_CUSTOM_OPENAI_PROTOCOL").is_some() {
+            return Err(legacy_custom_openai_protocol_error());
         }
         if let Ok(value) = env::var("CCP_LOG_STDERR") {
             self.log.stderr = truthy(&value);
@@ -503,6 +504,9 @@ impl AppConfig {
                 _ => CodexTransport::Auto,
             };
         }
+        if let Ok(value) = env::var("CCP_CUSTOM_OPENAI_TRANSPORT") {
+            self.custom_openai.transport = parse_openai_transport(&value);
+        }
         if let Some(value) = env_u64("OPENAI_UPSTREAM_IDLE_WARN_MS") {
             self.codex.stream_idle_warn_ms = value;
             self.custom_openai.stream_idle_warn_ms = value;
@@ -514,7 +518,59 @@ impl AppConfig {
         if let Some(value) = env_u64("CLAUDE_COMPAT_DOWNSTREAM_IDLE_PING_MS") {
             self.claude.downstream_idle_ping_ms = value;
         }
+        Ok(())
     }
+}
+
+fn parse_openai_transport(value: &str) -> CodexTransport {
+    match value.to_ascii_lowercase().as_str() {
+        "websocket" | "ws" => CodexTransport::WebSocket,
+        "http" | "sse" => CodexTransport::Http,
+        _ => CodexTransport::Auto,
+    }
+}
+
+pub fn codex_compat_version() -> String {
+    env::var(CODEX_COMPAT_VERSION_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_CODEX_COMPAT_VERSION.to_string())
+}
+
+pub fn compatible_openai_user_agent() -> String {
+    format!(
+        "codex_cli_rs/{} cc-codex-proxy/{}",
+        codex_compat_version(),
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn reject_legacy_custom_openai_protocol(raw: &str) -> Result<()> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Ok(());
+    };
+    let protocol = value
+        .get("custom_openai")
+        .or_else(|| value.get("customOpenAI"))
+        .and_then(|custom| custom.get("protocol"))
+        .and_then(serde_json::Value::as_str);
+    if protocol.is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "chat" | "chat-completions" | "chat_completions" | "completions"
+        )
+    }) {
+        return Err(legacy_custom_openai_protocol_error());
+    }
+    Ok(())
+}
+
+fn legacy_custom_openai_protocol_error() -> ProxyError {
+    ProxyError::Config(
+        "Custom OpenAI Chat Completions support was removed in v1.0.0. Configure a Responses-compatible base URL and remove custom_openai.protocol / CCP_CUSTOM_OPENAI_PROTOCOL."
+            .into(),
+    )
 }
 
 fn env_u64(name: &str) -> Option<u64> {
@@ -582,8 +638,12 @@ mod tests {
             .find(|profile| profile.id == "codex")
             .unwrap();
         assert_eq!(codex.primary_model, DEFAULT_CODEX_PRIMARY_MODEL);
+        assert_eq!(
+            codex.sonnet_model.as_deref(),
+            Some(DEFAULT_CODEX_SONNET_MODEL)
+        );
         assert_eq!(codex.small_model, DEFAULT_CODEX_SMALL_MODEL);
-        assert_eq!(codex.context_window, 272_000);
+        assert_eq!(codex.context_window, 372_000);
 
         let custom_openai = config
             .routing
@@ -592,8 +652,12 @@ mod tests {
             .find(|profile| profile.id == "custom-openai")
             .unwrap();
         assert_eq!(custom_openai.primary_model, DEFAULT_CODEX_PRIMARY_MODEL);
+        assert_eq!(
+            custom_openai.sonnet_model.as_deref(),
+            Some(DEFAULT_CODEX_SONNET_MODEL)
+        );
         assert_eq!(custom_openai.small_model, DEFAULT_CODEX_SMALL_MODEL);
-        assert_eq!(custom_openai.context_window, 128_000);
+        assert_eq!(custom_openai.context_window, 372_000);
 
         let deepseek = config
             .routing
@@ -608,6 +672,10 @@ mod tests {
         assert_eq!(
             config.claude.public_primary_model,
             DEFAULT_PUBLIC_PRIMARY_MODEL
+        );
+        assert_eq!(
+            config.claude.public_sonnet_model,
+            DEFAULT_PUBLIC_SONNET_MODEL
         );
     }
 
@@ -625,5 +693,25 @@ mod tests {
         assert!(config.stderr);
         assert!(!config.verbose);
         assert_eq!(config.max_bytes, DEFAULT_LOG_MAX_BYTES);
+    }
+
+    #[test]
+    fn legacy_route_without_sonnet_falls_back_to_primary() {
+        let profile = serde_json::from_str::<RouteProfileConfig>(
+            r#"{"id":"legacy","provider":"custom-openai","primaryModel":"primary","smallModel":"small","contextWindow":123}"#,
+        )
+        .unwrap();
+        assert_eq!(profile.sonnet_model, None);
+        let snapshot = crate::routing::RouteSnapshot::from(profile);
+        assert_eq!(snapshot.sonnet_model, "primary");
+    }
+
+    #[test]
+    fn legacy_chat_completions_config_has_migration_error() {
+        let err = reject_legacy_custom_openai_protocol(
+            r#"{"custom_openai":{"protocol":"chat-completions"}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Responses-compatible base URL"));
     }
 }

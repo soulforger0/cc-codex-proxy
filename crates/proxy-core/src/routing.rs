@@ -19,6 +19,7 @@ pub struct RouteSnapshot {
     pub id: String,
     pub provider: Provider,
     pub primary_model: String,
+    pub sonnet_model: String,
     pub small_model: String,
     pub context_window: u32,
 }
@@ -238,6 +239,7 @@ impl RouteManager {
         &self,
         profile_id: &str,
         primary_model: Option<String>,
+        sonnet_model: Option<String>,
         small_model: Option<String>,
         context_window: Option<u32>,
     ) -> Result<RouteSnapshot> {
@@ -248,6 +250,9 @@ impl RouteManager {
             })?;
             if let Some(primary_model) = primary_model {
                 profile.primary_model = primary_model;
+            }
+            if let Some(sonnet_model) = sonnet_model {
+                profile.sonnet_model = Some(sonnet_model);
             }
             if let Some(small_model) = small_model {
                 profile.small_model = small_model;
@@ -397,10 +402,15 @@ fn evict_excess_sessions(
 
 impl From<RouteProfileConfig> for RouteSnapshot {
     fn from(profile: RouteProfileConfig) -> Self {
+        let sonnet_model = profile
+            .sonnet_model
+            .clone()
+            .unwrap_or_else(|| profile.primary_model.clone());
         Self {
             id: profile.id,
             provider: profile.provider,
             primary_model: profile.primary_model,
+            sonnet_model,
             small_model: profile.small_model,
             context_window: profile.context_window,
         }
@@ -505,6 +515,7 @@ mod tests {
             .set_active_profile_config(
                 "custom-openai",
                 Some("llama-3.3-70b".into()),
+                Some("llama-3.3-8b".into()),
                 Some("llama-3.2-3b".into()),
                 Some(128_000),
             )
@@ -513,6 +524,7 @@ mod tests {
 
         assert_eq!(updated.provider, Provider::CustomOpenAI);
         assert_eq!(updated.primary_model, "llama-3.3-70b");
+        assert_eq!(updated.sonnet_model, "llama-3.3-8b");
         assert_eq!(updated.small_model, "llama-3.2-3b");
         assert_eq!(
             manager.active_route().await.unwrap().primary_model,

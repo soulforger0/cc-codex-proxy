@@ -1,7 +1,11 @@
 use crate::{
     auth::AuthManager,
     codex::translate::ResponsesRequest,
-    config::{CodexConfig, CodexTransport},
+    config::{
+        codex_compat_version, compatible_openai_user_agent, CodexConfig, CodexTransport,
+        CustomOpenAIConfig, DEFAULT_ORIGINATOR,
+    },
+    custom_openai::{resolve_api_key, responses_url},
     error::{ProxyError, Result},
     http_client::{
         build_client, duration_from_millis, monitor_idle_stream, optional_duration_from_millis,
@@ -14,6 +18,7 @@ use futures_util::{SinkExt, Stream, StreamExt};
 use http::StatusCode;
 use serde_json::{json, Value};
 use std::{
+    path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -48,21 +53,94 @@ pub struct CodexTransportStatus {
     pub websocket_cooldown_remaining: Option<Duration>,
 }
 
-pub struct CodexResponse {
+pub struct OpenAIResponsesResponse {
     pub body: ByteStream,
     pub status: StatusCode,
 }
 
 #[derive(Clone)]
-pub struct CodexClient {
+pub struct OpenAIResponsesClient {
     http: reqwest::Client,
-    config: CodexConfig,
-    auth: AuthManager,
+    config: OpenAIResponsesConfig,
+    credentials: CredentialSource,
     transport_state: Arc<TransportState>,
 }
 
-impl CodexClient {
-    pub fn new(config: CodexConfig, auth: AuthManager) -> Result<Self> {
+#[derive(Clone)]
+enum CredentialSource {
+    ChatGpt(AuthManager),
+    CustomBearer(PathBuf),
+}
+
+#[derive(Clone)]
+struct OpenAIResponsesConfig {
+    base_url: String,
+    originator: String,
+    user_agent: String,
+    compat_version: String,
+    transport: CodexTransport,
+    header_timeout_ms: u64,
+    connect_timeout_ms: u64,
+    pool_idle_timeout_ms: u64,
+    pool_max_idle_per_host: usize,
+    tcp_keepalive_ms: u64,
+    stream_idle_warn_ms: u64,
+    stream_idle_timeout_ms: u64,
+    provider_name: &'static str,
+}
+
+impl From<CodexConfig> for OpenAIResponsesConfig {
+    fn from(config: CodexConfig) -> Self {
+        Self {
+            base_url: config.base_url,
+            originator: DEFAULT_ORIGINATOR.into(),
+            user_agent: compatible_openai_user_agent(),
+            compat_version: codex_compat_version(),
+            transport: config.transport,
+            header_timeout_ms: config.header_timeout_ms,
+            connect_timeout_ms: config.connect_timeout_ms,
+            pool_idle_timeout_ms: config.pool_idle_timeout_ms,
+            pool_max_idle_per_host: config.pool_max_idle_per_host,
+            tcp_keepalive_ms: config.tcp_keepalive_ms,
+            stream_idle_warn_ms: config.stream_idle_warn_ms,
+            stream_idle_timeout_ms: config.stream_idle_timeout_ms,
+            provider_name: "Codex",
+        }
+    }
+}
+
+impl OpenAIResponsesClient {
+    pub fn new_codex(config: CodexConfig, auth: AuthManager) -> Result<Self> {
+        Self::new(config.into(), CredentialSource::ChatGpt(auth))
+    }
+
+    pub fn new_custom(config: CustomOpenAIConfig, api_key_file: PathBuf) -> Result<Self> {
+        let base_url = if config.base_url.trim().is_empty() {
+            String::new()
+        } else {
+            responses_url(&config.base_url)?
+        };
+        Self::new(
+            OpenAIResponsesConfig {
+                base_url,
+                originator: DEFAULT_ORIGINATOR.into(),
+                user_agent: compatible_openai_user_agent(),
+                compat_version: codex_compat_version(),
+                transport: config.transport,
+                header_timeout_ms: config.header_timeout_ms,
+                connect_timeout_ms: config.connect_timeout_ms,
+                pool_idle_timeout_ms: config.pool_idle_timeout_ms,
+                pool_max_idle_per_host: config.pool_max_idle_per_host,
+                tcp_keepalive_ms: config.tcp_keepalive_ms,
+                stream_idle_warn_ms: config.stream_idle_warn_ms,
+                stream_idle_timeout_ms: config.stream_idle_timeout_ms,
+                provider_name: "custom OpenAI",
+            },
+            CredentialSource::CustomBearer(api_key_file),
+        )
+    }
+
+    fn new(config: OpenAIResponsesConfig, credentials: CredentialSource) -> Result<Self> {
         let http = build_client(HttpClientTuning {
             connect_timeout_ms: config.connect_timeout_ms,
             pool_idle_timeout_ms: config.pool_idle_timeout_ms,
@@ -72,7 +150,7 @@ impl CodexClient {
         Ok(Self {
             http,
             config,
-            auth,
+            credentials,
             transport_state: Arc::new(TransportState::default()),
         })
     }
@@ -84,33 +162,61 @@ impl CodexClient {
         }
     }
 
+    pub fn base_url_configured(&self) -> bool {
+        !self.config.base_url.trim().is_empty()
+    }
+
     pub async fn post(
         &self,
         body: &ResponsesRequest,
         session_id: Option<&str>,
-    ) -> Result<CodexResponse> {
-        let auth = self.auth.get_auth().await?;
-        let mut response = self
-            .post_with_access(body, session_id, &auth.access, auth.account_id.as_deref())
-            .await;
-        if matches!(&response, Err(ProxyError::Upstream { status, .. }) if *status == StatusCode::UNAUTHORIZED)
-        {
-            warn!("codex returned 401; forcing token refresh");
-            let auth = self.auth.force_refresh().await?;
-            response = self
-                .post_with_access(body, session_id, &auth.access, auth.account_id.as_deref())
-                .await;
+    ) -> Result<OpenAIResponsesResponse> {
+        if self.config.base_url.trim().is_empty() {
+            return Err(ProxyError::Config(
+                "custom OpenAI base URL is required; set --custom-openai-base-url or CCP_CUSTOM_OPENAI_BASE_URL".into(),
+            ));
         }
-        response
+        match &self.credentials {
+            CredentialSource::ChatGpt(auth_manager) => {
+                let auth = auth_manager.get_auth().await?;
+                let mut response = self
+                    .post_with_access(
+                        body,
+                        session_id,
+                        Some(&auth.access),
+                        auth.account_id.as_deref(),
+                    )
+                    .await;
+                if matches!(&response, Err(ProxyError::Upstream { status, .. }) if *status == StatusCode::UNAUTHORIZED)
+                {
+                    warn!("Codex returned 401; forcing token refresh");
+                    let auth = auth_manager.force_refresh().await?;
+                    response = self
+                        .post_with_access(
+                            body,
+                            session_id,
+                            Some(&auth.access),
+                            auth.account_id.as_deref(),
+                        )
+                        .await;
+                }
+                response
+            }
+            CredentialSource::CustomBearer(path) => {
+                let token = resolve_api_key(path)?;
+                self.post_with_access(body, session_id, token.as_deref(), None)
+                    .await
+            }
+        }
     }
 
     async fn post_with_access(
         &self,
         body: &ResponsesRequest,
         session_id: Option<&str>,
-        access_token: &str,
+        access_token: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<CodexResponse> {
+    ) -> Result<OpenAIResponsesResponse> {
         match self.config.transport {
             CodexTransport::Http => {
                 self.post_http(body, session_id, access_token, account_id)
@@ -124,7 +230,8 @@ impl CodexClient {
                 if let Some(remaining) = self.transport_state.websocket_cooldown_remaining() {
                     debug!(
                         cooldown_ms = remaining.as_millis(),
-                        "skipping Codex websocket during fallback cooldown"
+                        provider = self.config.provider_name,
+                        "skipping OpenAI Responses websocket during fallback cooldown"
                     );
                     return self
                         .post_http(body, session_id, access_token, account_id)
@@ -145,7 +252,8 @@ impl CodexClient {
                         warn!(
                             error = %err,
                             cooldown_ms = WEBSOCKET_FAILURE_COOLDOWN.as_millis(),
-                            "codex websocket setup failed; falling back to HTTP SSE"
+                            provider = self.config.provider_name,
+                            "OpenAI Responses websocket setup failed; falling back to HTTP SSE"
                         );
                         self.post_http(body, session_id, access_token, account_id)
                             .await
@@ -159,19 +267,25 @@ impl CodexClient {
         &self,
         body: &ResponsesRequest,
         session_id: Option<&str>,
-        access_token: &str,
+        access_token: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<CodexResponse> {
+    ) -> Result<OpenAIResponsesResponse> {
         info!(
             model = %body.model,
             input_items = body.input.len(),
             tool_count = body.tools.as_ref().map_or(0, Vec::len),
-            "posting Codex HTTP request"
+            provider = self.config.provider_name,
+            "posting OpenAI Responses HTTP request"
         );
         let request = self
             .http
             .post(&self.config.base_url)
-            .headers(self.headers(access_token, account_id, session_id)?)
+            .headers(self.headers(
+                access_token,
+                account_id,
+                session_id,
+                is_responses_lite_model(&body.model),
+            )?)
             .json(body);
         let response = tokio::time::timeout(
             Duration::from_millis(self.config.header_timeout_ms),
@@ -179,11 +293,14 @@ impl CodexClient {
         )
         .await
         .map_err(|_| {
-            ProxyError::Transport("timed out waiting for Codex response headers".into())
+            ProxyError::Transport(format!(
+                "timed out waiting for {} response headers",
+                self.config.provider_name
+            ))
         })??;
         let status =
             StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        info!(%status, "received Codex HTTP response headers");
+        info!(%status, provider = self.config.provider_name, "received OpenAI Responses HTTP headers");
         if !status.is_success() {
             let retry_after = response
                 .headers()
@@ -195,7 +312,8 @@ impl CodexClient {
                 %status,
                 retry_after = ?retry_after,
                 upstream_body = %truncate_for_log(&body, 4_000),
-                "Codex HTTP request failed"
+                provider = self.config.provider_name,
+                "OpenAI Responses HTTP request failed"
             );
             return Err(ProxyError::Upstream {
                 status,
@@ -210,12 +328,12 @@ impl CodexClient {
             .map(|item| item.map_err(ProxyError::from));
         let stream = monitor_idle_stream(
             stream,
-            "Codex HTTP",
+            format!("{} HTTP", self.config.provider_name),
             session_id.map(ToOwned::to_owned),
             duration_from_millis(self.config.stream_idle_warn_ms),
             optional_duration_from_millis(self.config.stream_idle_timeout_ms),
         );
-        Ok(CodexResponse {
+        Ok(OpenAIResponsesResponse {
             body: stream,
             status,
         })
@@ -225,47 +343,63 @@ impl CodexClient {
         &self,
         body: &ResponsesRequest,
         session_id: Option<&str>,
-        access_token: &str,
+        access_token: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<CodexResponse> {
+    ) -> Result<OpenAIResponsesResponse> {
         let ws_url = websocket_url(&self.config.base_url)?;
         let request =
             build_websocket_request(&ws_url, &self.config, access_token, account_id, session_id)?;
         let (mut socket, _) =
             tokio::time::timeout(WEBSOCKET_CONNECT_TIMEOUT, connect_async(request))
                 .await
-                .map_err(|_| ProxyError::Transport("timed out opening Codex websocket".into()))?
+                .map_err(|_| {
+                    ProxyError::Transport(format!(
+                        "timed out opening {} websocket",
+                        self.config.provider_name
+                    ))
+                })?
                 .map_err(|err| {
-                    ProxyError::Transport(format!("Codex websocket setup failed: {err}"))
+                    ProxyError::Transport(format!(
+                        "{} websocket setup failed: {err}",
+                        self.config.provider_name
+                    ))
                 })?;
-        info!(model = %body.model, input_items = body.input.len(), "Codex websocket connected");
+        info!(model = %body.model, input_items = body.input.len(), provider = self.config.provider_name, "OpenAI Responses websocket connected");
         let payload = websocket_create_payload(body);
-        socket
-            .send(Message::Text(payload))
-            .await
-            .map_err(|err| ProxyError::Transport(format!("Codex websocket send failed: {err}")))?;
+        socket.send(Message::Text(payload)).await.map_err(|err| {
+            ProxyError::Transport(format!(
+                "{} websocket send failed: {err}",
+                self.config.provider_name
+            ))
+        })?;
 
-        let first = read_first_websocket_event(&mut socket).await?;
+        let initial = read_initial_websocket_events(&mut socket).await?;
+        let provider_name = self.config.provider_name;
         let session_id_for_log = session_id.map(str::to_owned);
-        log_websocket_frame(&first, 0, session_id_for_log.as_deref());
-        reject_websocket_error(&first)?;
+        for (index, message) in initial.iter().enumerate() {
+            log_websocket_frame(message, index as u64, session_id_for_log.as_deref());
+            reject_websocket_error(message)?;
+        }
         self.transport_state
             .record_method(CodexTransportMethod::WebSocket);
         let stream = try_stream! {
-            let mut frame_index = 0_u64;
-            let first_is_terminal = websocket_message_is_terminal(&first);
-            if let Some(bytes) = websocket_message_to_bytes(first) {
-                yield bytes;
+            let mut frame_index = initial.len().saturating_sub(1) as u64;
+            let mut initial_is_terminal = false;
+            for message in initial {
+                initial_is_terminal |= websocket_message_is_terminal(&message);
+                if let Some(bytes) = websocket_message_to_bytes(message) {
+                    yield bytes;
+                }
             }
-            if first_is_terminal {
+            let mut frame_count = frame_index + 1;
+            if initial_is_terminal {
                 info!(
                     session_id = session_id_for_log.as_deref().unwrap_or("none"),
-                    frame_count = 1_u64,
-                    "Codex websocket response completed"
+                    frame_count,
+                    "OpenAI Responses websocket response completed"
                 );
                 return;
             }
-            let mut frame_count = 1_u64;
             loop {
                 match tokio::time::timeout(WEBSOCKET_READ_IDLE_WARN_INTERVAL, socket.next()).await {
                     Ok(Some(Ok(message))) => {
@@ -281,19 +415,21 @@ impl CodexClient {
                             info!(
                                 session_id = session_id_for_log.as_deref().unwrap_or("none"),
                                 frame_count,
-                                "Codex websocket response completed"
+                                provider = provider_name,
+                                "OpenAI Responses websocket response completed"
                             );
                             break;
                         }
                     }
                     Ok(Some(Err(err))) => Err(ProxyError::Transport(format!(
-                            "Codex websocket read failed: {err}"
+                            "{provider_name} websocket read failed: {err}"
                         )))?,
                     Ok(None) => {
                         info!(
                             session_id = session_id_for_log.as_deref().unwrap_or("none"),
                             frame_count,
-                            "Codex websocket stream ended"
+                            provider = provider_name,
+                            "OpenAI Responses websocket stream ended"
                         );
                         break;
                     }
@@ -302,13 +438,14 @@ impl CodexClient {
                             session_id = session_id_for_log.as_deref().unwrap_or("none"),
                             idle_ms = WEBSOCKET_READ_IDLE_WARN_INTERVAL.as_millis(),
                             frame_count,
-                            "Codex websocket stream idle while waiting for next frame"
+                            provider = provider_name,
+                            "OpenAI Responses websocket stream idle while waiting for next frame"
                         );
                     }
                 }
             }
         };
-        Ok(CodexResponse {
+        Ok(OpenAIResponsesResponse {
             body: Box::pin(stream),
             status: StatusCode::OK,
         })
@@ -316,9 +453,10 @@ impl CodexClient {
 
     fn headers(
         &self,
-        access_token: &str,
+        access_token: Option<&str>,
         account_id: Option<&str>,
         session_id: Option<&str>,
+        responses_lite: bool,
     ) -> Result<reqwest::header::HeaderMap> {
         let mut headers = reqwest::header::HeaderMap::new();
         insert_static(
@@ -327,13 +465,15 @@ impl CodexClient {
             "application/json",
         )?;
         insert_static(&mut headers, reqwest::header::ACCEPT, "text/event-stream")?;
-        insert_static(
-            &mut headers,
-            reqwest::header::AUTHORIZATION,
-            &format!("Bearer {access_token}"),
-        )?;
-        insert_static(&mut headers, "openai-beta", "responses=experimental")?;
+        if let Some(access_token) = access_token {
+            insert_static(
+                &mut headers,
+                reqwest::header::AUTHORIZATION,
+                &format!("Bearer {access_token}"),
+            )?;
+        }
         insert_static(&mut headers, "originator", &self.config.originator)?;
+        insert_static(&mut headers, "version", &self.config.compat_version)?;
         insert_static(
             &mut headers,
             reqwest::header::USER_AGENT,
@@ -343,12 +483,21 @@ impl CodexClient {
             insert_static(&mut headers, "ChatGPT-Account-Id", account_id)?;
         }
         if let Some(session_id) = session_id {
+            insert_static(&mut headers, "session-id", session_id)?;
+            insert_static(&mut headers, "thread-id", session_id)?;
             insert_static(&mut headers, "session_id", session_id)?;
             insert_static(&mut headers, "x-client-request-id", session_id)?;
             insert_static(
                 &mut headers,
                 "x-codex-window-id",
                 &format!("{session_id}:0"),
+            )?;
+        }
+        if responses_lite {
+            insert_static(
+                &mut headers,
+                "x-openai-internal-codex-responses-lite",
+                "true",
             )?;
         }
         Ok(headers)
@@ -447,15 +596,15 @@ fn websocket_url(url: &str) -> Result<String> {
         Ok(format!("ws://{rest}"))
     } else {
         Err(ProxyError::Config(format!(
-            "Codex base URL must be http(s): {url}"
+            "OpenAI Responses base URL must be http(s): {url}"
         )))
     }
 }
 
 fn build_websocket_request(
     ws_url: &str,
-    config: &CodexConfig,
-    access_token: &str,
+    config: &OpenAIResponsesConfig,
+    access_token: Option<&str>,
     account_id: Option<&str>,
     session_id: Option<&str>,
 ) -> Result<WebSocketRequest> {
@@ -463,15 +612,20 @@ fn build_websocket_request(
         .parse::<http::Uri>()
         .map_err(|err| ProxyError::Transport(format!("bad websocket URL: {err}")))?;
     let mut request = ClientRequestBuilder::new(uri)
-        .with_header("authorization", format!("Bearer {access_token}"))
-        .with_header("openai-beta", "responses=experimental")
+        .with_header("openai-beta", "responses_websockets=2026-02-06")
         .with_header("originator", config.originator.as_str())
+        .with_header("version", config.compat_version.as_str())
         .with_header("user-agent", config.user_agent.as_str());
+    if let Some(access_token) = access_token {
+        request = request.with_header("authorization", format!("Bearer {access_token}"));
+    }
     if let Some(account_id) = account_id {
         request = request.with_header("ChatGPT-Account-Id", account_id);
     }
     if let Some(session_id) = session_id {
         request = request
+            .with_header("session-id", session_id)
+            .with_header("thread-id", session_id)
             .with_header("session_id", session_id)
             .with_header("x-client-request-id", session_id)
             .with_header("x-codex-window-id", format!("{session_id}:0"));
@@ -486,37 +640,56 @@ fn websocket_create_payload(body: &ResponsesRequest) -> String {
     if let Some(object) = value.as_object_mut() {
         object.insert("type".into(), json!("response.create"));
         object.remove("stream");
+        if is_responses_lite_model(&body.model) {
+            let metadata = object.entry("client_metadata").or_insert_with(|| json!({}));
+            if let Some(metadata) = metadata.as_object_mut() {
+                metadata.insert(
+                    "ws_request_header_x_openai_internal_codex_responses_lite".into(),
+                    json!("true"),
+                );
+            }
+        }
     }
     value.to_string()
 }
 
-async fn read_first_websocket_event<S>(socket: &mut WebSocketStream<S>) -> Result<Message>
+fn is_responses_lite_model(model: &str) -> bool {
+    model.starts_with("gpt-5.6-")
+}
+
+async fn read_initial_websocket_events<S>(socket: &mut WebSocketStream<S>) -> Result<Vec<Message>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     tokio::time::timeout(WEBSOCKET_FIRST_EVENT_TIMEOUT, async {
+        let mut buffered = Vec::new();
         loop {
             match socket.next().await {
                 Some(Ok(message @ Message::Text(_))) | Some(Ok(message @ Message::Binary(_))) => {
-                    return Ok(message);
+                    reject_websocket_error(&message)?;
+                    let model_response_started = websocket_model_response_started(&message);
+                    buffered.push(message);
+                    if model_response_started {
+                        return Ok(buffered);
+                    }
                 }
                 Some(Ok(Message::Close(frame))) => {
                     let detail = frame
                         .map(|frame| format!(": {} {}", frame.code, frame.reason))
                         .unwrap_or_default();
                     return Err(ProxyError::Transport(format!(
-                        "Codex websocket closed before first event{detail}"
+                        "OpenAI Responses websocket closed before first model event{detail}"
                     )));
                 }
                 Some(Ok(_)) => {}
                 Some(Err(err)) => {
                     return Err(ProxyError::Transport(format!(
-                        "Codex websocket read failed before first event: {err}"
+                        "OpenAI Responses websocket read failed before first model event: {err}"
                     )));
                 }
                 None => {
                     return Err(ProxyError::Transport(
-                        "Codex websocket ended before first event".into(),
+                        "OpenAI Responses websocket ended before first model event".into(),
                     ));
                 }
             }
@@ -524,8 +697,16 @@ where
     })
     .await
     .map_err(|_| {
-        ProxyError::Transport("timed out waiting for first Codex websocket event".into())
+        ProxyError::Transport("timed out waiting for first OpenAI Responses model event".into())
     })?
+}
+
+fn websocket_model_response_started(message: &Message) -> bool {
+    websocket_json_value(message)
+        .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+        .is_some_and(|typ| {
+            typ.starts_with("response.") && !typ.contains("rate_limit") && !typ.contains("metadata")
+        })
 }
 
 fn websocket_message_to_bytes(message: Message) -> Option<Bytes> {
@@ -567,7 +748,7 @@ fn reject_websocket_error(message: &Message) -> Result<()> {
         .pointer("/error/message")
         .or_else(|| value.get("message"))
         .and_then(Value::as_str)
-        .unwrap_or("Codex websocket returned an error event");
+        .unwrap_or("OpenAI Responses websocket returned an error event");
 
     Err(ProxyError::Upstream {
         status,
@@ -753,11 +934,11 @@ mod tests {
 
     #[test]
     fn websocket_request_includes_handshake_and_codex_headers() {
-        let config = CodexConfig::default();
+        let config = OpenAIResponsesConfig::from(CodexConfig::default());
         let request = build_websocket_request(
             "wss://example.test/backend-api/codex/responses",
             &config,
-            "access-token",
+            Some("access-token"),
             Some("account-id"),
             Some("session-id"),
         )
@@ -770,6 +951,16 @@ mod tests {
         assert_eq!(headers.get("authorization").unwrap(), "Bearer access-token");
         assert_eq!(headers.get("ChatGPT-Account-Id").unwrap(), "account-id");
         assert_eq!(headers.get("x-client-request-id").unwrap(), "session-id");
+        assert_eq!(headers.get("session-id").unwrap(), "session-id");
+        assert_eq!(headers.get("thread-id").unwrap(), "session-id");
+        assert_eq!(
+            headers.get("openai-beta").unwrap(),
+            "responses_websockets=2026-02-06"
+        );
+        assert_eq!(
+            headers.get("version").unwrap(),
+            crate::config::DEFAULT_CODEX_COMPAT_VERSION
+        );
     }
 
     #[test]
@@ -783,6 +974,59 @@ mod tests {
         assert_eq!(value["input"][0]["role"], "user");
         assert!(value.get("request").is_none());
         assert!(value.get("stream").is_none());
+    }
+
+    #[test]
+    fn websocket_create_payload_carries_responses_lite_signal() {
+        let mut request = minimal_response_request();
+        request.model = "gpt-5.6-luna".into();
+        request.client_metadata = Some(json!({"thread_id": "thread-1"}));
+        let value = serde_json::from_str::<Value>(&websocket_create_payload(&request)).unwrap();
+
+        assert_eq!(
+            value["client_metadata"]["ws_request_header_x_openai_internal_codex_responses_lite"],
+            "true"
+        );
+        assert_eq!(value["client_metadata"]["thread_id"], "thread-1");
+    }
+
+    #[test]
+    fn initial_metadata_events_do_not_commit_websocket_stream() {
+        assert!(!websocket_model_response_started(&Message::Text(
+            json!({"type": "response.rate_limits"}).to_string()
+        )));
+        assert!(!websocket_model_response_started(&Message::Text(
+            json!({"type": "response.metadata"}).to_string()
+        )));
+        assert!(websocket_model_response_started(&Message::Text(
+            json!({"type": "response.created"}).to_string()
+        )));
+    }
+
+    #[test]
+    fn custom_http_headers_use_shared_contract_without_required_auth() {
+        let client = OpenAIResponsesClient::new_custom(
+            CustomOpenAIConfig {
+                base_url: "https://example.test".into(),
+                transport: CodexTransport::Http,
+                ..Default::default()
+            },
+            PathBuf::from("/definitely/missing/custom-openai-key"),
+        )
+        .unwrap();
+        let headers = client.headers(None, None, Some("session-1"), true).unwrap();
+
+        assert!(headers.get(reqwest::header::AUTHORIZATION).is_none());
+        assert!(headers.get("ChatGPT-Account-Id").is_none());
+        assert_eq!(headers.get("originator").unwrap(), DEFAULT_ORIGINATOR);
+        assert_eq!(
+            headers
+                .get("x-openai-internal-codex-responses-lite")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(headers.get("session-id").unwrap(), "session-1");
+        assert_eq!(headers.get("thread-id").unwrap(), "session-1");
     }
 
     #[test]
@@ -851,9 +1095,13 @@ mod tests {
             instructions: None,
             tools: None,
             tool_choice: None,
+            parallel_tool_calls: None,
             reasoning: None,
             include: None,
             text: None,
+            service_tier: None,
+            prompt_cache_key: None,
+            client_metadata: None,
             stream: true,
         }
     }

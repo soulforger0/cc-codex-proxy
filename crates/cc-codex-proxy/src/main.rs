@@ -9,7 +9,7 @@ use proxy_core::{
         MANAGED_ENV_KEYS,
     },
     config::{
-        AppConfig, CustomOpenAIProtocol, Provider, DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL,
+        AppConfig, CodexTransport, Provider, DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL,
         DEFAULT_DEEPSEEK_PUBLIC_SMALL_MODEL, DEFAULT_PORT, DEFAULT_PUBLIC_PRIMARY_MODEL,
         DEFAULT_PUBLIC_SMALL_MODEL,
     },
@@ -60,14 +60,16 @@ struct ServeArgs {
     provider: Option<Provider>,
     #[arg(long)]
     model: Option<String>,
+    #[arg(long = "sonnet-model")]
+    sonnet_model: Option<String>,
     #[arg(long = "small-model")]
     small_model: Option<String>,
     #[arg(long)]
     context_window: Option<u32>,
     #[arg(long, env = "CCP_CUSTOM_OPENAI_BASE_URL")]
     custom_openai_base_url: Option<String>,
-    #[arg(long, env = "CCP_CUSTOM_OPENAI_PROTOCOL")]
-    custom_openai_protocol: Option<CustomOpenAIProtocol>,
+    #[arg(long, env = "CCP_CUSTOM_OPENAI_TRANSPORT")]
+    custom_openai_transport: Option<CodexTransport>,
 }
 
 #[derive(Debug, Args)]
@@ -78,8 +80,8 @@ struct DoctorArgs {
     model: Option<String>,
     #[arg(long, env = "CCP_CUSTOM_OPENAI_BASE_URL")]
     custom_openai_base_url: Option<String>,
-    #[arg(long, env = "CCP_CUSTOM_OPENAI_PROTOCOL")]
-    custom_openai_protocol: Option<CustomOpenAIProtocol>,
+    #[arg(long, env = "CCP_CUSTOM_OPENAI_TRANSPORT")]
+    custom_openai_transport: Option<CodexTransport>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -188,6 +190,8 @@ struct AdminRouteSetArgs {
     port: Option<u16>,
     #[arg(long)]
     model: Option<String>,
+    #[arg(long = "sonnet-model")]
+    sonnet_model: Option<String>,
     #[arg(long = "small-model")]
     small_model: Option<String>,
     #[arg(long)]
@@ -221,10 +225,11 @@ async fn main() -> Result<()> {
         port: None,
         provider: None,
         model: None,
+        sonnet_model: None,
         small_model: None,
         context_window: None,
         custom_openai_base_url: None,
-        custom_openai_protocol: None,
+        custom_openai_transport: None,
     })) {
         Command::Serve(args) => cmd_serve(args).await,
         Command::Auth(args) => cmd_auth(args).await,
@@ -249,11 +254,12 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     apply_custom_openai_args(
         &mut config,
         args.custom_openai_base_url,
-        args.custom_openai_protocol,
+        args.custom_openai_transport,
     );
     apply_route_model_args(
         &mut config,
         args.model,
+        args.sonnet_model,
         args.small_model,
         args.context_window,
     )?;
@@ -268,7 +274,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         codex_base_url = %config.codex.base_url,
         deepseek_base_url = %config.deepseek.base_url,
         custom_openai_base_url = %config.custom_openai.base_url,
-        custom_openai_protocol = %config.custom_openai.protocol.as_str(),
+        custom_openai_transport = ?config.custom_openai.transport,
         log_path = %paths.logs_dir.join("proxy.log").display(),
         "starting cc-codex-proxy server"
     );
@@ -398,7 +404,7 @@ async fn cmd_doctor(args: DoctorArgs) -> Result<()> {
     apply_custom_openai_args(
         &mut config,
         args.custom_openai_base_url,
-        args.custom_openai_protocol,
+        args.custom_openai_transport,
     );
     let provider = args.provider.unwrap_or(config.active_provider()?);
     let model = args
@@ -414,6 +420,7 @@ async fn cmd_doctor(args: DoctorArgs) -> Result<()> {
         registry.resolve_for_route(
             &route,
             &config.claude.public_primary_model,
+            &config.claude.public_sonnet_model,
             &config.claude.public_small_model,
             &model,
         )?
@@ -429,7 +436,8 @@ async fn cmd_doctor(args: DoctorArgs) -> Result<()> {
         Provider::DeepSeek => println!("Base URL: {}", config.deepseek.base_url),
         Provider::CustomOpenAI => {
             println!("Base URL: {}", config.custom_openai.base_url);
-            println!("Protocol: {}", config.custom_openai.protocol.as_str());
+            println!("Protocol: Responses");
+            println!("Transport: {:?}", config.custom_openai.transport);
         }
     }
     let manager = auth_manager(&config, &paths);
@@ -587,12 +595,12 @@ fn provider_claude_defaults(provider: Provider) -> ProviderClaudeDefaults {
         Provider::CustomOpenAI => ProviderClaudeDefaults {
             model: DEFAULT_PUBLIC_PRIMARY_MODEL,
             small_model: DEFAULT_PUBLIC_SMALL_MODEL,
-            auto_compact_window: 128_000,
+            auto_compact_window: 372_000,
         },
         Provider::Codex => ProviderClaudeDefaults {
             model: DEFAULT_PUBLIC_PRIMARY_MODEL,
             small_model: DEFAULT_PUBLIC_SMALL_MODEL,
-            auto_compact_window: 272_000,
+            auto_compact_window: 372_000,
         },
     }
 }
@@ -853,6 +861,9 @@ async fn cmd_admin(args: AdminCommand) -> Result<()> {
                 if let Some(model) = args.model {
                     body["primaryModel"] = serde_json::Value::String(model);
                 }
+                if let Some(sonnet_model) = args.sonnet_model {
+                    body["sonnetModel"] = serde_json::Value::String(sonnet_model);
+                }
                 if let Some(small_model) = args.small_model {
                     body["smallModel"] = serde_json::Value::String(small_model);
                 }
@@ -947,23 +958,28 @@ fn auth_manager(config: &AppConfig, paths: &proxy_core::AppPaths) -> AuthManager
 fn apply_custom_openai_args(
     config: &mut AppConfig,
     base_url: Option<String>,
-    protocol: Option<CustomOpenAIProtocol>,
+    transport: Option<CodexTransport>,
 ) {
     if let Some(base_url) = base_url {
         config.custom_openai.base_url = base_url;
     }
-    if let Some(protocol) = protocol {
-        config.custom_openai.protocol = protocol;
+    if let Some(transport) = transport {
+        config.custom_openai.transport = transport;
     }
 }
 
 fn apply_route_model_args(
     config: &mut AppConfig,
     model: Option<String>,
+    sonnet_model: Option<String>,
     small_model: Option<String>,
     context_window: Option<u32>,
 ) -> Result<()> {
-    if model.is_none() && small_model.is_none() && context_window.is_none() {
+    if model.is_none()
+        && sonnet_model.is_none()
+        && small_model.is_none()
+        && context_window.is_none()
+    {
         return Ok(());
     }
     let active_profile = config.routing.active_profile.clone();
@@ -980,6 +996,9 @@ fn apply_route_model_args(
         })?;
     if let Some(model) = model {
         profile.primary_model = model;
+    }
+    if let Some(sonnet_model) = sonnet_model {
+        profile.sonnet_model = Some(sonnet_model);
     }
     if let Some(small_model) = small_model {
         profile.small_model = small_model;
@@ -1028,10 +1047,10 @@ mod tests {
 
         assert_eq!(codex.model, DEFAULT_PUBLIC_PRIMARY_MODEL);
         assert_eq!(codex.small_fast_model, DEFAULT_PUBLIC_SMALL_MODEL);
-        assert_eq!(codex.auto_compact_window, 272_000);
+        assert_eq!(codex.auto_compact_window, 372_000);
         assert_eq!(custom_openai.model, DEFAULT_PUBLIC_PRIMARY_MODEL);
         assert_eq!(custom_openai.small_fast_model, DEFAULT_PUBLIC_SMALL_MODEL);
-        assert_eq!(custom_openai.auto_compact_window, 128_000);
+        assert_eq!(custom_openai.auto_compact_window, 372_000);
         assert_eq!(deepseek.model, DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL);
         assert_eq!(
             deepseek.small_fast_model,

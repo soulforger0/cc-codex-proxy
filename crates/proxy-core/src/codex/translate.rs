@@ -24,18 +24,40 @@ pub struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_metadata: Option<Value>,
     pub stream: bool,
+}
+
+impl ResponsesRequest {
+    pub fn set_session_metadata(&mut self, session_id: Option<&str>) {
+        if self.prompt_cache_key.is_none() && self.client_metadata.is_none() {
+            return;
+        }
+        let session_id = session_id.unwrap_or("cc-codex-proxy");
+        self.prompt_cache_key = Some(session_id.chars().take(64).collect());
+        self.client_metadata = Some(json!({
+            "session_id": session_id,
+            "thread_id": session_id,
+        }));
+    }
 }
 
 pub fn translate_request(
     request: &AnthropicRequest,
     resolved: &ResolvedModel,
-    _session_id: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<ResponsesRequest> {
     let mut instruction_parts = Vec::new();
     if let Some(system) = &request.system {
@@ -43,8 +65,8 @@ pub fn translate_request(
     }
     instruction_parts.push(TOOL_ROUTING_INSTRUCTION.to_string());
 
-    let input = build_input(&request.messages)?;
-    let instructions = (!instruction_parts.is_empty()).then(|| instruction_parts.join("\n\n"));
+    let mut input = build_input(&request.messages)?;
+    let instructions_text = instruction_parts.join("\n\n");
     let tools = request
         .tools
         .as_ref()
@@ -52,7 +74,26 @@ pub fn translate_request(
         .transpose()?
         .filter(|tools| !tools.is_empty());
     let tool_choice = Some(translate_tool_choice(request.tool_choice.as_ref()));
-    let reasoning = reasoning_from_request(request, resolved);
+    let responses_lite = is_responses_lite_model(&resolved.upstream_model);
+    let instructions = if responses_lite {
+        let mut prefix = vec![json!({
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": tools.clone().unwrap_or_default(),
+        })];
+        if !instructions_text.is_empty() {
+            prefix.push(json!({
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": instructions_text}],
+            }));
+        }
+        input.splice(0..0, prefix);
+        Some(String::new())
+    } else {
+        (!instructions_text.is_empty()).then_some(instructions_text)
+    };
+    let reasoning = reasoning_from_request(request, resolved, responses_lite);
     let include = reasoning
         .as_ref()
         .map(|_| vec!["reasoning.encrypted_content".to_string()]);
@@ -62,11 +103,26 @@ pub fn translate_request(
         input,
         store: false,
         instructions,
-        tools,
+        tools: (!responses_lite).then_some(tools).flatten(),
         tool_choice,
+        parallel_tool_calls: responses_lite.then_some(false),
         reasoning,
         include,
         text,
+        service_tier: resolved.service_tier.clone(),
+        prompt_cache_key: responses_lite.then(|| {
+            session_id
+                .unwrap_or(resolved.public_id.as_str())
+                .chars()
+                .take(64)
+                .collect()
+        }),
+        client_metadata: responses_lite.then(|| {
+            json!({
+                "session_id": session_id.unwrap_or("cc-codex-proxy"),
+                "thread_id": session_id.unwrap_or("cc-codex-proxy"),
+            })
+        }),
         stream: true,
     })
 }
@@ -346,7 +402,11 @@ fn translate_tool_choice(choice: Option<&Value>) -> Value {
     }
 }
 
-fn reasoning_from_request(request: &AnthropicRequest, resolved: &ResolvedModel) -> Option<Value> {
+fn reasoning_from_request(
+    request: &AnthropicRequest,
+    resolved: &ResolvedModel,
+    responses_lite: bool,
+) -> Option<Value> {
     let effort = request
         .output_config
         .as_ref()
@@ -361,7 +421,18 @@ fn reasoning_from_request(request: &AnthropicRequest, resolved: &ResolvedModel) 
                 .and_then(Value::as_u64)
                 .and_then(map_thinking_budget)
         });
-    effort.map(|effort| json!({ "effort": effort }))
+    let effort = effort.or(responses_lite.then_some("medium"));
+    effort.map(|effort| {
+        if responses_lite {
+            json!({ "effort": effort, "context": "all_turns" })
+        } else {
+            json!({ "effort": effort })
+        }
+    })
+}
+
+fn is_responses_lite_model(model: &str) -> bool {
+    model.starts_with("gpt-5.6-")
 }
 
 fn map_effort(effort: &str, upstream_model: &str) -> Option<&'static str> {
@@ -459,6 +530,75 @@ mod tests {
 
     fn resolved() -> ResolvedModel {
         resolved_for("gpt-5.4")
+    }
+
+    #[test]
+    fn gpt_5_6_uses_responses_lite_contract_for_both_openai_providers() {
+        let request = AnthropicRequest {
+            model: "claude-haiku-4-5".into(),
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: Some(true),
+            system: Some(json!("be concise")),
+            messages: vec![crate::anthropic::schema::AnthropicMessage {
+                role: "user".into(),
+                content: json!("hello"),
+                extra: Default::default(),
+            }],
+            tools: Some(vec![AnthropicTool {
+                name: "lookup".into(),
+                description: Some("Look up a value".into()),
+                input_schema: Some(json!({"type": "object", "properties": {}})),
+                extra: Default::default(),
+            }]),
+            tool_choice: None,
+            metadata: None,
+            output_config: None,
+            thinking: None,
+            extra: Default::default(),
+        };
+
+        let mut bodies = Vec::new();
+        for provider in [Provider::Codex, Provider::CustomOpenAI] {
+            let resolved = ResolvedModel {
+                provider,
+                requested: request.model.clone(),
+                public_id: request.model.clone(),
+                upstream_model: "gpt-5.6-luna".into(),
+                service_tier: Some("priority".into()),
+                context_window: 372_000,
+            };
+            let translated = translate_request(&request, &resolved, Some("session-1")).unwrap();
+            assert_eq!(translated.instructions.as_deref(), Some(""));
+            assert!(translated.tools.is_none());
+            assert_eq!(translated.parallel_tool_calls, Some(false));
+            assert_eq!(translated.input[0]["type"], "additional_tools");
+            assert_eq!(translated.input[0]["role"], "developer");
+            assert_eq!(translated.input[0]["tools"][0]["name"], "lookup");
+            assert_eq!(translated.input[1]["role"], "developer");
+            assert!(translated.input[1]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("be concise"));
+            assert_eq!(translated.reasoning.as_ref().unwrap()["effort"], "medium");
+            assert_eq!(
+                translated.reasoning.as_ref().unwrap()["context"],
+                "all_turns"
+            );
+            assert_eq!(translated.service_tier.as_deref(), Some("priority"));
+            assert_eq!(translated.prompt_cache_key.as_deref(), Some("session-1"));
+            assert_eq!(
+                translated.client_metadata.as_ref().unwrap()["thread_id"],
+                "session-1"
+            );
+            assert_eq!(
+                translated.include.as_ref().unwrap(),
+                &["reasoning.encrypted_content"]
+            );
+            bodies.push(serde_json::to_value(translated).unwrap());
+        }
+        assert_eq!(bodies[0], bodies[1]);
     }
 
     #[test]
@@ -806,7 +946,7 @@ mod tests {
         };
 
         for (input, expected) in [
-            ("auto", None),
+            ("auto", Some("medium")),
             ("none", Some("none")),
             ("minimal", Some("minimal")),
             ("low", Some("low")),
@@ -815,8 +955,8 @@ mod tests {
             ("xhigh", Some("xhigh")),
             ("max", Some("max")),
             ("ultracode", Some("max")),
-            ("ultra", None),
-            ("unknown", None),
+            ("ultra", Some("medium")),
+            ("unknown", Some("medium")),
         ] {
             req.output_config = Some(json!({ "effort": input }));
             let translated = translate_request(&req, &resolved_for("gpt-5.6-sol"), None).unwrap();
@@ -830,9 +970,8 @@ mod tests {
                 expected,
                 "input effort {input}"
             );
-            assert_eq!(
+            assert!(
                 translated.include.is_some(),
-                expected.is_some(),
                 "reasoning continuity for {input}"
             );
         }

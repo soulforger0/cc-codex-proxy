@@ -214,6 +214,9 @@ struct ContentView: View {
                 settingsInputRow(title: "Model", detail: "Primary upstream model") {
                     modelTextField("Model", text: $model.model, updatesRoute: true)
                 }
+                settingsInputRow(title: "Sonnet Model", detail: "Sonnet upstream model") {
+                    modelTextField("Sonnet Model", text: $model.sonnetModel, updatesRoute: true)
+                }
                 settingsInputRow(title: "Small Model", detail: "Small upstream model") {
                     modelTextField("Small Model", text: $model.smallModel, updatesRoute: true)
                 }
@@ -221,14 +224,15 @@ struct ContentView: View {
                     settingsInputRow(title: "Endpoint", detail: "OpenAI-compatible base URL") {
                         modelTextField("https://host.example", text: $model.customOpenAIBaseURL)
                     }
-                    settingsInputRow(title: "API shape", detail: "Upstream OpenAI endpoint type") {
-                        Picker("API shape", selection: $model.customOpenAIProtocol) {
-                            Text("Responses").tag("responses")
-                            Text("Chat").tag("chat-completions")
+                    settingsInputRow(title: "Transport", detail: "Responses transport preference") {
+                        Picker("Transport", selection: $model.customOpenAITransport) {
+                            Text("Auto").tag("auto")
+                            Text("WebSocket").tag("websocket")
+                            Text("HTTP").tag("http")
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 210)
-                        .onChange(of: model.customOpenAIProtocol) { _ in
+                        .frame(width: 300)
+                        .onChange(of: model.customOpenAITransport) { _ in
                             Task { await model.refreshRuntimeStatus() }
                         }
                     }
@@ -462,7 +466,7 @@ struct ContentView: View {
             return AppTheme.muted
         }
         switch model.transportCurrentMethod {
-        case "deepseek", "responses", "chat-completions":
+        case "deepseek":
             return AppTheme.accent
         case "websocket":
             return AppTheme.success

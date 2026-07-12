@@ -1,7 +1,8 @@
 use crate::{
     config::{
         Provider, DEFAULT_CODEX_PRIMARY_MODEL, DEFAULT_CODEX_SMALL_MODEL,
-        DEFAULT_PUBLIC_PRIMARY_MODEL, DEFAULT_PUBLIC_SMALL_MODEL,
+        DEFAULT_CODEX_SONNET_MODEL, DEFAULT_PUBLIC_PRIMARY_MODEL, DEFAULT_PUBLIC_SMALL_MODEL,
+        DEFAULT_PUBLIC_SONNET_MODEL,
     },
     error::{ProxyError, Result},
     routing::RouteSnapshot,
@@ -119,12 +120,14 @@ impl ModelRegistry {
         &self,
         route: &RouteSnapshot,
         public_primary_model: &str,
+        public_sonnet_model: &str,
         public_small_model: &str,
         incoming: &str,
     ) -> Result<ResolvedModel> {
         let stripped = strip_context_hint(incoming);
         let (base, service_tier) = split_fast_suffix(&stripped);
         let public_primary = strip_context_hint(public_primary_model);
+        let public_sonnet = strip_context_hint(public_sonnet_model);
         let public_small = strip_context_hint(public_small_model);
 
         if base == public_small || is_claude_small_model_alias(&base) {
@@ -133,6 +136,15 @@ impl ModelRegistry {
                 incoming,
                 public_small_model,
                 &route.small_model,
+                service_tier,
+            );
+        }
+        if base == public_sonnet || is_claude_sonnet_model_alias(&base) {
+            return self.resolve_route_model(
+                route,
+                incoming,
+                public_sonnet_model,
+                &route.sonnet_model,
                 service_tier,
             );
         }
@@ -190,14 +202,15 @@ impl ModelRegistry {
     }
 
     fn compatibility_profile(&self, provider: Provider, model: &str) -> Option<&ModelProfile> {
-        if provider != Provider::CustomOpenAI {
-            let stripped = strip_context_hint(model);
-            if is_claude_small_model_alias(&stripped) {
-                return self.default_small_fast(provider);
-            }
-            if is_claude_primary_model_alias(&stripped) {
-                return self.default_primary(provider);
-            }
+        let stripped = strip_context_hint(model);
+        if is_claude_small_model_alias(&stripped) {
+            return self.default_small_fast(provider);
+        }
+        if is_claude_sonnet_model_alias(&stripped) {
+            return self.default_sonnet(provider);
+        }
+        if is_claude_primary_model_alias(&stripped) {
+            return self.default_primary(provider);
         }
 
         if provider != Provider::DeepSeek || !model.starts_with("gpt-") {
@@ -227,7 +240,7 @@ impl ModelRegistry {
     }
 
     pub fn default_small_fast(&self, provider: Provider) -> Option<&ModelProfile> {
-        let preferred = if provider == Provider::Codex {
+        let preferred = if matches!(provider, Provider::Codex | Provider::CustomOpenAI) {
             self.find_profile(provider, DEFAULT_CODEX_SMALL_MODEL)
         } else {
             None
@@ -240,7 +253,7 @@ impl ModelRegistry {
     }
 
     fn default_primary(&self, provider: Provider) -> Option<&ModelProfile> {
-        let preferred = if provider == Provider::Codex {
+        let preferred = if matches!(provider, Provider::Codex | Provider::CustomOpenAI) {
             self.find_profile(provider, DEFAULT_CODEX_PRIMARY_MODEL)
         } else {
             None
@@ -250,6 +263,14 @@ impl ModelRegistry {
                 .iter()
                 .find(|profile| profile.provider == provider && !profile.default_small_fast)
         })
+    }
+
+    fn default_sonnet(&self, provider: Provider) -> Option<&ModelProfile> {
+        if matches!(provider, Provider::Codex | Provider::CustomOpenAI) {
+            self.find_profile(provider, DEFAULT_CODEX_SONNET_MODEL)
+        } else {
+            self.default_primary(provider)
+        }
     }
 }
 
@@ -271,6 +292,10 @@ fn is_claude_model_alias(model: &str) -> bool {
             .strip_suffix("[1m]")
             .unwrap_or(DEFAULT_PUBLIC_PRIMARY_MODEL)
         || model
+            == DEFAULT_PUBLIC_SONNET_MODEL
+                .strip_suffix("[1m]")
+                .unwrap_or(DEFAULT_PUBLIC_SONNET_MODEL)
+        || model
             == DEFAULT_PUBLIC_SMALL_MODEL
                 .strip_suffix("[1m]")
                 .unwrap_or(DEFAULT_PUBLIC_SMALL_MODEL)
@@ -281,8 +306,14 @@ fn is_claude_small_model_alias(model: &str) -> bool {
     is_claude_model_alias(model) && model.contains("haiku")
 }
 
+fn is_claude_sonnet_model_alias(model: &str) -> bool {
+    is_claude_model_alias(model) && model.contains("sonnet")
+}
+
 fn is_claude_primary_model_alias(model: &str) -> bool {
-    is_claude_model_alias(model) && !is_claude_small_model_alias(model)
+    is_claude_model_alias(model)
+        && !is_claude_small_model_alias(model)
+        && !is_claude_sonnet_model_alias(model)
 }
 
 pub fn default_profiles() -> Vec<ModelProfile> {
@@ -291,7 +322,7 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             provider: Provider::Codex,
             id: "gpt-5.6-sol".into(),
             upstream_model: "gpt-5.6-sol".into(),
-            context_window: 272_000,
+            context_window: 372_000,
             supports_fast: true,
             default_small_fast: false,
         },
@@ -299,7 +330,7 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             provider: Provider::Codex,
             id: "gpt-5.6-terra".into(),
             upstream_model: "gpt-5.6-terra".into(),
-            context_window: 272_000,
+            context_window: 372_000,
             supports_fast: true,
             default_small_fast: false,
         },
@@ -307,7 +338,7 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             provider: Provider::Codex,
             id: "gpt-5.6-luna".into(),
             upstream_model: "gpt-5.6-luna".into(),
-            context_window: 272_000,
+            context_window: 372_000,
             supports_fast: true,
             default_small_fast: true,
         },
@@ -377,18 +408,26 @@ pub fn default_profiles() -> Vec<ModelProfile> {
         },
         ModelProfile {
             provider: Provider::CustomOpenAI,
-            id: "gpt-5.4".into(),
-            upstream_model: "gpt-5.4".into(),
-            context_window: 128_000,
-            supports_fast: false,
+            id: "gpt-5.6-sol".into(),
+            upstream_model: "gpt-5.6-sol".into(),
+            context_window: 372_000,
+            supports_fast: true,
             default_small_fast: false,
         },
         ModelProfile {
             provider: Provider::CustomOpenAI,
-            id: "gpt-5.4-mini".into(),
-            upstream_model: "gpt-5.4-mini".into(),
-            context_window: 128_000,
-            supports_fast: false,
+            id: "gpt-5.6-terra".into(),
+            upstream_model: "gpt-5.6-terra".into(),
+            context_window: 372_000,
+            supports_fast: true,
+            default_small_fast: false,
+        },
+        ModelProfile {
+            provider: Provider::CustomOpenAI,
+            id: "gpt-5.6-luna".into(),
+            upstream_model: "gpt-5.6-luna".into(),
+            context_window: 372_000,
+            supports_fast: true,
             default_small_fast: true,
         },
     ]
@@ -456,6 +495,7 @@ mod tests {
             .resolve(Provider::DeepSeek, "gpt-5.6-luna[1m]")
             .unwrap();
         assert_eq!(small.upstream_model, "deepseek-v4-flash");
+
         assert_eq!(small.public_id, "deepseek-v4-flash");
 
         let legacy_small = registry
@@ -473,6 +513,16 @@ mod tests {
             .unwrap();
         assert_eq!(codex.upstream_model, DEFAULT_CODEX_PRIMARY_MODEL);
 
+        let codex_sonnet = registry
+            .resolve(Provider::Codex, DEFAULT_PUBLIC_SONNET_MODEL)
+            .unwrap();
+        assert_eq!(codex_sonnet.upstream_model, DEFAULT_CODEX_SONNET_MODEL);
+
+        let custom_sonnet = registry
+            .resolve(Provider::CustomOpenAI, DEFAULT_PUBLIC_SONNET_MODEL)
+            .unwrap();
+        assert_eq!(custom_sonnet.upstream_model, DEFAULT_CODEX_SONNET_MODEL);
+
         let deepseek = registry
             .resolve(Provider::DeepSeek, DEFAULT_PUBLIC_SMALL_MODEL)
             .unwrap();
@@ -486,6 +536,7 @@ mod tests {
             id: "deepseek".into(),
             provider: Provider::DeepSeek,
             primary_model: "deepseek-v4-pro".into(),
+            sonnet_model: "deepseek-v4-pro".into(),
             small_model: "deepseek-v4-flash".into(),
             context_window: 1_000_000,
         };
@@ -494,6 +545,7 @@ mod tests {
             .resolve_for_route(
                 &route,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
                 DEFAULT_PUBLIC_SMALL_MODEL,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
             )
@@ -501,10 +553,22 @@ mod tests {
         assert_eq!(primary.upstream_model, "deepseek-v4-pro");
         assert_eq!(primary.public_id, DEFAULT_PUBLIC_PRIMARY_MODEL);
 
+        let sonnet = registry
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
+            )
+            .unwrap();
+        assert_eq!(sonnet.upstream_model, "deepseek-v4-pro");
+
         let small = registry
             .resolve_for_route(
                 &route,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
                 DEFAULT_PUBLIC_SMALL_MODEL,
                 DEFAULT_PUBLIC_SMALL_MODEL,
             )
@@ -519,14 +583,16 @@ mod tests {
             id: "codex".into(),
             provider: Provider::Codex,
             primary_model: DEFAULT_CODEX_PRIMARY_MODEL.into(),
+            sonnet_model: "gpt-5.6-terra".into(),
             small_model: DEFAULT_CODEX_SMALL_MODEL.into(),
-            context_window: 272_000,
+            context_window: 372_000,
         };
 
         let opus = registry
             .resolve_for_route(
                 &route,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
                 DEFAULT_PUBLIC_SMALL_MODEL,
                 "claude-opus-4-8",
             )
@@ -537,16 +603,18 @@ mod tests {
             .resolve_for_route(
                 &route,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
                 DEFAULT_PUBLIC_SMALL_MODEL,
                 "claude-sonnet-4-5",
             )
             .unwrap();
-        assert_eq!(sonnet.upstream_model, DEFAULT_CODEX_PRIMARY_MODEL);
+        assert_eq!(sonnet.upstream_model, "gpt-5.6-terra");
 
         let haiku = registry
             .resolve_for_route(
                 &route,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
                 DEFAULT_PUBLIC_SMALL_MODEL,
                 "claude-haiku-4-5",
             )
@@ -557,6 +625,7 @@ mod tests {
             .resolve_for_route(
                 &route,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
                 DEFAULT_PUBLIC_SMALL_MODEL,
                 "claude-opus-4-8-fast[1m]",
             )
@@ -568,6 +637,7 @@ mod tests {
             .resolve_for_route(
                 &route,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
                 DEFAULT_PUBLIC_SMALL_MODEL,
                 "claude-haiku-4-5-fast[1m]",
             )
@@ -590,12 +660,44 @@ mod tests {
     }
 
     #[test]
+    fn custom_openai_defaults_route_opus_sonnet_and_haiku_to_sol_terra_luna() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+        let route = RouteSnapshot {
+            id: "custom-openai".into(),
+            provider: Provider::CustomOpenAI,
+            primary_model: "gpt-5.6-sol".into(),
+            sonnet_model: "gpt-5.6-terra".into(),
+            small_model: "gpt-5.6-luna".into(),
+            context_window: 372_000,
+        };
+
+        for (incoming, expected) in [
+            ("claude-opus-4-8", "gpt-5.6-sol"),
+            ("claude-sonnet-4-5", "gpt-5.6-terra"),
+            ("claude-haiku-4-5", "gpt-5.6-luna"),
+        ] {
+            let resolved = registry
+                .resolve_for_route(
+                    &route,
+                    DEFAULT_PUBLIC_PRIMARY_MODEL,
+                    DEFAULT_PUBLIC_SONNET_MODEL,
+                    DEFAULT_PUBLIC_SMALL_MODEL,
+                    incoming,
+                )
+                .unwrap();
+            assert_eq!(resolved.upstream_model, expected);
+            assert_eq!(resolved.context_window, 372_000);
+        }
+    }
+
+    #[test]
     fn custom_route_alias_uses_configured_upstream_model() {
         let registry = ModelRegistry::from_profiles(default_profiles());
         let route = RouteSnapshot {
             id: "custom-local".into(),
             provider: Provider::CustomOpenAI,
             primary_model: "llama-3.3-70b".into(),
+            sonnet_model: "llama-3.3-70b".into(),
             small_model: "llama-3.2-3b".into(),
             context_window: 128_000,
         };
@@ -604,6 +706,7 @@ mod tests {
             .resolve_for_route(
                 &route,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
                 DEFAULT_PUBLIC_SMALL_MODEL,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
             )
@@ -626,9 +729,9 @@ mod tests {
         assert!(profiles.iter().any(
             |profile| profile.provider == Provider::DeepSeek && profile.id == "deepseek-v4-pro"
         ));
-        assert!(profiles
-            .iter()
-            .any(|profile| profile.provider == Provider::CustomOpenAI && profile.id == "gpt-5.4"));
+        assert!(profiles.iter().any(
+            |profile| profile.provider == Provider::CustomOpenAI && profile.id == "gpt-5.6-sol"
+        ));
         assert!(profiles
             .iter()
             .any(|profile| profile.provider == Provider::Codex && profile.id == "custom"));
@@ -640,6 +743,24 @@ mod tests {
             .into_iter()
             .filter(|profile| !profile.id.starts_with("gpt-5.6-"))
             .collect::<Vec<_>>();
+        profiles.extend([
+            ModelProfile {
+                provider: Provider::CustomOpenAI,
+                id: "gpt-5.4".into(),
+                upstream_model: "gpt-5.4".into(),
+                context_window: 128_000,
+                supports_fast: false,
+                default_small_fast: false,
+            },
+            ModelProfile {
+                provider: Provider::CustomOpenAI,
+                id: "gpt-5.4-mini".into(),
+                upstream_model: "gpt-5.4-mini".into(),
+                context_window: 128_000,
+                supports_fast: false,
+                default_small_fast: true,
+            },
+        ]);
 
         assert!(merge_missing_default_profiles(&mut profiles));
         let registry = ModelRegistry::from_profiles(profiles);
@@ -653,6 +774,16 @@ mod tests {
             .resolve(Provider::Codex, DEFAULT_PUBLIC_SMALL_MODEL)
             .unwrap();
         assert_eq!(small.upstream_model, DEFAULT_CODEX_SMALL_MODEL);
+
+        let custom_sonnet = registry
+            .resolve(Provider::CustomOpenAI, DEFAULT_PUBLIC_SONNET_MODEL)
+            .unwrap();
+        assert_eq!(custom_sonnet.upstream_model, DEFAULT_CODEX_SONNET_MODEL);
+
+        let custom_small = registry
+            .resolve(Provider::CustomOpenAI, DEFAULT_PUBLIC_SMALL_MODEL)
+            .unwrap();
+        assert_eq!(custom_small.upstream_model, DEFAULT_CODEX_SMALL_MODEL);
     }
 
     #[test]
