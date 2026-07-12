@@ -628,9 +628,12 @@ fn is_live_claude_code_session(command: &str) -> bool {
     }
 
     let args = parts.collect::<Vec<_>>();
-    !args
+    let is_background_helper = args
         .iter()
-        .any(|arg| matches!(*arg, "--bg-pty-host" | "--bg-spare"))
+        .any(|arg| matches!(*arg, "--bg-pty-host" | "--bg-spare"));
+    let is_daemon = matches!(args.as_slice(), ["daemon", "run", ..]);
+
+    !is_background_helper && !is_daemon
 }
 
 fn truncate_command(command: &str) -> String {
@@ -972,6 +975,7 @@ mod tests {
           11 /Users/me/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude --bg-pty-host /tmp/cc-daemon-501/session/pty.sock 162 66
           12 /Users/me/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --continue
           13 /Users/me/.local/bin/claude bg-spare --bg-spare /tmp/cc-daemon-501/bb6ac682/spare/74f016fa.claim.sock
+          14 /Users/me/.local/bin/claude daemon run --json-path /Users/me/.claude/daemon.json --log-file /Users/me/.claude/daemon.log --orphaned
         "#;
 
         let sessions = parse_live_claude_sessions(output, 99);
