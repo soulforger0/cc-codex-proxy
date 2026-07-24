@@ -165,6 +165,8 @@ When the app launches, it discovers your existing `claude` command and installs 
 
 If the app quits, the shim restores or falls back to the original Claude command. If the app is open but the proxy is stopped, new Claude Code launches fail fast instead of silently using the wrong backend.
 
+`claude update` also works through the managed shim. The shim temporarily restores Claude Code's native launcher for the update, then reinstalls itself against the newly selected Claude Code version.
+
 Normal app launches pass proxy routing through the child process environment and an inline Claude Code settings payload. They do not write `~/.claude/settings.json`.
 
 For Claude Code background agents, the shim first ensures Claude's background daemon is reachable using only managed proxy environment variables. Actual foreground and background sessions still receive inline proxy settings, which lets daemon-respawned jobs keep routing through CC Codex Proxy instead of falling back to native Claude auth.

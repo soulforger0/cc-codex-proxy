@@ -3,10 +3,10 @@ use clap::{Args, Parser, Subcommand};
 use proxy_core::{
     auth::{browser_login, default_oauth_options, AuthManager, FileTokenStore, OAuthRefreshClient},
     claude::{
-        default_settings_path, install_settings, install_shim, live_claude_sessions,
-        live_claude_sessions_message, managed_env, managed_env_strings, preview_settings,
-        restore_latest_backup, restore_shim, ClaudeSettingsOptions, ClaudeShimInstallOptions,
-        MANAGED_ENV_KEYS,
+        begin_shim_update, default_settings_path, finish_shim_update, install_settings,
+        install_shim, live_claude_sessions, live_claude_sessions_message, managed_env,
+        managed_env_strings, preview_settings, restore_latest_backup, restore_shim,
+        ClaudeSettingsOptions, ClaudeShimInstallOptions, MANAGED_ENV_KEYS,
     },
     config::{
         AppConfig, CodexTransport, Provider, DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL,
@@ -159,6 +159,8 @@ struct LaunchArgs {
     app_pid: u32,
     #[arg(long)]
     real_claude: PathBuf,
+    #[arg(long)]
+    shim_path: Option<PathBuf>,
     #[command(flatten)]
     settings: InstallSettingsArgs,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -615,6 +617,12 @@ fn exit_if_live_claude_sessions() -> Result<()> {
 }
 
 async fn launch_claude(args: LaunchArgs) -> Result<()> {
+    if is_update_command(&args.args) {
+        if let Some(shim_path) = args.shim_path.as_deref() {
+            return update_native_claude(shim_path, &args.args);
+        }
+    }
+
     let settings = claude_settings_options(args.settings);
     let app_is_alive = pid_is_alive(args.app_pid);
     let mut command = StdCommand::new(&args.real_claude);
@@ -649,6 +657,27 @@ async fn launch_claude(args: LaunchArgs) -> Result<()> {
     exec_command(command)
 }
 
+fn update_native_claude(shim_path: &Path, args: &[String]) -> Result<()> {
+    let (_, paths) = AppConfig::load_default()?;
+    begin_shim_update(&paths.claude_shim_file, shim_path)?;
+
+    let mut command = StdCommand::new(shim_path);
+    command.args(args);
+    for key in MANAGED_ENV_KEYS {
+        command.env_remove(key);
+    }
+    let update_status = command.status();
+    let reinstall_result = finish_shim_update(&paths.claude_shim_file, shim_path);
+
+    let status = update_status.context("failed to run Claude Code's native updater")?;
+    reinstall_result
+        .context("Claude Code updated, but CC Codex Proxy could not reinstall its launcher")?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
 fn claude_args_with_inline_proxy_settings(
     args: &[String],
     settings: &ClaudeSettingsOptions,
@@ -673,6 +702,10 @@ fn args_have_settings(args: &[String]) -> bool {
 
 fn is_daemon_command(args: &[String]) -> bool {
     first_positional_arg(args) == Some("daemon")
+}
+
+fn is_update_command(args: &[String]) -> bool {
+    first_positional_arg(args) == Some("update")
 }
 
 fn is_background_pty_host(args: &[String]) -> bool {

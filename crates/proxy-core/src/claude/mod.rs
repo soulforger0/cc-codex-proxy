@@ -278,11 +278,7 @@ pub fn install_shim(
     if let Some(parent) = state_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let state_file = ClaudeShimStateFile {
-        version: SHIM_STATE_VERSION,
-        shims: states.clone(),
-    };
-    if let Err(err) = fs::write(state_path, serde_json::to_string_pretty(&state_file)?) {
+    if let Err(err) = write_shim_states(state_path, &states) {
         for state in installed.iter().rev() {
             let _ = restore_original(state);
         }
@@ -319,6 +315,67 @@ pub fn restore_shim(state_path: &Path) -> Result<ClaudeShimRestoreReport> {
     }
 
     Ok(ClaudeShimRestoreReport { restored, skipped })
+}
+
+/// Temporarily restore a managed launcher so Claude Code's native updater can
+/// update the symlink it owns. Always follow this with [`finish_shim_update`].
+pub fn begin_shim_update(state_path: &Path, shim_path: &Path) -> Result<()> {
+    let states = read_shim_states(state_path)?;
+    let state = states
+        .iter()
+        .find(|state| state.shim_path == shim_path)
+        .ok_or_else(|| {
+            ProxyError::Config(format!(
+                "no managed Claude shim found at {}",
+                shim_path.display()
+            ))
+        })?;
+
+    if !path_contains_marker(&state.shim_path)? {
+        return Err(ProxyError::Config(format!(
+            "{} is no longer the managed Claude shim",
+            state.shim_path.display()
+        )));
+    }
+
+    restore_original(state)
+}
+
+/// Reinstall the managed launcher after Claude Code's native updater has
+/// finished, recording the executable now selected by the native launcher.
+pub fn finish_shim_update(state_path: &Path, shim_path: &Path) -> Result<ClaudeShimState> {
+    let mut states = read_shim_states(state_path)?;
+    let index = states
+        .iter()
+        .position(|state| state.shim_path == shim_path)
+        .ok_or_else(|| {
+            ProxyError::Config(format!(
+                "no managed Claude shim found at {}",
+                shim_path.display()
+            ))
+        })?;
+    let captured = capture_original_claude(shim_path)?;
+    let previous = &states[index];
+    let updated = ClaudeShimState {
+        original: captured.original,
+        real_claude_path: captured.real_claude_path,
+        installed_at: Utc::now().to_rfc3339(),
+        ..previous.clone()
+    };
+
+    states[index] = updated.clone();
+    write_shim_states(state_path, &states)?;
+    replace_with_shim(&updated, shim_script(&updated).as_bytes())?;
+    Ok(updated)
+}
+
+fn write_shim_states(state_path: &Path, states: &[ClaudeShimState]) -> Result<()> {
+    let state_file = ClaudeShimStateFile {
+        version: SHIM_STATE_VERSION,
+        shims: states.to_vec(),
+    };
+    fs::write(state_path, serde_json::to_string_pretty(&state_file)?)?;
+    Ok(())
 }
 
 fn install_one_shim(
@@ -765,11 +822,12 @@ fn shim_script(state: &ClaudeShimState) -> String {
     format!(
         "#!/usr/bin/env bash\n\
          # {marker}\n\
-         exec {helper} claude launch \\\n           --provider {provider} \\\n           --app-pid {app_pid} \\\n           --real-claude {real_claude} \\\n           --model {model} \\\n           --small-model {small_model} \\\n           --port {port} \\\n           --auto-compact-window {auto_compact_window} \\\n           -- \"$@\"\n",
+         exec {helper} claude launch \\\n           --provider {provider} \\\n           --app-pid {app_pid} \\\n           --shim-path {shim_path} \\\n           --real-claude {real_claude} \\\n           --model {model} \\\n           --small-model {small_model} \\\n           --port {port} \\\n           --auto-compact-window {auto_compact_window} \\\n           -- \"$@\"\n",
         marker = SHIM_MARKER,
         helper = shell_quote(&state.helper_path.display().to_string()),
         provider = state.provider.as_str(),
         app_pid = state.app_pid,
+        shim_path = shell_quote(&state.shim_path.display().to_string()),
         real_claude = shell_quote(&state.real_claude_path.display().to_string()),
         model = shell_quote(&state.model),
         small_model = shell_quote(&state.small_fast_model),
@@ -966,6 +1024,50 @@ mod tests {
             })
             .count();
         assert_eq!(backup_count, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_update_reinstalls_shim_with_the_new_claude_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let first_version = dir.path().join("claude-1");
+        let second_version = dir.path().join("claude-2");
+        fs::write(&first_version, "first").unwrap();
+        fs::write(&second_version, "second").unwrap();
+
+        let shim_path = dir.path().join("claude");
+        symlink(&first_version, &shim_path).unwrap();
+        let state_path = dir.path().join("claude-shim.json");
+        let options = ClaudeShimInstallOptions {
+            app_pid: 42,
+            helper_path: dir.path().join("cc-codex-proxy"),
+            claude_path: Some(shim_path.clone()),
+            settings: ClaudeSettingsOptions::default(),
+        };
+        install_shim(&state_path, &options).unwrap();
+        assert!(fs::read_to_string(&shim_path)
+            .unwrap()
+            .contains("--shim-path"));
+
+        begin_shim_update(&state_path, &shim_path).unwrap();
+        assert_eq!(fs::read_link(&shim_path).unwrap(), first_version);
+
+        fs::remove_file(&shim_path).unwrap();
+        symlink(&second_version, &shim_path).unwrap();
+        let updated = finish_shim_update(&state_path, &shim_path).unwrap();
+
+        assert_eq!(
+            updated.real_claude_path,
+            second_version.canonicalize().unwrap()
+        );
+        assert!(fs::read_to_string(&shim_path)
+            .unwrap()
+            .contains(SHIM_MARKER));
+
+        restore_shim(&state_path).unwrap();
+        assert_eq!(fs::read_link(&shim_path).unwrap(), second_version);
     }
 
     #[test]
