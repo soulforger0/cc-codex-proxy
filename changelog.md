@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-24 CST - v1.1.1 Claude Code updater compatibility
+
+- Made `claude update` work through the managed CC Codex Proxy launcher by temporarily restoring Claude Code's native symlink during the update.
+- Reinstalls the managed launcher after the updater exits and records the newly selected Claude Code version, so normal proxy routing continues without manual repair.
+
 ## 2026-07-12 AEST - v1.1.0 macOS UI and accessibility polish
 
 - Refined the native menu bar app with adaptive settings and log layouts, semantic typography, cohesive materials, and consistent design tokens.

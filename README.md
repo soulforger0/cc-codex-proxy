@@ -82,6 +82,10 @@ flowchart LR
 | Transport fallback | In `auto` mode, both OpenAI-backed providers try WebSocket first and fall back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
+## What's New In 1.1.1
+
+- `claude update` now works directly with CC Codex Proxy installed: the launcher safely hands off to Claude Code's native updater, then resumes proxy routing against the updated version.
+
 ## What's New In 1.1.0
 
 - Polished the native macOS interface with adaptive settings and log layouts, semantic typography, and a more cohesive material and spacing system.

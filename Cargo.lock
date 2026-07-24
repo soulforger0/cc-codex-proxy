@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "cc-codex-proxy"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1066,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-core"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-stream",
