@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-11 CST - v1.1.2 DeepSeek vision support
+
+- Forward `image` content blocks to DeepSeek, whose Anthropic-compatible API now accepts them on vision-capable models, instead of rejecting the request. Sessions that previously failed on a historical image no longer break on every later turn.
+- Default the DeepSeek route to `deepseek-flash` for primary, Sonnet, and small/background traffic, since it is the vision-capable model. Legacy `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` names still resolve, and `deepseek-v4-pro` remains selectable.
+- Keep replacing unsupported `document` blocks with a text placeholder that tells the model the content was not forwarded, and reject a message whose content is only `document` blocks.
+
 ## 2026-07-24 CST - v1.1.1 Claude Code updater compatibility
 
 - Made `claude update` work through the managed CC Codex Proxy launcher by temporarily restoring Claude Code's native symlink during the update.

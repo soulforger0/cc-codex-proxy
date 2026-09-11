@@ -82,6 +82,11 @@ flowchart LR
 | Transport fallback | In `auto` mode, both OpenAI-backed providers try WebSocket first and fall back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
+## What's New In 1.1.2
+
+- DeepSeek now supports image input through the proxy. Image blocks are forwarded to DeepSeek's vision-capable model instead of failing the request, so a screenshot or image in the conversation no longer breaks every later turn.
+- The DeepSeek route defaults to `deepseek-flash` across primary, Sonnet, and small/background traffic. Existing `deepseek-v4-flash` names keep working, and `deepseek-v4-pro` is still selectable.
+
 ## What's New In 1.1.1
 
 - `claude update` now works directly with CC Codex Proxy installed: the launcher safely hands off to Claude Code's native updater, then resumes proxy routing against the updated version.
