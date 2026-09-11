@@ -59,9 +59,15 @@ impl DeepSeekClient {
         request: &AnthropicRequest,
         resolved: &ResolvedModel,
     ) -> Result<DeepSeekResponse> {
-        validate_deepseek_request(request)?;
-        let api_key = resolve_api_key(&self.api_key_file)?;
         let mut body = request.clone();
+        let replaced = substitute_unsupported_content(&mut body)?;
+        if replaced > 0 {
+            warn!(
+                replaced,
+                "replaced unsupported DeepSeek content blocks with text placeholders"
+            );
+        }
+        let api_key = resolve_api_key(&self.api_key_file)?;
         canonicalize_anthropic_request(&mut body);
         body.model = resolved.upstream_model.clone();
         normalize_deepseek_effort(&mut body);
@@ -223,14 +229,93 @@ fn env_api_key() -> Option<String> {
         .filter(|key| !key.is_empty())
 }
 
-fn validate_deepseek_request(request: &AnthropicRequest) -> Result<()> {
-    if let Some(system) = &request.system {
-        reject_unsupported_content(system)?;
+/// Replaces content blocks DeepSeek still rejects with a text placeholder so the
+/// turn can be forwarded anyway, returning how many blocks were replaced.
+///
+/// Images are forwarded unchanged: DeepSeek's Anthropic-compatible API accepts
+/// `image` blocks on its vision-capable models. `document` blocks remain
+/// unsupported and become text.
+///
+/// A message whose content is nothing but unsupported blocks is rejected
+/// instead: once the documents are gone the model would receive no user input at
+/// all, which is worse than a loud error.
+fn substitute_unsupported_content(request: &mut AnthropicRequest) -> Result<usize> {
+    let mut replaced = 0;
+    if let Some(system) = request.system.as_mut() {
+        replace_unsupported_blocks(system, &mut replaced);
     }
-    for message in &request.messages {
-        reject_unsupported_content(&message.content)?;
+    for message in &mut request.messages {
+        reject_unsupported_only_message(&message.content)?;
+        replace_unsupported_blocks(&mut message.content, &mut replaced);
     }
-    Ok(())
+    Ok(replaced)
+}
+
+fn reject_unsupported_only_message(content: &Value) -> Result<()> {
+    let Value::Array(items) = content else {
+        return Ok(());
+    };
+    let mut unsupported: Vec<&str> = Vec::new();
+    let mut has_forwardable = false;
+    for item in items {
+        match item.get("type").and_then(Value::as_str) {
+            Some(kind) if is_unsupported_kind(kind) => {
+                if !unsupported.contains(&kind) {
+                    unsupported.push(kind);
+                }
+            }
+            _ => has_forwardable = true,
+        }
+    }
+    if has_forwardable || unsupported.is_empty() {
+        return Ok(());
+    }
+    Err(ProxyError::InvalidRequest(format!(
+        "DeepSeek Anthropic API does not support {} content blocks, and this message contains no text, image, or tool content to forward",
+        unsupported.join(" or ")
+    )))
+}
+
+fn replace_unsupported_blocks(value: &mut Value, replaced: &mut usize) {
+    match value {
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                replace_unsupported_blocks(item, replaced);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(kind) = object
+                .get("type")
+                .and_then(Value::as_str)
+                .filter(|kind| is_unsupported_kind(kind))
+            {
+                *replaced += 1;
+                *value = serde_json::json!({
+                    "type": "text",
+                    "text": unsupported_block_placeholder(kind),
+                });
+                return;
+            }
+            if let Some(content) = object.get_mut("content") {
+                replace_unsupported_blocks(content, replaced);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// Content block types DeepSeek's Anthropic-compatible API still rejects.
+/// `image` is deliberately absent: vision-capable DeepSeek models accept it.
+fn is_unsupported_kind(kind: &str) -> bool {
+    kind == "document"
+}
+
+fn unsupported_block_placeholder(kind: &str) -> String {
+    format!(
+        "[A note from the proxy: a {kind} content block was NOT forwarded - the DeepSeek \
+         Anthropic API does not support {kind} blocks. Only text was sent. Tell the user this \
+         {kind} could not be seen.]"
+    )
 }
 
 fn normalize_deepseek_effort(request: &mut AnthropicRequest) {
@@ -253,30 +338,6 @@ fn normalize_deepseek_effort_value(effort: &str) -> &'static str {
         "max" | "ultracode" => "max",
         _ => "high",
     }
-}
-
-fn reject_unsupported_content(value: &Value) -> Result<()> {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                reject_unsupported_content(item)?;
-            }
-        }
-        Value::Object(object) => {
-            if let Some(kind) = object.get("type").and_then(Value::as_str) {
-                if matches!(kind, "image" | "document") {
-                    return Err(ProxyError::InvalidRequest(format!(
-                        "DeepSeek Anthropic API does not support {kind} content blocks"
-                    )));
-                }
-            }
-            if let Some(content) = object.get("content") {
-                reject_unsupported_content(content)?;
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
-    Ok(())
 }
 
 fn insert_header<K>(headers: &mut reqwest::header::HeaderMap, name: K, value: &str) -> Result<()>
@@ -309,18 +370,26 @@ mod tests {
     use crate::model::ModelRegistry;
 
     fn request_with_output_config(output_config: Option<Value>) -> AnthropicRequest {
+        let mut request = request_with_messages(Vec::new());
+        request.output_config = output_config;
+        request
+    }
+
+    fn request_with_messages(
+        messages: Vec<crate::anthropic::schema::AnthropicMessage>,
+    ) -> AnthropicRequest {
         AnthropicRequest {
-            model: "deepseek-v4-pro".into(),
+            model: "deepseek-flash".into(),
             max_tokens: None,
             temperature: None,
             top_p: None,
             stream: None,
             system: None,
-            messages: vec![],
+            messages,
             tools: None,
             tool_choice: None,
             metadata: None,
-            output_config,
+            output_config: None,
             thinking: None,
             extra: Default::default(),
         }
@@ -385,33 +454,113 @@ mod tests {
     }
 
     #[test]
-    fn rejects_image_blocks_before_forwarding() {
-        let request = AnthropicRequest {
-            model: "deepseek-v4-pro".into(),
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            stream: None,
-            system: None,
-            messages: vec![crate::anthropic::schema::AnthropicMessage {
-                role: "user".into(),
-                content: serde_json::json!([
-                    {
-                        "type": "image",
-                        "source": {"type": "url", "url": "https://example.test/image.png"}
-                    }
-                ]),
-                extra: Default::default(),
-            }],
-            tools: None,
-            tool_choice: None,
-            metadata: None,
-            output_config: None,
-            thinking: None,
+    fn forwards_image_blocks_unchanged() {
+        let original = serde_json::json!([
+            {"type": "text", "text": "what is in this picture?"},
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "abc123"}
+            }
+        ]);
+        let mut request = request_with_messages(vec![crate::anthropic::schema::AnthropicMessage {
+            role: "user".into(),
+            content: original.clone(),
             extra: Default::default(),
-        };
-        let err = validate_deepseek_request(&request).unwrap_err();
-        assert!(err.to_string().contains("does not support image"));
+        }]);
+
+        let replaced = substitute_unsupported_content(&mut request).unwrap();
+
+        assert_eq!(replaced, 0);
+        assert_eq!(request.messages[0].content, original);
+    }
+
+    #[test]
+    fn replaces_document_blocks_and_keeps_nested_tool_result_images() {
+        let mut request = request_with_messages(vec![crate::anthropic::schema::AnthropicMessage {
+            role: "user".into(),
+            content: serde_json::json!([
+                {
+                    "type": "document",
+                    "source": {"type": "url", "url": "https://example.test/doc.pdf"}
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": [
+                        {"type": "text", "text": "screen"},
+                        {"type": "image", "source": {"type": "base64", "data": "abc"}}
+                    ]
+                }
+            ]),
+            extra: Default::default(),
+        }]);
+
+        let replaced = substitute_unsupported_content(&mut request).unwrap();
+
+        assert_eq!(replaced, 1);
+        let blocks = request.messages[0].content.as_array().unwrap();
+        assert!(blocks[0]["text"].as_str().unwrap().contains("document"));
+        let nested = blocks[1]["content"].as_array().unwrap();
+        assert_eq!(nested[0]["text"], "screen");
+        assert_eq!(nested[1]["type"], "image");
+        assert_eq!(nested[1]["source"]["data"], "abc");
+    }
+
+    #[test]
+    fn rejects_message_that_contains_only_document_blocks() {
+        let mut request = request_with_messages(vec![crate::anthropic::schema::AnthropicMessage {
+            role: "user".into(),
+            content: serde_json::json!([
+                {
+                    "type": "document",
+                    "source": {"type": "url", "url": "https://example.test/doc.pdf"}
+                }
+            ]),
+            extra: Default::default(),
+        }]);
+
+        let err = substitute_unsupported_content(&mut request).unwrap_err();
+
+        assert!(err.to_string().contains("does not support document"));
+        assert!(err.to_string().contains("no text, image, or tool content"));
+    }
+
+    #[test]
+    fn accepts_message_that_contains_only_image_blocks() {
+        let original = serde_json::json!([
+            {
+                "type": "image",
+                "source": {"type": "url", "url": "https://example.test/image.png"}
+            }
+        ]);
+        let mut request = request_with_messages(vec![crate::anthropic::schema::AnthropicMessage {
+            role: "user".into(),
+            content: original.clone(),
+            extra: Default::default(),
+        }]);
+
+        let replaced = substitute_unsupported_content(&mut request).unwrap();
+
+        assert_eq!(replaced, 0);
+        assert_eq!(request.messages[0].content, original);
+    }
+
+    #[test]
+    fn leaves_plain_text_messages_untouched() {
+        let original = serde_json::json!([
+            {"type": "text", "text": "hello"},
+            {"type": "tool_result", "tool_use_id": "t1", "content": "output"}
+        ]);
+        let mut request = request_with_messages(vec![crate::anthropic::schema::AnthropicMessage {
+            role: "user".into(),
+            content: original.clone(),
+            extra: Default::default(),
+        }]);
+
+        let replaced = substitute_unsupported_content(&mut request).unwrap();
+
+        assert_eq!(replaced, 0);
+        assert_eq!(request.messages[0].content, original);
     }
 
     #[test]
@@ -432,8 +581,8 @@ mod tests {
     fn deepseek_model_resolution_rewrites_context_hint() {
         let registry = ModelRegistry::from_profiles(crate::model::default_profiles());
         let resolved = registry
-            .resolve(Provider::DeepSeek, "deepseek-v4-pro[1m]")
+            .resolve(Provider::DeepSeek, "deepseek-flash[1m]")
             .unwrap();
-        assert_eq!(resolved.upstream_model, "deepseek-v4-pro");
+        assert_eq!(resolved.upstream_model, "deepseek-flash");
     }
 }

@@ -909,9 +909,9 @@ final class ProxyAppModel: ObservableObject {
 
     private func applyProviderDefaults() {
         if provider == "deepseek" {
-            model = "deepseek-v4-pro[1m]"
-            sonnetModel = "deepseek-v4-pro[1m]"
-            smallModel = "deepseek-v4-flash"
+            model = "deepseek-flash[1m]"
+            sonnetModel = "deepseek-flash[1m]"
+            smallModel = "deepseek-flash"
             autoCompactWindow = 1_000_000
         } else if provider == "custom-openai" {
             model = defaultOpenAIPrimaryModel
@@ -933,13 +933,13 @@ final class ProxyAppModel: ObservableObject {
 
         if provider == "deepseek" {
             if primary.hasPrefix("gpt-") {
-                model = "deepseek-v4-pro[1m]"
+                model = "deepseek-flash[1m]"
             }
             if sonnet.hasPrefix("gpt-") {
-                sonnetModel = "deepseek-v4-pro[1m]"
+                sonnetModel = "deepseek-flash[1m]"
             }
             if small.hasPrefix("gpt-") {
-                smallModel = "deepseek-v4-flash"
+                smallModel = "deepseek-flash"
             }
             if autoCompactWindow == 372_000 || autoCompactWindow == 272_000 || autoCompactWindow == 128_000 {
                 autoCompactWindow = 1_000_000

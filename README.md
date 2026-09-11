@@ -197,7 +197,7 @@ cc-codex-proxy doctor
 cc-codex-proxy admin status
 ```
 
-When `serve` starts, it prints the local proxy URL, health URL, log path, and Claude Code environment variables for manual sessions. Codex and custom OpenAI profiles default to `gpt-5.6-sol` for primary/Opus traffic, `gpt-5.6-terra` for Sonnet, and `gpt-5.6-luna` for small/Haiku/subagent traffic. Custom endpoints use `CCP_CUSTOM_OPENAI_BASE_URL`, optional `CUSTOM_OPENAI_API_KEY`, and `CCP_CUSTOM_OPENAI_TRANSPORT=auto|websocket|http`.
+When `serve` starts, it prints the local proxy URL, health URL, log path, and Claude Code environment variables for manual sessions. Codex and custom OpenAI profiles default to `gpt-5.6-sol` for primary/Opus traffic, `gpt-5.6-terra` for Sonnet, and `gpt-5.6-luna` for small/Haiku/subagent traffic. The DeepSeek route defaults all three tiers to `deepseek-flash`, which also handles image input; the retired `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` names still resolve to it. Custom endpoints use `CCP_CUSTOM_OPENAI_BASE_URL`, optional `CUSTOM_OPENAI_API_KEY`, and `CCP_CUSTOM_OPENAI_TRANSPORT=auto|websocket|http`.
 
 ### v1.0 migration
 

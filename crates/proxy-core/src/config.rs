@@ -356,9 +356,9 @@ pub fn default_route_profiles() -> Vec<RouteProfileConfig> {
         RouteProfileConfig {
             id: "deepseek".into(),
             provider: Provider::DeepSeek,
-            primary_model: "deepseek-v4-pro".into(),
-            sonnet_model: Some("deepseek-v4-pro".into()),
-            small_model: "deepseek-v4-flash".into(),
+            primary_model: "deepseek-flash".into(),
+            sonnet_model: Some("deepseek-flash".into()),
+            small_model: "deepseek-flash".into(),
             context_window: 1_000_000,
         },
         RouteProfileConfig {
@@ -666,8 +666,8 @@ mod tests {
             .find(|profile| profile.id == "deepseek")
             .unwrap();
         assert_eq!(deepseek.provider, Provider::DeepSeek);
-        assert_eq!(deepseek.primary_model, "deepseek-v4-pro");
-        assert_eq!(deepseek.small_model, "deepseek-v4-flash");
+        assert_eq!(deepseek.primary_model, "deepseek-flash");
+        assert_eq!(deepseek.small_model, "deepseek-flash");
         assert_eq!(deepseek.context_window, 1_000_000);
         assert_eq!(
             config.claude.public_primary_model,

@@ -170,6 +170,9 @@ impl ModelRegistry {
         service_tier: Option<String>,
     ) -> Result<ResolvedModel> {
         let upstream = strip_context_hint(upstream);
+        let upstream = self
+            .legacy_deepseek_alias(route.provider, &upstream)
+            .unwrap_or(upstream);
         let profile = self.find_profile(route.provider, &upstream);
         if service_tier.is_some()
             && !profile
@@ -201,6 +204,20 @@ impl ModelRegistry {
         })
     }
 
+    /// DeepSeek renamed its vision model: `deepseek-v4-flash` and
+    /// `deepseek-v4-flash-vision-exp` are legacy aliases whose traffic is served
+    /// by the current Flash model. Resolve them onto the `deepseek-flash`
+    /// profile so pre-rename configs and pinned sessions keep working.
+    fn legacy_deepseek_alias(&self, provider: Provider, model: &str) -> Option<String> {
+        if provider != Provider::DeepSeek {
+            return None;
+        }
+        match model {
+            "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => Some("deepseek-flash".into()),
+            _ => None,
+        }
+    }
+
     fn compatibility_profile(&self, provider: Provider, model: &str) -> Option<&ModelProfile> {
         let stripped = strip_context_hint(model);
         if is_claude_small_model_alias(&stripped) {
@@ -213,15 +230,17 @@ impl ModelRegistry {
             return self.default_primary(provider);
         }
 
+        if let Some(target) = self.legacy_deepseek_alias(provider, &stripped) {
+            return self.find_profile(provider, &target);
+        }
+
         if provider != Provider::DeepSeek || !model.starts_with("gpt-") {
             return None;
         }
-        let target = if model.contains("mini") || model == DEFAULT_CODEX_SMALL_MODEL {
-            "deepseek-v4-flash"
-        } else {
-            "deepseek-v4-pro"
-        };
-        self.find_profile(provider, target)
+        // Stale Codex model names predate the DeepSeek profiles, so they follow
+        // the route defaults: primary and small traffic both land on the current
+        // Flash model. Only an explicit `deepseek-v4-pro` selects Pro.
+        self.find_profile(provider, "deepseek-flash")
     }
 
     pub fn supported_models(&self, provider: Provider) -> Vec<String> {
@@ -392,19 +411,19 @@ pub fn default_profiles() -> Vec<ModelProfile> {
         },
         ModelProfile {
             provider: Provider::DeepSeek,
+            id: "deepseek-flash".into(),
+            upstream_model: "deepseek-flash".into(),
+            context_window: 1_000_000,
+            supports_fast: false,
+            default_small_fast: true,
+        },
+        ModelProfile {
+            provider: Provider::DeepSeek,
             id: "deepseek-v4-pro".into(),
             upstream_model: "deepseek-v4-pro".into(),
             context_window: 1_000_000,
             supports_fast: false,
             default_small_fast: false,
-        },
-        ModelProfile {
-            provider: Provider::DeepSeek,
-            id: "deepseek-v4-flash".into(),
-            upstream_model: "deepseek-v4-flash".into(),
-            context_window: 1_000_000,
-            supports_fast: false,
-            default_small_fast: true,
         },
         ModelProfile {
             provider: Provider::CustomOpenAI,
@@ -471,14 +490,28 @@ mod tests {
     fn resolves_deepseek_defaults_by_provider() {
         let registry = ModelRegistry::from_profiles(default_profiles());
         let resolved = registry
-            .resolve(Provider::DeepSeek, "deepseek-v4-pro[1m]")
+            .resolve(Provider::DeepSeek, "deepseek-flash[1m]")
             .unwrap();
-        assert_eq!(resolved.upstream_model, "deepseek-v4-pro");
+        assert_eq!(resolved.upstream_model, "deepseek-flash");
         assert_eq!(resolved.context_window, 1_000_000);
         assert_eq!(
             registry.default_small_fast(Provider::DeepSeek).unwrap().id,
-            "deepseek-v4-flash"
+            "deepseek-flash"
         );
+    }
+
+    #[test]
+    fn resolves_legacy_deepseek_flash_aliases_to_current_model() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+        for legacy in [
+            "deepseek-v4-flash",
+            "deepseek-v4-flash[1m]",
+            "deepseek-v4-flash-vision-exp",
+        ] {
+            let resolved = registry.resolve(Provider::DeepSeek, legacy).unwrap();
+            assert_eq!(resolved.upstream_model, "deepseek-flash", "alias {legacy}");
+            assert_eq!(resolved.public_id, "deepseek-flash", "alias {legacy}");
+        }
     }
 
     #[test]
@@ -488,20 +521,20 @@ mod tests {
         let primary = registry
             .resolve(Provider::DeepSeek, "gpt-5.6-sol[1m]")
             .unwrap();
-        assert_eq!(primary.upstream_model, "deepseek-v4-pro");
-        assert_eq!(primary.public_id, "deepseek-v4-pro");
+        assert_eq!(primary.upstream_model, "deepseek-flash");
+        assert_eq!(primary.public_id, "deepseek-flash");
 
         let small = registry
             .resolve(Provider::DeepSeek, "gpt-5.6-luna[1m]")
             .unwrap();
-        assert_eq!(small.upstream_model, "deepseek-v4-flash");
+        assert_eq!(small.upstream_model, "deepseek-flash");
 
-        assert_eq!(small.public_id, "deepseek-v4-flash");
+        assert_eq!(small.public_id, "deepseek-flash");
 
         let legacy_small = registry
             .resolve(Provider::DeepSeek, "gpt-5.4-mini[1m]")
             .unwrap();
-        assert_eq!(legacy_small.upstream_model, "deepseek-v4-flash");
+        assert_eq!(legacy_small.upstream_model, "deepseek-flash");
     }
 
     #[test]
@@ -526,7 +559,7 @@ mod tests {
         let deepseek = registry
             .resolve(Provider::DeepSeek, DEFAULT_PUBLIC_SMALL_MODEL)
             .unwrap();
-        assert_eq!(deepseek.upstream_model, "deepseek-v4-flash");
+        assert_eq!(deepseek.upstream_model, "deepseek-flash");
     }
 
     #[test]
@@ -535,8 +568,57 @@ mod tests {
         let route = RouteSnapshot {
             id: "deepseek".into(),
             provider: Provider::DeepSeek,
-            primary_model: "deepseek-v4-pro".into(),
-            sonnet_model: "deepseek-v4-pro".into(),
+            primary_model: "deepseek-flash".into(),
+            sonnet_model: "deepseek-flash".into(),
+            small_model: "deepseek-flash".into(),
+            context_window: 1_000_000,
+        };
+
+        let primary = registry
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+            )
+            .unwrap();
+        assert_eq!(primary.upstream_model, "deepseek-flash");
+        assert_eq!(primary.public_id, DEFAULT_PUBLIC_PRIMARY_MODEL);
+
+        let sonnet = registry
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
+            )
+            .unwrap();
+        assert_eq!(sonnet.upstream_model, "deepseek-flash");
+
+        let small = registry
+            .resolve_for_route(
+                &route,
+                DEFAULT_PUBLIC_PRIMARY_MODEL,
+                DEFAULT_PUBLIC_SONNET_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+                DEFAULT_PUBLIC_SMALL_MODEL,
+            )
+            .unwrap();
+        assert_eq!(small.upstream_model, "deepseek-flash");
+    }
+
+    #[test]
+    fn legacy_route_profile_model_still_resolves() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+        // A route profile persisted before the rename still names the legacy
+        // flash id; it should resolve onto the current `deepseek-flash` profile.
+        let route = RouteSnapshot {
+            id: "deepseek".into(),
+            provider: Provider::DeepSeek,
+            primary_model: "deepseek-v4-flash".into(),
+            sonnet_model: "deepseek-v4-flash".into(),
             small_model: "deepseek-v4-flash".into(),
             context_window: 1_000_000,
         };
@@ -550,30 +632,25 @@ mod tests {
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
             )
             .unwrap();
-        assert_eq!(primary.upstream_model, "deepseek-v4-pro");
-        assert_eq!(primary.public_id, DEFAULT_PUBLIC_PRIMARY_MODEL);
+        assert_eq!(primary.upstream_model, "deepseek-flash");
 
-        let sonnet = registry
+        // An explicit pro route keeps resolving to pro until it is retired.
+        let pro_route = RouteSnapshot {
+            primary_model: "deepseek-v4-pro".into(),
+            sonnet_model: "deepseek-v4-pro".into(),
+            small_model: "deepseek-flash".into(),
+            ..route
+        };
+        let pro = registry
             .resolve_for_route(
-                &route,
+                &pro_route,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
                 DEFAULT_PUBLIC_SONNET_MODEL,
                 DEFAULT_PUBLIC_SMALL_MODEL,
-                DEFAULT_PUBLIC_SONNET_MODEL,
-            )
-            .unwrap();
-        assert_eq!(sonnet.upstream_model, "deepseek-v4-pro");
-
-        let small = registry
-            .resolve_for_route(
-                &route,
                 DEFAULT_PUBLIC_PRIMARY_MODEL,
-                DEFAULT_PUBLIC_SONNET_MODEL,
-                DEFAULT_PUBLIC_SMALL_MODEL,
-                DEFAULT_PUBLIC_SMALL_MODEL,
             )
             .unwrap();
-        assert_eq!(small.upstream_model, "deepseek-v4-flash");
+        assert_eq!(pro.upstream_model, "deepseek-v4-pro");
     }
 
     #[test]
@@ -727,6 +804,9 @@ mod tests {
         }];
         assert!(merge_missing_default_profiles(&mut profiles));
         assert!(profiles.iter().any(
+            |profile| profile.provider == Provider::DeepSeek && profile.id == "deepseek-flash"
+        ));
+        assert!(profiles.iter().any(
             |profile| profile.provider == Provider::DeepSeek && profile.id == "deepseek-v4-pro"
         ));
         assert!(profiles.iter().any(
@@ -735,6 +815,52 @@ mod tests {
         assert!(profiles
             .iter()
             .any(|profile| profile.provider == Provider::Codex && profile.id == "custom"));
+    }
+
+    #[test]
+    fn legacy_on_disk_registry_gains_deepseek_flash_after_merge() {
+        // Mirrors an install created before the rename: Pro plus the retired
+        // flash id, with no `deepseek-flash` profile yet.
+        let mut profiles = vec![
+            ModelProfile {
+                provider: Provider::DeepSeek,
+                id: "deepseek-v4-pro".into(),
+                upstream_model: "deepseek-v4-pro".into(),
+                context_window: 1_000_000,
+                supports_fast: false,
+                default_small_fast: false,
+            },
+            ModelProfile {
+                provider: Provider::DeepSeek,
+                id: "deepseek-v4-flash".into(),
+                upstream_model: "deepseek-v4-flash".into(),
+                context_window: 1_000_000,
+                supports_fast: false,
+                default_small_fast: true,
+            },
+        ];
+        assert!(merge_missing_default_profiles(&mut profiles));
+        assert!(profiles.iter().any(
+            |profile| profile.provider == Provider::DeepSeek && profile.id == "deepseek-flash"
+        ));
+
+        let registry = ModelRegistry::from_profiles(profiles);
+        // The newly merged profile is addressable, and the legacy ids that are
+        // still on disk keep resolving to a working upstream model.
+        assert_eq!(
+            registry
+                .resolve(Provider::DeepSeek, "deepseek-flash[1m]")
+                .unwrap()
+                .upstream_model,
+            "deepseek-flash"
+        );
+        assert_eq!(
+            registry
+                .resolve(Provider::DeepSeek, "deepseek-v4-flash")
+                .unwrap()
+                .upstream_model,
+            "deepseek-v4-flash"
+        );
     }
 
     #[test]

@@ -74,7 +74,7 @@ Recommended setup: leave app users on `auto`; use `http` for restricted networks
 - Hosted web search maps to Codex `web_search`.
 - Unsupported reasoning stream events are dropped.
 - Image blocks inside tool results become text placeholders because this proxy serializes function outputs as text for Codex compatibility.
-- DeepSeek does not use the Codex translator. It receives the Anthropic request body directly after model resolution, local rejection of unsupported image/document blocks, and normalization of `output_config.effort` to DeepSeek's effective effort scale.
+- DeepSeek does not use the Codex translator. It receives the Anthropic request body directly after model resolution, substitution of unsupported `document` blocks with text placeholders, and normalization of `output_config.effort` to DeepSeek's effective effort scale.
 
 ### Claude Code To Responses Mapping
 
@@ -108,9 +108,11 @@ Claude Code ultracode is client-side dynamic-workflow orchestration, not a Respo
 | Claude Code / Anthropic field | DeepSeek field | Notes |
 | --- | --- | --- |
 | `model` | `model` | Claude-facing aliases are resolved before forwarding, then the configured DeepSeek upstream model is sent. |
+| model aliases | resolved locally | The DeepSeek route defaults to `deepseek-flash` for primary, sonnet, and small traffic. Stale Codex names (`gpt-*`) and the retired flash aliases (`deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`) resolve onto `deepseek-flash`; an explicit `deepseek-v4-pro` still resolves to Pro until DeepSeek retires it. |
 | messages, system, tools, tool choice, output config | same Anthropic field | Forwarded directly to DeepSeek's Anthropic-compatible API, except `output_config.effort` is normalized. |
 | `output_config.effort` | `output_config.effort` | `auto` remains `auto`; `max` and `ultracode` become `max`; all other string effort values become `high`; absent or non-string values are left unchanged. |
-| image/document blocks | rejected locally | DeepSeek's Anthropic-compatible API does not support those content blocks. |
+| image blocks | `image` | Forwarded unchanged to vision-capable DeepSeek models (`deepseek-flash`). DeepSeek rejects images outside `user` messages, so an image in a `system` or `assistant` message still fails upstream. |
+| document blocks | replaced with a text placeholder | DeepSeek's Anthropic-compatible API does not document `document` support, so each one is replaced by text telling the model the content was not forwarded and to say so. A message whose content is nothing but `document` blocks is rejected with `400`, since there would be no text, image, or tool content left to forward. |
 | `stream` | `stream` | Streaming SSE and non-streaming JSON are passed through. |
 
 ### Context Compaction

@@ -381,7 +381,7 @@ async fn dynamic_provider_switch_uses_same_local_server() {
     assert_eq!(deepseek_state.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         deepseek_state.last_model.lock().unwrap().as_deref(),
-        Some("deepseek-v4-pro")
+        Some("deepseek-flash")
     );
     assert_eq!(server.addr, addr);
     server.stop().await;
@@ -571,7 +571,7 @@ async fn deepseek_non_streaming_request_is_forwarded_to_anthropic_messages() {
     let response = client
         .post(format!("http://{}/v1/messages", server.addr))
         .json(&serde_json::json!({
-            "model": "deepseek-v4-pro[1m]",
+            "model": "deepseek-flash[1m]",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "hello"}]
@@ -585,11 +585,38 @@ async fn deepseek_non_streaming_request_is_forwarded_to_anthropic_messages() {
     assert_eq!(state.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         state.last_model.lock().unwrap().as_deref(),
-        Some("deepseek-v4-pro")
+        Some("deepseek-flash")
     );
     assert_eq!(
         state.last_key.lock().unwrap().as_deref(),
         Some("deepseek-secret")
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn deepseek_legacy_flash_alias_is_rewritten_before_forwarding() {
+    let state = Arc::new(DeepSeekMockState::default());
+    let upstream = start_mock_upstream(mock_deepseek_json_app(state.clone())).await;
+    let (config, paths) = test_deepseek_config(upstream).await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/messages", server.addr))
+        .json(&serde_json::json!({
+            "model": "deepseek-v4-flash[1m]",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        state.last_model.lock().unwrap().as_deref(),
+        Some("deepseek-flash")
     );
     server.stop().await;
 }
@@ -604,7 +631,7 @@ async fn deepseek_effort_is_normalized_before_forwarding() {
     let response = client
         .post(format!("http://{}/v1/messages", server.addr))
         .json(&serde_json::json!({
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-flash",
             "max_tokens": 64,
             "stream": false,
             "messages": [{"role": "user", "content": "hello"}],
@@ -649,7 +676,7 @@ async fn deepseek_stale_codex_model_is_rewritten_before_forwarding() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         state.last_model.lock().unwrap().as_deref(),
-        Some("deepseek-v4-pro")
+        Some("deepseek-flash")
     );
     server.stop().await;
 }
@@ -664,7 +691,7 @@ async fn deepseek_streaming_response_is_passed_through() {
     let response = client
         .post(format!("http://{}/v1/messages", server.addr))
         .json(&serde_json::json!({
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "max_tokens": 64,
             "stream": true,
             "messages": [{"role": "user", "content": "hello"}]
@@ -697,7 +724,7 @@ async fn deepseek_upstream_errors_are_preserved() {
         let response = client
             .post(format!("http://{}/v1/messages", server.addr))
             .json(&serde_json::json!({
-                "model": "deepseek-v4-pro",
+                "model": "deepseek-flash",
                 "max_tokens": 1,
                 "messages": [{"role": "user", "content": "hello"}]
             }))
@@ -916,7 +943,7 @@ async fn deepseek_missing_api_key_is_local_unauthorized() {
     let response = client
         .post(format!("http://{}/v1/messages", server.addr))
         .json(&serde_json::json!({
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-flash",
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "hello"}]
         }))
@@ -1324,7 +1351,7 @@ async fn mock_deepseek_json_response(
                 "id": "msg_deepseek",
                 "type": "message",
                 "role": "assistant",
-                "model": "deepseek-v4-pro",
+                "model": "deepseek-flash",
                 "content": [{"type": "text", "text": "hello from deepseek"}],
                 "stop_reason": "end_turn",
                 "stop_sequence": null,
@@ -1352,7 +1379,7 @@ fn mock_deepseek_streaming_app(state: Arc<DeepSeekMockState>) -> Router {
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "text/event-stream")
                     .body(Body::from(
-                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_deepseek\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}}\n\n\
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_deepseek\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}}\n\n\
                          event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
                          event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello from deepseek stream\"}}\n\n\
                          event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
