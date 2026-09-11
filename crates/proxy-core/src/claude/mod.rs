@@ -355,6 +355,7 @@ pub fn finish_shim_update(state_path: &Path, shim_path: &Path) -> Result<ClaudeS
             ))
         })?;
     let captured = capture_original_claude(shim_path)?;
+    validate_real_claude_path(shim_path, &captured.real_claude_path)?;
     let previous = &states[index];
     let updated = ClaudeShimState {
         original: captured.original,
@@ -401,6 +402,7 @@ fn install_one_shim(
         let captured = capture_original_claude(&shim_path)?;
         (captured.original, captured.real_claude_path, false)
     };
+    validate_real_claude_path(&shim_path, &real_claude_path)?;
 
     let state = ClaudeShimState {
         version: SHIM_STATE_VERSION,
@@ -451,6 +453,19 @@ pub fn read_shim_states(path: &Path) -> Result<Vec<ClaudeShimState>> {
 }
 
 pub fn path_contains_marker(path: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    // A managed shim is always a regular launcher file. Following a symlink
+    // here can misclassify its target as the shim and cause later writes to
+    // overwrite the real Claude executable through that symlink.
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(false);
+    }
+
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
@@ -735,6 +750,17 @@ fn capture_original_claude(path: &Path) -> Result<CapturedOriginal> {
         "Claude command at {} is not a file or symlink",
         path.display()
     )))
+}
+
+fn validate_real_claude_path(shim_path: &Path, real_claude_path: &Path) -> Result<()> {
+    if real_claude_path == shim_path || path_contains_marker(real_claude_path)? {
+        return Err(ProxyError::Config(format!(
+            "Claude executable at {} is another managed shim; repair the native Claude installation before installing the launcher at {}",
+            real_claude_path.display(),
+            shim_path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn resolve_symlink_target(path: &Path, target: &Path) -> Result<PathBuf> {
@@ -1068,6 +1094,52 @@ mod tests {
 
         restore_shim(&state_path).unwrap();
         assert_eq!(fs::read_link(&shim_path).unwrap(), second_version);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn marker_detection_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("claude-real");
+        fs::write(&target, format!("#!/bin/sh\n# {SHIM_MARKER}\n")).unwrap();
+        let link = dir.path().join("claude");
+        symlink(&target, &link).unwrap();
+
+        assert!(!path_contains_marker(&link).unwrap());
+        assert!(path_contains_marker(&target).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_shim_rejects_a_managed_shim_as_the_real_executable() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let corrupt_target = dir.path().join("claude-real");
+        let original_contents = format!("#!/bin/sh\n# {SHIM_MARKER}\n");
+        fs::write(&corrupt_target, &original_contents).unwrap();
+        let shim_path = dir.path().join("claude");
+        symlink(&corrupt_target, &shim_path).unwrap();
+
+        let error = install_shim(
+            &dir.path().join("claude-shim.json"),
+            &ClaudeShimInstallOptions {
+                app_pid: 42,
+                helper_path: dir.path().join("cc-codex-proxy"),
+                claude_path: Some(shim_path.clone()),
+                settings: ClaudeSettingsOptions::default(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("another managed shim"));
+        assert_eq!(fs::read_link(&shim_path).unwrap(), corrupt_target);
+        assert_eq!(
+            fs::read_to_string(&corrupt_target).unwrap(),
+            original_contents
+        );
     }
 
     #[test]
