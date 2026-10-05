@@ -319,8 +319,8 @@ async fn cmd_auth(args: AuthCommand) -> Result<()> {
             println!("Storage: {}", manager.storage_label());
         }
         AuthSubcommand::Status(args) => match args.provider {
-            Provider::Codex => match manager.status().await? {
-                Some(auth) => {
+            Provider::Codex => match manager.get_auth().await {
+                Ok(auth) => {
                     println!("Provider: codex");
                     println!("Authenticated: yes");
                     println!("Storage: {}", manager.storage_label());
@@ -329,9 +329,10 @@ async fn cmd_auth(args: AuthCommand) -> Result<()> {
                     }
                     println!("ExpiresAtMs: {}", auth.expires_at_ms);
                 }
-                None => {
+                Err(error) => {
                     println!("Provider: codex");
                     println!("Authenticated: no");
+                    println!("AuthError: {error}");
                     std::process::exit(1);
                 }
             },

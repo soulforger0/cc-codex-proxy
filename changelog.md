@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-05 AEDT - v1.1.3 Codex model and OAuth fixes
+
+- Update the advertised Codex client version to `0.160.0`: the subscription backend rejects GPT-6.1 Sol under the previous `0.144.0-alpha.4` identity, even for an account with access. Verified Sol 6.1 and Luna 6 with live requests using the updated identity.
+- Default primary/Opus and Sonnet traffic to GPT-6.1 Sol, and Haiku/subagent traffic to GPT-6 Luna. Add GPT-6 Astra and GPT-6 Sol profiles and migrate existing stock GPT-5.6 routes.
+- Extend the Responses HTTP/WebSocket contract and reasoning-effort mapping to GPT-6, including supported fallback efforts for Sol 6.1 and Astra.
+- Reload OAuth credentials after re-login, atomically replace token files, and report expired refresh tokens as authentication errors with recovery instructions. Stop repeatedly refreshing rejected credentials and keep the app’s authentication status in sync with the running proxy.
+
 ## 2026-09-11 CST - v1.1.2 DeepSeek vision support
 
 - Forward `image` content blocks to DeepSeek, whose Anthropic-compatible API now accepts them on vision-capable models, instead of rejecting the request. Sessions that previously failed on a historical image no longer break on every later turn.

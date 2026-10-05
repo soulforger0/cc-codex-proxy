@@ -336,7 +336,29 @@ fn is_claude_primary_model_alias(model: &str) -> bool {
 }
 
 pub fn default_profiles() -> Vec<ModelProfile> {
-    vec![
+    let mut profiles = vec![];
+    for provider in [Provider::Codex, Provider::CustomOpenAI] {
+        for (model, codex_context, small) in [
+            ("gpt-6.1-sol", 373_000, false),
+            ("gpt-6-astra", 272_000, false),
+            ("gpt-6-sol", 272_000, false),
+            ("gpt-6-luna", 272_000, true),
+        ] {
+            profiles.push(ModelProfile {
+                provider,
+                id: model.into(),
+                upstream_model: model.into(),
+                context_window: if provider == Provider::Codex {
+                    codex_context
+                } else {
+                    1_050_000
+                },
+                supports_fast: true,
+                default_small_fast: small,
+            });
+        }
+    }
+    profiles.extend([
         ModelProfile {
             provider: Provider::Codex,
             id: "gpt-5.6-sol".into(),
@@ -449,7 +471,8 @@ pub fn default_profiles() -> Vec<ModelProfile> {
             supports_fast: true,
             default_small_fast: true,
         },
-    ]
+    ]);
+    profiles
 }
 
 fn merge_missing_default_profiles(profiles: &mut Vec<ModelProfile>) -> bool {
@@ -864,10 +887,10 @@ mod tests {
     }
 
     #[test]
-    fn merged_legacy_registry_prefers_gpt_5_6_alias_defaults() {
+    fn merged_legacy_registry_prefers_current_alias_defaults() {
         let mut profiles = default_profiles()
             .into_iter()
-            .filter(|profile| !profile.id.starts_with("gpt-5.6-"))
+            .filter(|profile| !profile.id.starts_with("gpt-6"))
             .collect::<Vec<_>>();
         profiles.extend([
             ModelProfile {
@@ -923,5 +946,29 @@ mod tests {
         assert_eq!(resolved.upstream_model, "llama-3.3-70b");
         assert_eq!(resolved.public_id, "llama-3.3-70b");
         assert_eq!(resolved.context_window, 128_000);
+    }
+
+    #[test]
+    fn exposes_gpt_6_models_and_routes_current_tier_aliases() {
+        let registry = ModelRegistry::from_profiles(default_profiles());
+        for provider in [Provider::Codex, Provider::CustomOpenAI] {
+            for model in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+                let resolved = registry
+                    .resolve(provider, &format!("{model}-fast[1m]"))
+                    .unwrap();
+                assert_eq!(resolved.upstream_model, model);
+                assert_eq!(resolved.service_tier.as_deref(), Some("priority"));
+            }
+            for (alias, model) in [
+                (DEFAULT_PUBLIC_PRIMARY_MODEL, "gpt-6.1-sol"),
+                (DEFAULT_PUBLIC_SONNET_MODEL, "gpt-6.1-sol"),
+                (DEFAULT_PUBLIC_SMALL_MODEL, "gpt-6-luna"),
+            ] {
+                assert_eq!(
+                    registry.resolve(provider, alias).unwrap().upstream_model,
+                    model
+                );
+            }
+        }
     }
 }

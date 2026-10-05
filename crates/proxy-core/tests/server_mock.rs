@@ -81,6 +81,101 @@ async fn non_streaming_message_accumulates_mock_upstream_sse() {
     server.stop().await;
 }
 
+struct ExpiredRefresh {
+    calls: AtomicUsize,
+}
+
+#[tokio::test]
+async fn gpt_6_subscription_requests_use_current_client_identity_without_model_downgrade() {
+    let upstream = start_mock_upstream(Router::new().route("/codex", post(
+        |headers: HeaderMap, Json(body): Json<serde_json::Value>| async move {
+            // Reproduce the account rejection observed with the old identity.
+            if headers.get("version").and_then(|value| value.to_str().ok()) == Some("0.144.0-alpha.4") {
+                return Response::builder().status(StatusCode::BAD_REQUEST).body(Body::from(
+                    r#"{"detail":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}"#
+                )).unwrap();
+            }
+            assert_eq!(headers.get("version").unwrap(), "0.160.0");
+            assert!(headers.get("user-agent").unwrap().to_str().unwrap().starts_with("codex_cli_rs/0.160.0 "));
+            assert!(matches!(body["model"].as_str(), Some("gpt-6.1-sol" | "gpt-6-luna")));
+            mock_success_sse_body()
+        }
+    ))).await;
+    let (config, paths) = test_config(upstream, "/codex").await;
+    let server = serve(config, paths, test_auth()).await.unwrap();
+    for model in ["claude-opus-4-8", "claude-sonnet-4-5", "claude-haiku-4-5"] {
+        assert_eq!(
+            send_basic_message(server.addr, model).await.status(),
+            StatusCode::OK
+        );
+    }
+    server.stop().await;
+}
+
+#[async_trait]
+impl TokenRefreshClient for ExpiredRefresh {
+    async fn refresh(&self, _: &str) -> proxy_core::error::Result<TokenResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(proxy_core::error::ProxyError::Upstream {
+            status: StatusCode::UNAUTHORIZED,
+            body: serde_json::json!({"error":{"code":"refresh_token_expired"}}).to_string(),
+            retry_after: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn expired_oauth_reports_login_required_and_recovers_without_restart() {
+    let upstream = start_mock_upstream(mock_success_app()).await;
+    let (config, paths) = test_config(upstream, "/codex").await;
+    let store = Arc::new(MemoryTokenStore::with(StoredAuth {
+        access: "expired-access".into(),
+        refresh: "expired-refresh".into(),
+        expires_at_ms: 1,
+        account_id: None,
+    }));
+    let refresh = Arc::new(ExpiredRefresh {
+        calls: AtomicUsize::new(0),
+    });
+    let auth = AuthManager::new(store.clone(), refresh.clone());
+    let server = serve(config, paths, auth).await.unwrap();
+    for _ in 0..2 {
+        let response = send_basic_message(server.addr, "claude-opus-4-8").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["type"], "authentication_error");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("auth login"));
+        let status: serde_json::Value = reqwest::Client::new()
+            .get(format!("http://{}/admin/status", server.addr))
+            .header("x-cc-codex-admin-token", "test-admin-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(status["auth"].is_null());
+    }
+    assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    proxy_core::auth::TokenStore::save(
+        store.as_ref(),
+        &StoredAuth {
+            access: "new-login".into(),
+            refresh: "new-refresh".into(),
+            expires_at_ms: i64::MAX,
+            account_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let response = send_basic_message(server.addr, "claude-opus-4-8").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    server.stop().await;
+}
+
 #[tokio::test]
 async fn count_tokens_is_local() {
     let state = Arc::new(CodexSessionCaptureState::default());

@@ -4,9 +4,9 @@ import SwiftUI
 
 private let claudePublicPrimaryModel = "claude-opus-4-8"
 private let claudePublicSmallModel = "claude-haiku-4-5"
-private let defaultOpenAIPrimaryModel = "gpt-5.6-sol[1m]"
-private let defaultOpenAISonnetModel = "gpt-5.6-terra[1m]"
-private let defaultOpenAISmallModel = "gpt-5.6-luna[1m]"
+private let defaultOpenAIPrimaryModel = "gpt-6.1-sol[1m]"
+private let defaultOpenAISonnetModel = "gpt-6.1-sol[1m]"
+private let defaultOpenAISmallModel = "gpt-6-luna[1m]"
 
 @MainActor
 final class ProxyAppModel: ObservableObject {
@@ -105,6 +105,14 @@ final class ProxyAppModel: ObservableObject {
         defer { isCheckingAuthStatus = false }
 
         do {
+            if provider == "codex", isRunning {
+                let output = try await runCLI(["admin", "status", "--port", "\(port)"])
+                let status = try JSONDecoder().decode(ProxyAdminStatus.self, from: Data(output.utf8))
+                if status.provider == "codex" {
+                    applyRuntimeAuthStatus(status)
+                    return
+                }
+            }
             let output = try await runCLI(["auth", "status", "--provider", provider], allowFailure: true)
             let authenticated = provider == "custom-openai"
                 ? !customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -803,7 +811,7 @@ final class ProxyAppModel: ObservableObject {
                 authDetailText = "Configure a base URL. API key is optional."
                 isCustomOpenAIKeyInputExpanded = true
             } else {
-                authDetailText = "Login to complete ChatGPT OAuth."
+                authDetailText = value(for: "AuthError", in: output) ?? "Login to complete ChatGPT OAuth."
             }
             return
         }
@@ -838,11 +846,31 @@ final class ProxyAppModel: ObservableObject {
             let data = Data(output.utf8)
             let status = try JSONDecoder().decode(ProxyAdminStatus.self, from: data)
             applyTransportStatus(status.transport)
+            if provider == "codex", status.provider == "codex" {
+                applyRuntimeAuthStatus(status)
+            }
         } catch {
             transportDetailText = error.localizedDescription
             transportBadgeText = "Unknown"
             transportConfiguredMode = ""
             transportCurrentMethod = nil
+        }
+    }
+
+    func applyRuntimeAuthStatus(_ status: ProxyAdminStatus) {
+        guard let auth = status.auth else {
+            applyAuthStatus(from: "", authenticated: false)
+            authDetailText = "ChatGPT session is unavailable or expired. Sign in again to continue."
+            return
+        }
+        // An expired access token can still be renewed using its refresh token.
+        // Do not claim it is verified until a request has refreshed it.
+        if auth.expiresAtMs <= Int64(Date().timeIntervalSince1970 * 1_000) {
+            isAuthenticated = false
+            authStatusText = "OAuth needs refresh"
+            authDetailText = "The next request will refresh the session. Sign in again if it has expired."
+        } else {
+            applyAuthStatus(from: "Storage: \(auth.storage)", authenticated: true)
         }
     }
 
@@ -1023,6 +1051,12 @@ final class ProxyAppModel: ObservableObject {
 struct ProxyAdminStatus: Decodable {
     let provider: String?
     let transport: ProxyTransportStatus?
+    let auth: ProxyAuthStatus?
+}
+
+struct ProxyAuthStatus: Decodable {
+    let expiresAtMs: Int64
+    let storage: String
 }
 
 struct ProxyAdminRouteUpdate: Decodable {

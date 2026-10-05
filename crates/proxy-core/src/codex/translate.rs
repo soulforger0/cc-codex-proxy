@@ -422,6 +422,7 @@ fn reasoning_from_request(
                 .and_then(map_thinking_budget)
         });
     let effort = effort.or(responses_lite.then_some("medium"));
+    let effort = effort.map(|effort| normalize_effort(effort, &resolved.upstream_model));
     effort.map(|effort| {
         if responses_lite {
             json!({ "effort": effort, "context": "all_turns" })
@@ -431,14 +432,29 @@ fn reasoning_from_request(
     })
 }
 
-fn is_responses_lite_model(model: &str) -> bool {
-    model.starts_with("gpt-5.6-")
+pub(crate) fn is_responses_lite_model(model: &str) -> bool {
+    model.starts_with("gpt-5.6-") || is_gpt_6_model(model)
+}
+
+fn is_gpt_6_model(model: &str) -> bool {
+    model.starts_with("gpt-6-") || model.starts_with("gpt-6.1-")
+}
+
+fn normalize_effort<'a>(effort: &'a str, model: &str) -> &'a str {
+    if is_gpt_6_model(model)
+        && (effort == "minimal"
+            || (effort == "none" && matches!(model, "gpt-6.1-sol" | "gpt-6-astra")))
+    {
+        "low"
+    } else {
+        effort
+    }
 }
 
 fn map_effort(effort: &str, upstream_model: &str) -> Option<&'static str> {
     match effort {
         "auto" => None,
-        "max" | "ultracode" if upstream_model.starts_with("gpt-5.6-") => Some("max"),
+        "max" | "ultracode" if is_responses_lite_model(upstream_model) => Some("max"),
         "max" | "ultracode" => Some("xhigh"),
         "none" => Some("none"),
         "minimal" => Some("minimal"),
@@ -1177,5 +1193,60 @@ mod tests {
             text["format"]["schema"]["required"],
             json!(["answer", "confidence"])
         );
+    }
+
+    #[test]
+    fn gpt_6_uses_responses_lite_and_supported_reasoning_efforts() {
+        let mut req: AnthropicRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-8", "messages": [{"role":"user", "content":"hello"}],
+            "tools": [{"name":"Read", "input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]
+        })).unwrap();
+        for model in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+            for effort in [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultracode",
+            ] {
+                req.output_config = Some(json!({"effort": effort}));
+                let translated =
+                    translate_request(&req, &resolved_for(model), Some("session")).unwrap();
+                let expected = match effort {
+                    "none" if matches!(model, "gpt-6.1-sol" | "gpt-6-astra") => "low",
+                    "minimal" => "low",
+                    "ultracode" => "max",
+                    other => other,
+                };
+                assert_eq!(
+                    translated.reasoning.as_ref().unwrap()["effort"],
+                    expected,
+                    "{model}: {effort}"
+                );
+                assert_eq!(
+                    translated.reasoning.as_ref().unwrap()["context"],
+                    "all_turns"
+                );
+                assert_eq!(translated.input[0]["type"], "additional_tools");
+                assert_eq!(translated.input[0]["tools"][0]["name"], "Read");
+                assert!(translated.tools.is_none());
+                assert_eq!(translated.prompt_cache_key.as_deref(), Some("session"));
+            }
+            req.output_config = None;
+            req.thinking = Some(json!({"budget_tokens":0}));
+            let translated = translate_request(&req, &resolved_for(model), None).unwrap();
+            assert_eq!(
+                translated.reasoning.as_ref().unwrap()["effort"],
+                if matches!(model, "gpt-6.1-sol" | "gpt-6-astra") {
+                    "low"
+                } else {
+                    "none"
+                }
+            );
+            req.thinking = None;
+        }
     }
 }

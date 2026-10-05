@@ -85,64 +85,101 @@ impl TokenRefreshClient for OAuthRefreshClient {
 pub struct AuthManager {
     store: Arc<dyn TokenStore>,
     refresh_client: Arc<dyn TokenRefreshClient>,
-    cached: Arc<Mutex<Option<StoredAuth>>>,
+    cached: Arc<Mutex<CachedAuth>>,
 }
+
+#[derive(Default)]
+struct CachedAuth {
+    current: Option<StoredAuth>,
+    requires_login: bool,
+}
+
+const LOGIN_REQUIRED: &str = "ChatGPT session has expired or been revoked. Sign in again in CC Codex Proxy, or run `cc-codex-proxy auth login`.";
 
 impl AuthManager {
     pub fn new(store: Arc<dyn TokenStore>, refresh_client: Arc<dyn TokenRefreshClient>) -> Self {
         Self {
             store,
             refresh_client,
-            cached: Arc::new(Mutex::new(None)),
+            cached: Arc::new(Mutex::new(CachedAuth::default())),
         }
     }
 
     pub async fn get_auth(&self) -> Result<StoredAuth> {
-        let mut guard = self.cached.lock().await;
-        if guard.is_none() {
-            *guard = self.store.load().await?;
-        }
-        let current = guard.clone().ok_or_else(|| {
-            ProxyError::NotAuthenticated("run `cc-codex-proxy auth login` first".into())
-        })?;
-        if !current.is_expiring(now_ms(), REFRESH_MARGIN_MS) {
-            return Ok(current);
-        }
-        let refreshed = self.refresh_current(&current).await?;
-        *guard = Some(refreshed.clone());
-        Ok(refreshed)
+        self.resolve_auth(None).await
     }
 
     pub async fn force_refresh(&self) -> Result<StoredAuth> {
+        let current = self
+            .status()
+            .await?
+            .ok_or_else(|| ProxyError::NotAuthenticated(LOGIN_REQUIRED.into()))?;
+        self.refresh_after_rejection(&current).await
+    }
+
+    /// Reuse credentials already replaced by a concurrent refresh or re-login.
+    pub async fn refresh_after_rejection(&self, rejected: &StoredAuth) -> Result<StoredAuth> {
+        self.resolve_auth(Some(rejected)).await
+    }
+
+    async fn resolve_auth(&self, rejected: Option<&StoredAuth>) -> Result<StoredAuth> {
         let mut guard = self.cached.lock().await;
-        if guard.is_none() {
-            *guard = self.store.load().await?;
+        self.reload(&mut guard).await?;
+        if guard.requires_login {
+            return Err(ProxyError::NotAuthenticated(LOGIN_REQUIRED.into()));
         }
-        let current = guard.clone().ok_or_else(|| {
+        let current = guard.current.clone().ok_or_else(|| {
             ProxyError::NotAuthenticated("run `cc-codex-proxy auth login` first".into())
         })?;
-        let refreshed = self.refresh_current(&current).await?;
-        *guard = Some(refreshed.clone());
+        let force = rejected.is_some_and(|rejected| rejected == &current);
+        if !force && !current.is_expiring(now_ms(), REFRESH_MARGIN_MS) {
+            return Ok(current);
+        }
+        let refreshed = match self.refresh_current(&current).await {
+            Ok(auth) => auth,
+            Err(error) if refresh_requires_login(&error) => {
+                guard.requires_login = true;
+                return Err(ProxyError::NotAuthenticated(LOGIN_REQUIRED.into()));
+            }
+            Err(error) => return Err(error),
+        };
+        guard.current = Some(refreshed.clone());
         Ok(refreshed)
+    }
+
+    async fn reload(&self, cached: &mut CachedAuth) -> Result<()> {
+        let loaded = self.store.load().await?;
+        if cached.current != loaded {
+            cached.current = loaded;
+            cached.requires_login = false;
+        }
+        Ok(())
     }
 
     pub async fn persist_initial(&self, tokens: TokenResponse) -> Result<StoredAuth> {
         tokens.validate_initial()?;
         let auth = stored_auth_from_token_response(tokens, None)?;
+        let mut guard = self.cached.lock().await;
         self.store.save(&auth).await?;
-        *self.cached.lock().await = Some(auth.clone());
+        *guard = CachedAuth {
+            current: Some(auth.clone()),
+            requires_login: false,
+        };
         Ok(auth)
     }
 
     pub async fn status(&self) -> Result<Option<StoredAuth>> {
-        let loaded = self.store.load().await?;
-        *self.cached.lock().await = loaded.clone();
-        Ok(loaded)
+        let mut guard = self.cached.lock().await;
+        self.reload(&mut guard).await?;
+        Ok((!guard.requires_login)
+            .then(|| guard.current.clone())
+            .flatten())
     }
 
     pub async fn logout(&self) -> Result<()> {
+        let mut guard = self.cached.lock().await;
         self.store.clear().await?;
-        *self.cached.lock().await = None;
+        *guard = CachedAuth::default();
         Ok(())
     }
 
@@ -151,11 +188,46 @@ impl AuthManager {
     }
 
     async fn refresh_current(&self, current: &StoredAuth) -> Result<StoredAuth> {
-        let response = self.refresh_client.refresh(&current.refresh).await?;
+        let response = self.refresh_client.refresh(&current.refresh).await;
+        // A browser login or logout may complete while the refresh is in flight.
+        // Do not overwrite those credentials with a result for the old session.
+        let stored = self.store.load().await?.ok_or_else(|| {
+            ProxyError::NotAuthenticated("run `cc-codex-proxy auth login` first".into())
+        })?;
+        if stored != *current {
+            return Ok(stored);
+        }
+        let response = response?;
         let auth = stored_auth_from_token_response(response, Some(current))?;
         self.store.save(&auth).await?;
         Ok(auth)
     }
+}
+
+fn refresh_requires_login(error: &ProxyError) -> bool {
+    let ProxyError::Upstream { status, body, .. } = error else {
+        return false;
+    };
+    if !matches!(status.as_u16(), 400 | 401 | 403) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return *status == http::StatusCode::UNAUTHORIZED;
+    };
+    let code = value
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("error").and_then(Value::as_str));
+    *status == http::StatusCode::UNAUTHORIZED
+        || matches!(
+            code,
+            Some(
+                "invalid_grant"
+                    | "refresh_token_expired"
+                    | "refresh_token_reused"
+                    | "refresh_token_invalidated"
+            )
+        )
 }
 
 fn stored_auth_from_token_response(
@@ -251,5 +323,135 @@ mod tests {
         assert_eq!(a.access, "new-access");
         assert_eq!(b.access, "new-access");
         assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn valid_auth(access: &str) -> StoredAuth {
+        StoredAuth {
+            access: access.into(),
+            refresh: "refresh".into(),
+            expires_at_ms: i64::MAX,
+            account_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn reloads_login_and_logout_from_another_process() {
+        let store = Arc::new(MemoryTokenStore::with(valid_auth("old")));
+        let refresh = Arc::new(CountingRefresh {
+            calls: AtomicUsize::new(0),
+        });
+        let manager = AuthManager::new(store.clone(), refresh.clone());
+        assert_eq!(manager.get_auth().await.unwrap().access, "old");
+        store.save(&valid_auth("new-login")).await.unwrap();
+        assert_eq!(manager.get_auth().await.unwrap().access, "new-login");
+        store.clear().await.unwrap();
+        assert!(matches!(
+            manager.get_auth().await,
+            Err(ProxyError::NotAuthenticated(_))
+        ));
+        assert_eq!(refresh.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_rejections_only_refresh_the_rejected_credentials_once() {
+        let old = valid_auth("old");
+        let refresh = Arc::new(CountingRefresh {
+            calls: AtomicUsize::new(0),
+        });
+        let manager = AuthManager::new(
+            Arc::new(MemoryTokenStore::with(old.clone())),
+            refresh.clone(),
+        );
+        let results =
+            futures_util::future::join_all((0..16).map(|_| manager.refresh_after_rejection(&old)))
+                .await;
+        assert!(results
+            .into_iter()
+            .all(|result| result.unwrap().access == "new-access"));
+        assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct FailingRefresh {
+        calls: AtomicUsize,
+        status: http::StatusCode,
+        body: &'static str,
+    }
+
+    #[async_trait]
+    impl TokenRefreshClient for FailingRefresh {
+        async fn refresh(&self, _: &str) -> Result<TokenResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProxyError::Upstream {
+                status: self.status,
+                body: self.body.into(),
+                retry_after: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_refresh_token_requires_login_and_recovers_after_external_login() {
+        let old = StoredAuth {
+            expires_at_ms: 1,
+            ..valid_auth("old")
+        };
+        let store = Arc::new(MemoryTokenStore::with(old));
+        let refresh = Arc::new(FailingRefresh {
+            calls: AtomicUsize::new(0),
+            status: http::StatusCode::UNAUTHORIZED,
+            body: r#"{"error":{"code":"refresh_token_expired","message":"Your session has expired. Please log in again."}}"#,
+        });
+        let manager = AuthManager::new(store.clone(), refresh.clone());
+        for _ in 0..3 {
+            let error = manager.get_auth().await.unwrap_err();
+            assert!(matches!(error, ProxyError::NotAuthenticated(_)));
+            assert!(error.to_string().contains("cc-codex-proxy auth login"));
+            assert_eq!(manager.status().await.unwrap(), None);
+        }
+        assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+        store.save(&valid_auth("new-login")).await.unwrap();
+        assert_eq!(manager.get_auth().await.unwrap().access, "new-login");
+        assert!(manager.status().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn transient_refresh_failure_does_not_require_relogin() {
+        let refresh = Arc::new(FailingRefresh {
+            calls: AtomicUsize::new(0),
+            status: http::StatusCode::SERVICE_UNAVAILABLE,
+            body: "temporarily unavailable",
+        });
+        let manager = AuthManager::new(
+            Arc::new(MemoryTokenStore::with(StoredAuth {
+                expires_at_ms: 1,
+                ..valid_auth("old")
+            })),
+            refresh.clone(),
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                manager.get_auth().await,
+                Err(ProxyError::Upstream { .. })
+            ));
+            assert!(manager.status().await.unwrap().is_some());
+        }
+        assert_eq!(refresh.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn invalid_grant_is_a_permanent_failure_but_invalid_client_is_not() {
+        for (code, expected) in [
+            ("invalid_grant", true),
+            ("refresh_token_reused", true),
+            ("refresh_token_invalidated", true),
+            ("invalid_client", false),
+        ] {
+            let error = ProxyError::Upstream {
+                status: http::StatusCode::BAD_REQUEST,
+                body: serde_json::json!({"error":code}).to_string(),
+                retry_after: None,
+            };
+            assert_eq!(refresh_requires_login(&error), expected, "{code}");
+        }
     }
 }

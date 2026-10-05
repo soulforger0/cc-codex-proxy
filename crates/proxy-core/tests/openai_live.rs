@@ -18,7 +18,7 @@ use std::{fs, sync::Arc};
 
 #[tokio::test]
 #[ignore = "uses local ChatGPT OAuth and calls the live Codex endpoint"]
-async fn live_codex_sol_terra_luna_and_plan_haiku() {
+async fn live_codex_current_tiers_and_plan_haiku() {
     let paths = AppPaths::discover().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let auth_file = temp.path().join("auth.json");
@@ -41,15 +41,15 @@ async fn live_codex_sol_terra_luna_and_plan_haiku() {
     let route = RouteSnapshot {
         id: "codex".into(),
         provider: proxy_core::config::Provider::Codex,
-        primary_model: "gpt-5.6-sol".into(),
-        sonnet_model: "gpt-5.6-terra".into(),
-        small_model: "gpt-5.6-luna".into(),
+        primary_model: "gpt-6.1-sol".into(),
+        sonnet_model: "gpt-6.1-sol".into(),
+        small_model: "gpt-6-luna".into(),
         context_window: 372_000,
     };
 
     for (alias, prompt) in [
         (DEFAULT_PUBLIC_PRIMARY_MODEL, "Reply exactly SOL_OK"),
-        (DEFAULT_PUBLIC_SONNET_MODEL, "Reply exactly TERRA_OK"),
+        (DEFAULT_PUBLIC_SONNET_MODEL, "Reply exactly SONNET_SOL_OK"),
         (
             DEFAULT_PUBLIC_SMALL_MODEL,
             "Design patch release plan. Reply exactly LUNA_PLAN_OK",
@@ -82,7 +82,7 @@ async fn live_codex_sol_terra_luna_and_plan_haiku() {
 
 #[tokio::test]
 #[ignore = "requires CCP_LIVE_CUSTOM_OPENAI_BASE_URL and calls a live custom Responses endpoint"]
-async fn live_custom_openai_sol_terra_luna() {
+async fn live_custom_openai_gpt_6_models() {
     let base_url = std::env::var("CCP_LIVE_CUSTOM_OPENAI_BASE_URL")
         .expect("CCP_LIVE_CUSTOM_OPENAI_BASE_URL is required");
     let temp = tempfile::tempdir().unwrap();
@@ -95,7 +95,7 @@ async fn live_custom_openai_sol_terra_luna() {
     )
     .unwrap();
 
-    for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+    for model in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
         let resolved = proxy_core::model::ResolvedModel {
             provider: proxy_core::config::Provider::CustomOpenAI,
             requested: model.into(),

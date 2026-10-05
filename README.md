@@ -82,6 +82,12 @@ flowchart LR
 | Transport fallback | In `auto` mode, both OpenAI-backed providers try WebSocket first and fall back to HTTP SSE when needed. |
 | Packaged helper | The SwiftUI app embeds the Rust/Tokio proxy helper at `CCCodexProxy.app/Contents/Helpers`. |
 
+## What's New In 1.1.3
+
+- Updated the Codex client identity to `0.160.0`, fixing GPT-6.1 Sol requests rejected by the subscription backend under the old client version.
+- Primary/Opus and Sonnet now default to `gpt-6.1-sol`; Haiku/subagents default to `gpt-6-luna`. Stock GPT-5.6 routes upgrade automatically.
+- Re-login updates the running proxy without a restart. Expired refresh tokens show a login instruction and the app reflects the proxy's authentication status.
+
 ## What's New In 1.1.2
 
 - DeepSeek now supports image input through the proxy. Image blocks are forwarded to DeepSeek's vision-capable model instead of failing the request, so a screenshot or image in the conversation no longer breaks every later turn.
@@ -202,9 +208,11 @@ cc-codex-proxy doctor
 cc-codex-proxy admin status
 ```
 
-When `serve` starts, it prints the local proxy URL, health URL, log path, and Claude Code environment variables for manual sessions. Codex and custom OpenAI profiles default to `gpt-5.6-sol` for primary/Opus traffic, `gpt-5.6-terra` for Sonnet, and `gpt-5.6-luna` for small/Haiku/subagent traffic. The DeepSeek route defaults all three tiers to `deepseek-flash`, which also handles image input; the retired `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` names still resolve to it. Custom endpoints use `CCP_CUSTOM_OPENAI_BASE_URL`, optional `CUSTOM_OPENAI_API_KEY`, and `CCP_CUSTOM_OPENAI_TRANSPORT=auto|websocket|http`.
+When `serve` starts, it prints the local proxy URL, health URL, log path, and Claude Code environment variables for manual sessions. Codex and custom OpenAI profiles default to `gpt-6.1-sol` for primary/Opus and Sonnet traffic, and `gpt-6-luna` for small/Haiku/subagent traffic. `gpt-6-astra` and the previous `gpt-6-sol` remain selectable, alongside the GPT-5.6 profiles. Existing stock Sol/Terra/Luna route defaults upgrade automatically; customized routes keep their selected models. The DeepSeek route defaults all three tiers to `deepseek-flash`, which also handles image input; the retired `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` names still resolve to it. Custom endpoints use `CCP_CUSTOM_OPENAI_BASE_URL`, optional `CUSTOM_OPENAI_API_KEY`, and `CCP_CUSTOM_OPENAI_TRANSPORT=auto|websocket|http`.
 
 ### v1.0 migration
+
+GPT-6.1 Sol requires a current Codex client identity on the subscription backend. The proxy now advertises `0.160.0` for both HTTP and WebSocket requests. If it reports that Sol 6.1 is unsupported with a ChatGPT account, check for a stale `CCP_CODEX_COMPAT_VERSION` override and restart the updated app. The same account can be rejected under the old `0.144.0-alpha.4` identity while succeeding under `0.160.0`.
 
 Custom OpenAI is Responses-only. Remove `custom_openai.protocol`, `CCP_CUSTOM_OPENAI_PROTOCOL`, and `--custom-openai-protocol`; point the base URL at a Responses-compatible server root, `/v1` base, or complete `/responses` endpoint. A legacy `chat-completions` config or protocol environment variable stops startup with migration guidance instead of silently switching protocols.
 
@@ -296,3 +304,5 @@ Keep reports sanitized. Do not post OAuth tokens, account identifiers, private p
 ## License
 
 MIT © Ling Li. See [LICENSE](LICENSE).
+
+If requests fail with `refresh_token_expired`, sign in again from the app or run `cc-codex-proxy auth login`. The running proxy reloads the saved credentials on its next request; a restart is unnecessary. Expired or revoked refresh tokens are reported as authentication errors with a sign-in instruction. The app reads authentication status from the running proxy, while standalone `auth status` refreshes expiring tokens before reporting success.

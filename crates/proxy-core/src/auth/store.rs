@@ -57,20 +57,23 @@ impl TokenStore for FileTokenStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut options = fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&self.path)?;
+        // Login runs in a separate process while the proxy reads this file.
+        // Replace it atomically so readers never see truncated credentials.
+        let parent = self
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            file.as_file()
+                .set_permissions(fs::Permissions::from_mode(0o600))?;
         }
         writeln!(file, "{}", serde_json::to_string_pretty(auth)?)?;
+        file.as_file().sync_all()?;
+        file.persist(&self.path).map_err(|error| error.error)?;
         Ok(())
     }
 

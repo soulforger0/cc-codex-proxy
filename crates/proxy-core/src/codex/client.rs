@@ -1,6 +1,6 @@
 use crate::{
     auth::AuthManager,
-    codex::translate::ResponsesRequest,
+    codex::translate::{is_responses_lite_model, ResponsesRequest},
     config::{
         codex_compat_version, compatible_openai_user_agent, CodexConfig, CodexTransport,
         CustomOpenAIConfig, DEFAULT_ORIGINATOR,
@@ -190,7 +190,7 @@ impl OpenAIResponsesClient {
                 if matches!(&response, Err(ProxyError::Upstream { status, .. }) if *status == StatusCode::UNAUTHORIZED)
                 {
                     warn!("Codex returned 401; forcing token refresh");
-                    let auth = auth_manager.force_refresh().await?;
+                    let auth = auth_manager.refresh_after_rejection(&auth).await?;
                     response = self
                         .post_with_access(
                             body,
@@ -653,10 +653,6 @@ fn websocket_create_payload(body: &ResponsesRequest) -> String {
     value.to_string()
 }
 
-fn is_responses_lite_model(model: &str) -> bool {
-    model.starts_with("gpt-5.6-")
-}
-
 async fn read_initial_websocket_events<S>(socket: &mut WebSocketStream<S>) -> Result<Vec<Message>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -978,16 +974,25 @@ mod tests {
 
     #[test]
     fn websocket_create_payload_carries_responses_lite_signal() {
-        let mut request = minimal_response_request();
-        request.model = "gpt-5.6-luna".into();
-        request.client_metadata = Some(json!({"thread_id": "thread-1"}));
-        let value = serde_json::from_str::<Value>(&websocket_create_payload(&request)).unwrap();
+        for model in [
+            "gpt-5.6-luna",
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+        ] {
+            let mut request = minimal_response_request();
+            request.model = model.into();
+            request.client_metadata = Some(json!({"thread_id": "thread-1"}));
+            let value = serde_json::from_str::<Value>(&websocket_create_payload(&request)).unwrap();
 
-        assert_eq!(
-            value["client_metadata"]["ws_request_header_x_openai_internal_codex_responses_lite"],
-            "true"
-        );
-        assert_eq!(value["client_metadata"]["thread_id"], "thread-1");
+            assert_eq!(
+                value["client_metadata"]
+                    ["ws_request_header_x_openai_internal_codex_responses_lite"],
+                "true"
+            );
+            assert_eq!(value["client_metadata"]["thread_id"], "thread-1");
+        }
     }
 
     #[test]

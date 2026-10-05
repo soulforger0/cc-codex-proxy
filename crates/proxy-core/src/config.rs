@@ -17,7 +17,9 @@ pub const DEFAULT_OAUTH_ISSUER: &str = "https://auth.openai.com";
 pub const DEFAULT_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const DEFAULT_ORIGINATOR: &str = "codex_cli_rs";
 pub const DEFAULT_PROXY_USER_AGENT_PRODUCT: &str = "cc-codex-proxy";
-pub const DEFAULT_CODEX_COMPAT_VERSION: &str = "0.144.0-alpha.4";
+// The subscription backend gates model access by the advertised client version.
+// GPT-6.1 Sol is rejected under the old 0.144 compatibility identity.
+pub const DEFAULT_CODEX_COMPAT_VERSION: &str = "0.160.0";
 pub const CODEX_COMPAT_VERSION_ENV: &str = "CCP_CODEX_COMPAT_VERSION";
 pub const OAUTH_CALLBACK_PORT: u16 = 1455;
 pub const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
@@ -26,9 +28,9 @@ pub const CUSTOM_OPENAI_API_KEY_ENV: &str = "CUSTOM_OPENAI_API_KEY";
 pub const DEFAULT_PUBLIC_PRIMARY_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_PUBLIC_SONNET_MODEL: &str = "claude-sonnet-4-5";
 pub const DEFAULT_PUBLIC_SMALL_MODEL: &str = "claude-haiku-4-5";
-pub const DEFAULT_CODEX_PRIMARY_MODEL: &str = "gpt-5.6-sol";
-pub const DEFAULT_CODEX_SONNET_MODEL: &str = "gpt-5.6-terra";
-pub const DEFAULT_CODEX_SMALL_MODEL: &str = "gpt-5.6-luna";
+pub const DEFAULT_CODEX_PRIMARY_MODEL: &str = "gpt-6.1-sol";
+pub const DEFAULT_CODEX_SONNET_MODEL: &str = "gpt-6.1-sol";
+pub const DEFAULT_CODEX_SMALL_MODEL: &str = "gpt-6-luna";
 pub const DEFAULT_DEEPSEEK_PUBLIC_PRIMARY_MODEL: &str = DEFAULT_PUBLIC_PRIMARY_MODEL;
 pub const DEFAULT_DEEPSEEK_PUBLIC_SMALL_MODEL: &str = DEFAULT_PUBLIC_SMALL_MODEL;
 pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 15_000;
@@ -435,6 +437,7 @@ impl AppConfig {
             Err(err) if err.kind() == ErrorKind::NotFound => AppConfig::default(),
             Err(err) => return Err(err.into()),
         };
+        cfg.upgrade_stock_openai_routes();
         cfg.apply_env()?;
         cfg.codex.originator = DEFAULT_ORIGINATOR.into();
         cfg.codex.user_agent = compatible_openai_user_agent();
@@ -447,6 +450,24 @@ impl AppConfig {
         let paths = AppPaths::discover()?;
         let cfg = Self::load(&paths)?;
         Ok((cfg, paths))
+    }
+
+    fn upgrade_stock_openai_routes(&mut self) {
+        for profile in &mut self.routing.profiles {
+            if matches!(profile.provider, Provider::Codex | Provider::CustomOpenAI)
+                && profile.primary_model.trim_end_matches("[1m]") == "gpt-5.6-sol"
+                && profile
+                    .sonnet_model
+                    .as_deref()
+                    .map(|model| model.trim_end_matches("[1m]"))
+                    == Some("gpt-5.6-terra")
+                && profile.small_model.trim_end_matches("[1m]") == "gpt-5.6-luna"
+            {
+                profile.primary_model = DEFAULT_CODEX_PRIMARY_MODEL.into();
+                profile.sonnet_model = Some(DEFAULT_CODEX_SONNET_MODEL.into());
+                profile.small_model = DEFAULT_CODEX_SMALL_MODEL.into();
+            }
+        }
     }
 
     pub fn active_provider(&self) -> Result<Provider> {
@@ -713,5 +734,33 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("Responses-compatible base URL"));
+    }
+
+    #[test]
+    fn upgrades_only_stock_openai_route_defaults() {
+        let mut config = AppConfig::default();
+        for profile in &mut config.routing.profiles {
+            if matches!(profile.provider, Provider::Codex | Provider::CustomOpenAI) {
+                profile.primary_model = "gpt-5.6-sol[1m]".into();
+                profile.sonnet_model = Some("gpt-5.6-terra[1m]".into());
+                profile.small_model = "gpt-5.6-luna[1m]".into();
+            }
+        }
+        let mut customized = config.routing.profiles[0].clone();
+        customized.id = "customized".into();
+        customized.primary_model = "gpt-6-astra".into();
+        config.routing.profiles.push(customized.clone());
+        config.upgrade_stock_openai_routes();
+        for profile in &config.routing.profiles {
+            if profile.id == "customized" {
+                assert_eq!(profile, &customized);
+            } else if profile.provider == Provider::DeepSeek {
+                assert_eq!(profile.primary_model, "deepseek-flash");
+            } else {
+                assert_eq!(profile.primary_model, "gpt-6.1-sol");
+                assert_eq!(profile.sonnet_model.as_deref(), Some("gpt-6.1-sol"));
+                assert_eq!(profile.small_model, "gpt-6-luna");
+            }
+        }
     }
 }
